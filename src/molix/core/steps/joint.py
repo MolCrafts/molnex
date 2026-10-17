@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 import torch
 
 from molix.autograd import Derivative
+from molix.compile import unwrap
 from molix.core.steps.eval import DefaultEvalStep
 from molix.core.steps.train import DefaultTrainStep
 from molix.frame import beside_labels
@@ -354,9 +355,8 @@ class _JointBodies:
 
     @staticmethod
     def _model(trainer: Trainer) -> Any:
-        """``trainer.model`` as the protocol object, under any compile wrapper."""
-        model = trainer.model
-        return getattr(model, "_orig_mod", model)
+        """``trainer.model`` as the protocol object, under any compile / DDP wrapper."""
+        return unwrap(trainer.model)
 
     def _derivative(self, objective: JointObjective, model: Any) -> Derivative:
         """The energy-and-derivatives op of a ``"forward"`` objective over *model*.

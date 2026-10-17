@@ -6,7 +6,8 @@
 returns the same type it was handed. :meth:`Compiler.explain` is the companion
 measurement: one call yields graph count, graph-break count, break reasons and
 the **source location** of each break, as a molnex-owned
-:class:`ExplainSummary`.
+:class:`ExplainSummary`. :func:`unwrap` is the one reader of the module under a
+compiled (or DDP / FSDP) wrapper.
 
 Two regimes (see ``docs/molix/explanation/throughput-and-compilation.md``):
 
@@ -46,6 +47,8 @@ from collections.abc import Callable
 from typing import Any, NamedTuple, cast
 
 import torch
+from torch._dynamo.eval_frame import OptimizedModule
+from torch.nn.parallel import DistributedDataParallel
 
 from molix import logger as _logger_mod
 
@@ -190,6 +193,38 @@ class ExplainSummary(NamedTuple):
     graph_break_count: int
     break_reasons: tuple[str, ...]
     break_sites: tuple[str, ...]
+
+
+def unwrap(module: torch.nn.Module) -> torch.nn.Module:
+    """The module under every ``torch.compile`` / DDP / FSDP wrapper.
+
+    ``torch.compile`` returns an ``OptimizedModule`` that holds the original
+    module as ``_orig_mod`` (and prefixes every ``state_dict`` key with it);
+    :class:`~torch.nn.parallel.DistributedDataParallel` and
+    :class:`~torch.distributed.fsdp.FullyShardedDataParallel` hold theirs as
+    ``module``. The wrappers nest in either order (``torch.compile(DDP(m))``
+    is how the Trainer stacks them), so this peels by type until the module
+    is plain. Every reader of a model's own attributes — the step prologue's
+    derivative op, the joint step's protocol primitives, a checkpoint's
+    ``state_dict`` — goes through here; a plain module is returned as is.
+
+    Args:
+        module: A module, possibly under compile / DDP / FSDP wrappers.
+
+    Returns:
+        The innermost plain module.
+    """
+    # Imported here, not at module scope: ``torch.distributed.fsdp`` costs a
+    # third of a second to import and nothing else in molix needs it.
+    from torch.distributed.fsdp import FullyShardedDataParallel
+
+    while True:
+        if isinstance(module, OptimizedModule):
+            module = module._orig_mod
+        elif isinstance(module, (DistributedDataParallel, FullyShardedDataParallel)):
+            module = module.module
+        else:
+            return module
 
 
 class Compiler:

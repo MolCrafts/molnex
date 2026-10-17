@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.compile import Compiler, mark_dynamic_batch
+from molix.compile import Compiler, mark_dynamic_batch, unwrap
 from molix.compile import logger as compile_logger
 
 
@@ -332,3 +332,17 @@ class TestMarkDynamicBatch:
         ns = (3, 5, 8, 4, 11, 7, 9, 6, 12, 2)
         for n in ns:
             compiled(make_batch(n, n + 1))
+
+
+class TestUnwrap:
+    """``unwrap`` reads through a ``torch.compile`` wrapper; a plain module is itself."""
+
+    def test_compiled_module_unwraps_to_its_module_and_a_plain_one_is_itself(self):
+        from torch._dynamo.eval_frame import OptimizedModule
+
+        inner = nn.Linear(2, 2)
+        compiled = torch.compile(inner)
+
+        assert isinstance(compiled, OptimizedModule)
+        assert unwrap(compiled) is inner
+        assert unwrap(inner) is inner

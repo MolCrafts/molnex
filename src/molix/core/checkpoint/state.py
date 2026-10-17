@@ -9,11 +9,12 @@ metrics/counter dict passed to hooks and steps.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
 
+from molix.compile import unwrap
 from molix.core.checkpoint.rng import capture_rng_states, restore_rng_states
 from molix.core.state import Path
 
@@ -21,6 +22,12 @@ from molix.core.state import Path
 @dataclass
 class Checkpoint:
     """Aggregate of all stateful objects needed for checkpoint resume.
+
+    The model's weights are read and written through
+    :func:`molix.compile.unwrap`, so a checkpoint is wrapper-agnostic: one
+    saved from a compiled or DDP run loads into a plain model (e.g. for eval)
+    and vice versa, with no ``_orig_mod.`` / ``module.`` key surgery at the
+    call site.
 
     Attributes:
         model: The ``nn.Module`` being trained (required).
@@ -45,28 +52,6 @@ class Checkpoint:
     best_metric_name: Path = ("eval", "loss")
 
     # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _unwrap_model(self) -> nn.Module:
-        """Return the underlying module, unwrapping torch.compile + DDP/FSDP.
-
-        ``torch.compile`` returns an ``OptimizedModule`` that holds the original
-        module as ``._orig_mod`` and whose ``state_dict()`` prefixes every key
-        with ``_orig_mod.``; DDP/FSDP expose theirs as ``.module``. Unwrapping
-        both — compile first, since ``torch.compile(DDP(model))`` nests in that
-        order — keeps checkpoints wrapper-agnostic: a checkpoint saved from a
-        compiled run loads cleanly into an uncompiled model (e.g. for eval) and
-        vice versa, with no key-prefix surgery at the call site.
-        """
-        model = self.model
-        if hasattr(model, "_orig_mod"):  # torch.compile OptimizedModule
-            model = model._orig_mod
-        if hasattr(model, "module"):  # DDP / FSDP
-            model = model.module
-        return cast(nn.Module, model)
-
-    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
 
@@ -84,7 +69,7 @@ class Checkpoint:
             "best_metric": self.best_metric,
             "best_metric_name": self.best_metric_name,
             "rng_states": capture_rng_states(),
-            "model_state_dict": self._unwrap_model().state_dict(),
+            "model_state_dict": unwrap(self.model).state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
         if self.lr_scheduler is not None:
@@ -108,7 +93,7 @@ class Checkpoint:
             stored = tuple(stored.split("/"))
         self.best_metric_name = stored
 
-        self._unwrap_model().load_state_dict(state_dict["model_state_dict"])
+        unwrap(self.model).load_state_dict(state_dict["model_state_dict"])
         self.optimizer.load_state_dict(state_dict["optimizer_state_dict"])
 
         if self.lr_scheduler is not None and "lr_scheduler_state_dict" in state_dict:

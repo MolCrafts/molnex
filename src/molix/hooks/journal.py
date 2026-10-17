@@ -19,7 +19,7 @@ background thread (:class:`_AsyncJournalWriter`) drains a queue, writing each
 record to the :class:`~molix.io.JournalWriter` only once its event reports
 ready (``event.query()``), and re-checking — without advancing past it — when
 it is not. The training loop therefore never blocks on the GPU. The cost is
-that a record may land in the store one or two steps late; per-key step
+that a record may be written one or two steps late; per-key step
 ordering is still preserved because CUDA events recorded on one stream
 complete in submission order and the drain loop never reorders.
 
@@ -70,14 +70,14 @@ class _AsyncJournalWriter:
     (which drains and joins) before it closes the writer from the main thread.
 
     Args:
-        store: The :class:`~molix.io.JournalWriter` to append to.
+        writer: The :class:`~molix.io.JournalWriter` to append to.
         poll_interval_s: Seconds to wait before re-checking a not-ready event.
     """
 
-    def __init__(self, store: "JournalWriter", *, poll_interval_s: float = 1e-4) -> None:
+    def __init__(self, writer: "JournalWriter", *, poll_interval_s: float = 1e-4) -> None:
         if poll_interval_s <= 0:
             raise ValueError(f"poll_interval_s must be positive, got {poll_interval_s}")
-        self._store = store
+        self._writer = writer
         self._poll_interval_s = poll_interval_s
         self._queue: queue.Queue[Any] = queue.Queue()
         self._thread = threading.Thread(
@@ -126,7 +126,7 @@ class _AsyncJournalWriter:
                 pending = item
                 time.sleep(self._poll_interval_s)
                 continue
-            self._store.append(**factory())
+            self._writer.append(**factory())
 
 
 class JournalHook(BaseHook):
@@ -142,15 +142,12 @@ class JournalHook(BaseHook):
         every_n_steps: Mirror frequency for ``train``/``performance``/
             ``gpu`` namespace scalars during the train phase. Must be
             positive.
-        store: A :class:`~molix.io.JournalWriter` (kept named
-            ``store`` for source-compat with the legacy ``Journal``
-            constructor; the writer is the only first-party concrete
-            backend).
+        writer: The :class:`~molix.io.JournalWriter` records are appended to.
         async_writes: When ``True`` and CUDA is available, mirror GPU
             scalars without blocking the training hot path — copy each to a
             pinned CPU buffer (``non_blocking=True``), tag it with a
             :class:`torch.cuda.Event`, and let a single background thread
-            write it to ``store`` once the event is ready. Records may lag a
+            write it to ``writer`` once the event is ready. Records may lag a
             step or two; per-key step ordering is preserved. When CUDA is
             unavailable this falls back to the synchronous path. Default
             ``False`` (synchronous; every scalar forces a CPU↔GPU sync).
@@ -176,7 +173,7 @@ class JournalHook(BaseHook):
     def __init__(
         self,
         every_n_steps: int,
-        store: "JournalWriter",
+        writer: "JournalWriter",
         *,
         async_writes: bool = False,
         poll_interval_s: float = 1e-4,
@@ -191,7 +188,7 @@ class JournalHook(BaseHook):
         if histogram_freq <= 0:
             raise ValueError(f"histogram_freq must be positive, got {histogram_freq}")
 
-        self._store = store
+        self._writer = writer
         self._every_n_steps = every_n_steps
         self._log_hparams = log_hparams
         self._log_histograms = log_histograms
@@ -209,7 +206,7 @@ class JournalHook(BaseHook):
                 import torch
 
                 if torch.cuda.is_available():
-                    self._async = _AsyncJournalWriter(store, poll_interval_s=poll_interval_s)
+                    self._async = _AsyncJournalWriter(writer, poll_interval_s=poll_interval_s)
             except Exception:
                 self._async = None
 
@@ -267,7 +264,7 @@ class JournalHook(BaseHook):
         """
         if self._async is not None:
             self._async.shutdown()
-        self._store.close()
+        self._writer.close()
 
     def _mirror_namespaces(
         self, state: "TrainState", namespaces: tuple[str, ...], global_step: int
@@ -329,17 +326,14 @@ class JournalHook(BaseHook):
         if self._async is not None:
             self._async.submit(None, lambda r=record: r)
         else:
-            self._store.append(**record)
+            self._writer.append(**record)
 
     def _emit_histograms(self, trainer: "Trainer", state: "TrainState") -> None:
         import numpy as np
 
         epoch = int(state.get("epoch", 0))
         wall = self._now_ns()
-        model = getattr(trainer, "model", None)
-        if model is None:
-            return
-        for name, param in model.named_parameters():
+        for name, param in trainer.model.named_parameters():
             data = param.detach().cpu().numpy().ravel()
             counts, bins = np.histogram(data, bins=self._histogram_bins)
             self._emit(

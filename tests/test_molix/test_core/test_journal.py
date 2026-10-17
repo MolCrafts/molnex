@@ -1,11 +1,7 @@
-"""Tests for ``molix.hooks.JournalHook`` (post io-hooks-refactor).
+"""Tests for ``molix.hooks.JournalHook``.
 
-The hook now drives :class:`molix.io.JournalWriter` directly via a
-kwargs ``append`` API (no ``MetricRecord`` dataclass, no
-``MetricStore`` Protocol). This test suite mirrors the legacy
-``Journal`` regression suite and pins the same invariants under
-the new contract.
-
+The hook drives :class:`molix.io.JournalWriter` directly through its kwargs
+``append`` API; the double below captures every call without disk IO.
 """
 
 from __future__ import annotations
@@ -65,7 +61,7 @@ def test_mirrors_four_namespaces() -> None:
     state["eval"]["MAE"] = 0.07
 
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=1, store=writer)
+    hook = JournalHook(every_n_steps=1, writer=writer)
 
     hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
     hook.on_eval_step_complete(trainer=None, state=state)
@@ -95,7 +91,7 @@ def test_hparams_emits_single_json_record() -> None:
     hparams = {"lr": 1e-3, "model": "mace"}
     hook = JournalHook(
         every_n_steps=10,
-        store=writer,
+        writer=writer,
         log_hparams=True,
         hparams=hparams,
     )
@@ -119,7 +115,7 @@ def test_no_hparams_when_disabled() -> None:
 
     state = TrainState()
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=10, store=writer)
+    hook = JournalHook(every_n_steps=10, writer=writer)
     hook.on_train_start(trainer=None, state=state)
     assert writer.records == []
 
@@ -133,7 +129,7 @@ def test_every_n_steps_gating() -> None:
     state["train"]["loss"] = 0.5
 
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=10, store=writer)
+    hook = JournalHook(every_n_steps=10, writer=writer)
     hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
     assert writer.records == []
 
@@ -149,7 +145,7 @@ def test_close_propagates_to_store() -> None:
 
     state = TrainState()
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=1, store=writer)
+    hook = JournalHook(every_n_steps=1, writer=writer)
     hook.on_train_end(trainer=None, state=state)
     assert writer.closed is True
 
@@ -166,7 +162,7 @@ def test_non_scalar_state_value_skipped() -> None:
     state["train"]["embedding"] = torch.zeros(8)
 
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=1, store=writer)
+    hook = JournalHook(every_n_steps=1, writer=writer)
     hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
 
     keys = {r["key"] for r in writer.records}
@@ -183,7 +179,7 @@ def test_no_interference_with_existing_hooks() -> None:
     state["eval"]["MAE"] = 0.07
 
     writer = _CapturingWriter()
-    journal = JournalHook(every_n_steps=1, store=writer)
+    journal = JournalHook(every_n_steps=1, writer=writer)
 
     journal.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
     journal.on_eval_step_complete(trainer=None, state=state)
@@ -291,7 +287,7 @@ def test_async_falls_back_to_sync_without_cuda(monkeypatch) -> None:
     state["train"]["loss"] = 0.5
 
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=1, store=writer, async_writes=True)
+    hook = JournalHook(every_n_steps=1, writer=writer, async_writes=True)
     assert hook._async is None  # no background thread spun up
 
     hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
@@ -307,7 +303,7 @@ def test_async_on_train_end_drains_then_closes() -> None:
     from molix.hooks.journal import _AsyncJournalWriter
 
     writer = _CapturingWriter()
-    hook = JournalHook(every_n_steps=1, store=writer)
+    hook = JournalHook(every_n_steps=1, writer=writer)
     # Force-activate async regardless of CUDA availability for the test.
     hook._async = _AsyncJournalWriter(writer, poll_interval_s=1e-4)
     hook._async.submit(_FakeEvent(ready_after=2), _scalar_factory("train/loss", 1, 0.5))

@@ -282,21 +282,15 @@ class TestCheckpoint:
 
         assert sched2.last_epoch == sched.last_epoch
 
-    def test_ddp_unwrap(self):
-        """state_dict unwraps model.module if present (simulated)."""
+    def test_compiled_model_checkpoints_under_plain_keys(self):
+        """A ``torch.compile`` wrapper never leaks ``_orig_mod.`` into the checkpoint."""
         model = _SimpleModel()
+        compiled = torch.compile(model)
+        opt = torch.optim.SGD(compiled.parameters(), lr=0.01)
 
-        class FakeDDP(nn.Module):
-            def __init__(self, module):
-                super().__init__()
-                self.module = module
+        sd = Checkpoint(model=compiled, optimizer=opt).state_dict()
 
-        wrapped = FakeDDP(model)
-        opt = torch.optim.SGD(wrapped.parameters(), lr=0.01)
-        ts = Checkpoint(model=wrapped, optimizer=opt)
-        sd = ts.state_dict()
-
-        assert "linear.weight" in sd["model_state_dict"]
+        assert set(sd["model_state_dict"]) == set(model.state_dict())
 
     def test_roundtrip_via_backend(self, tmp_path):
         """Full save→load roundtrip through TorchSaveBackend."""
