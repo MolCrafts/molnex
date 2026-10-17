@@ -2,17 +2,14 @@
 
 These are the ByteFF-Pol-family nonbonded heads — Lennard-Jones, Pauli
 repulsion, charge transfer, partial charge, and Tang-Toennies damping — plus
-the precision contract every one of them inherits from :mod:`molix.config`.
+the build dtype every one of them takes at construction.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 import torch
 
-from molix import config
 from molpot.composition.heads import (
     ChargeHead,
     ChargeTransferParameterHead,
@@ -32,35 +29,16 @@ def batch():
     return torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
 
 
-@pytest.fixture
-def fp64() -> Iterator[None]:
-    """Run the case under the global fp64 precision, restoring the previous one.
-
-    Every head in :mod:`molpot.composition.heads` bakes ``config["ftype"]``
-    into its parameters at construction time (the contract documented in
-    :mod:`molix.config`), so the precision has to be switched *before* the
-    head is built and handed back afterwards.
-    """
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
-
-
 # ---------------------------------------------------------------------------
 # LJParameterHead
 # ---------------------------------------------------------------------------
 
 
 class TestLJParameterHead:
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64.
-
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the head mixed-precision
-        and its first forward dies on a dtype-mismatched matmul.
-        """
-        head = LJParameterHead(feature_dim=16)
+    def test_every_parameter_is_built_at_the_given_dtype(self):
+        """A layer that ignored ``dtype`` would leave the head mixed-precision
+        and its first forward would die on a dtype-mismatched matmul."""
+        head = LJParameterHead(feature_dim=16, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
@@ -149,9 +127,8 @@ class TestRepulsionParameterHead:
         assert torch.all(out["eps_rep"] >= 0.5)
         assert torch.all(out["lam_rep"] >= 0.3)
 
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64."""
-        head = RepulsionParameterHead(feature_dim=16)
+    def test_every_parameter_is_built_at_the_given_dtype(self):
+        head = RepulsionParameterHead(feature_dim=16, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
@@ -176,9 +153,8 @@ class TestChargeTransferParameterHead:
         assert torch.all(out["eps_ct"] > 0)
         assert torch.all(out["lam_ct"] > 0)
 
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64."""
-        head = ChargeTransferParameterHead(feature_dim=16)
+    def test_every_parameter_is_built_at_the_given_dtype(self):
+        head = ChargeTransferParameterHead(feature_dim=16, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
@@ -221,15 +197,14 @@ class TestChargeHead:
         out["charge"].sum().backward()
         assert x.grad is not None
 
-    def test_all_parameters_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64."""
-        head = ChargeHead(feature_dim=16)
+    def test_every_parameter_is_built_at_the_given_dtype(self):
+        head = ChargeHead(feature_dim=16, dtype=torch.float64)
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64, batch):
-        """A head built at fp64 conserves charge in fp64 arithmetic."""
-        head = ChargeHead(feature_dim=16, total_charge=1.0)
+    def test_forward_runs_at_the_build_dtype(self, batch):
+        """A head built at float64 conserves charge in float64 arithmetic."""
+        head = ChargeHead(feature_dim=16, total_charge=1.0, dtype=torch.float64)
 
         out = head(torch.ones(5, 16, dtype=torch.float64), batch=batch)
 
@@ -275,12 +250,10 @@ class TestTSScalingHead:
         assert ts_head.alpha_free is not None
         assert ts_head.r_star_free is not None
 
-    def test_all_parameters_and_buffers_honour_the_fp64_precision(self, fp64):
-        """Every parameter is fp64 when the head is built under fp64.
-
-        The free-atom reference tables are caller-supplied buffers, so they
-        follow the dtype of the tensors handed in; passing fp64 references
-        pins the whole module to one precision.
+    def test_every_parameter_and_buffer_is_built_at_the_given_dtype(self):
+        """The free-atom reference tables are caller-supplied buffers, so they
+        follow the dtype of the tensors handed in; float64 references with a
+        float64 build pin the whole module to one precision.
         """
         num_elements = 10
         head = TSScalingHead(
@@ -288,6 +261,7 @@ class TestTSScalingHead:
             c6_free=torch.rand(num_elements, dtype=torch.float64) * 10,
             alpha_free=torch.rand(num_elements, dtype=torch.float64) * 5,
             r_star_free=torch.rand(num_elements, dtype=torch.float64) * 2 + 1.0,
+            dtype=torch.float64,
         )
 
         assert {p.dtype for p in head.parameters()} == {torch.float64}

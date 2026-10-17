@@ -6,7 +6,8 @@ its own. The test exercises three systems with different ``N`` and
 distinct cell geometries — ``cell=None`` (free), ``cell=8 Å I``, and
 ``cell=12 Å I`` — to ensure the per-graph dispatch in
 ``EwaldMultipoleEnergy`` (``cell.dim() == 3 ⇒ index by graph``) is
-honoured by Sonata.
+honoured by Sonata. The pipeline stays unbound: each graph enumerates its
+own reciprocal grid, batched or alone.
 
 Tolerance ≤ 1e-8 (float64). The only place the batched and single-graph
 paths can diverge is in the per-graph dispatch and per-graph
@@ -20,52 +21,14 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.config import config
+from molix.schema import ENERGY_KEY
 from molpot.composition import Sonata
-from molzoo.allegro import AllegroEncoder, AllegroSpec
-
-# ---------------------------------------------------------------------------
-# Module-local pipeline (so this file is independent of conftest's cache).
-# ---------------------------------------------------------------------------
+from tests.test_molpot.test_composition.conftest import sonata_fp64
 
 
 @pytest.fixture(scope="module")
-def sonata_fp64() -> Sonata:
-    orig_ftype = config["ftype"]
-    config["ftype"] = torch.float64
-    try:
-        torch.manual_seed(0)
-        encoder = AllegroEncoder(
-            AllegroSpec(
-                atomic_numbers=[1, 6, 7, 8],
-                num_scalar_features=16,
-                num_tensor_features=4,
-                r_max=5.0,
-                num_bessels=8,
-                num_layers=2,
-                l_max=2,
-                radial_chemical_embed_dim=16,
-                allegro_mlp_hidden_layers_depth=1,
-                allegro_mlp_hidden_layers_width=32,
-                avg_num_neighbors=12.0,
-                expose_tensor_track=True,
-            )
-        )
-        sonata = Sonata.from_encoder(
-            encoder,
-            sigma=1.0,
-            dl=2.0,
-            charge=True,
-            dipole=True,
-            quadrupole=True,
-            constrain_total_charge=True,
-            avg_num_neighbors=12.0,
-        )
-        sonata = sonata.double()
-        sonata.eval()
-        yield sonata
-    finally:
-        config["ftype"] = orig_ftype
+def sonata_unbound() -> Sonata:
+    return sonata_fp64()
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +133,11 @@ def _stack_graphs(graphs: list[TensorDict]) -> TensorDict:
 # ---------------------------------------------------------------------------
 
 
-def test_batch_independence(sonata_fp64: Sonata) -> None:
+def test_batch_independence(sonata_unbound: Sonata) -> None:
     """Three graphs with N ∈ {4, 6, 5}, geometries: free / cubic 8Å / cubic 12Å.
 
     ``Sonata(batch).energy[i] == Sonata(graph_i).energy`` to ≤ 1e-8.
     """
-    torch.manual_seed(31)
-
     pos0 = torch.tensor(
         [
             [0.10, 0.20, 0.05],
@@ -221,12 +182,8 @@ def test_batch_independence(sonata_fp64: Sonata) -> None:
     g2 = _make_single_graph(pos=pos2, Z=Z2, cell=cell2, total_charge=0.0)
 
     with torch.no_grad():
-        E_single = []
-        for g in [g0, g1, g2]:
-            E_single.append(float(sonata_fp64(g)["graphs", "energy"][0]))
-
-        batched = _stack_graphs([g0, g1, g2])
-        E_batch = sonata_fp64(batched)["graphs", "energy"]
+        E_single = [float(sonata_unbound.energy(g)[ENERGY_KEY][0]) for g in (g0, g1, g2)]
+        E_batch = sonata_unbound.energy(_stack_graphs([g0, g1, g2]))[ENERGY_KEY]
 
     for i, e_s in enumerate(E_single):
         diff = abs(float(E_batch[i]) - e_s)

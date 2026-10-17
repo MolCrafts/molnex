@@ -229,33 +229,25 @@ class TestRotation:
     ) -> None:
         """Joint rotation of pos AND cell leaves periodic energy invariant.
 
-        Uses the frozen-grid path (``kvec_indices`` enumerated once
-        on the unperturbed cell) so the reciprocal-space integer
-        triplet array is identical for the unrotated and rotated
-        evaluations. Without freezing, FP rounding on
+        The pipeline is bound to the unrotated cell, so the reciprocal
+        integer-triplet grid is identical for the unrotated and rotated
+        evaluations. Enumerated per call instead, FP rounding on
         ``k² = ‖nvec @ G‖²`` can flip a boundary k-vector across the
         cutoff under rotation, breaking exact rotation invariance.
-        With the frozen grid, ``k_sq`` is preserved exactly under
-        rotation (rotations are isometries on ``kvec``) and the
-        invariance holds at float64 ULP.
+        On the bound grid ``k_sq`` is preserved exactly under rotation
+        (rotations are isometries on ``kvec``) and the invariance holds
+        at float64 ULP.
         """
         torch.manual_seed(19)
         R = random_rotation_matrix()
         batch = sample_neutral_batch_periodic
         cell = batch["graphs", "cell"]  # (B, 3, 3)
-        # Freeze the integer-triplet grid using the *unrotated* cell;
-        # rotation preserves cell norms so this same grid is also
-        # what the rotated cell would dynamically enumerate, but
-        # passing it explicitly removes the FP-rounding flicker at
-        # the cutoff.
-        nvec = sonata_pipeline.ewald.enumerate_kvec_indices(cell[0])
         rotated = rotate_graph(batch, R)
-        rotated_cell = torch.einsum("bij,kj->bik", cell, R)
-        rotated["graphs", "cell"] = rotated_cell
+        rotated["graphs", "cell"] = torch.einsum("bij,kj->bik", cell, R)
 
         with torch.no_grad():
-            ref = sonata_pipeline(batch.clone(), kvec_indices=nvec)
-            rot = sonata_pipeline(rotated, kvec_indices=nvec)
+            ref = sonata_pipeline(batch.clone())
+            rot = sonata_pipeline(rotated)
 
         rel = (rot["graphs", "energy"] - ref["graphs", "energy"]).abs() / ref[
             "graphs", "energy"

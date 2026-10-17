@@ -3,6 +3,9 @@
 The frames carry every column the ByteFF-aligned encoder declares (formal
 charge, ring features, bond order, ring membership) and the GAFF2 reference
 wells the Lennard-Jones head starts from — the columns MolHub writes for THEMol.
+Every batch is float64 and every model is built at ``DTYPE``: cuEquivariance
+fixes its working precision at construction, so a model built at float32 and
+then ``.double()``-d would still compute in float32.
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix import config
 from molix.data import PairRelation, TotalCharge
 from molix.data.collate import collate_molecules
 from molix.data.valence_columns import cyclic_impropers as molix_cyclic_impropers
@@ -30,6 +32,9 @@ from tests.conftest import (
 )
 
 CUTOFF = 10.0
+
+#: Build dtype of every model and batch in this suite.
+DTYPE = torch.float64
 
 #: GAFF 2.2.30 ``MOD4`` rows (R*, ε) → (σ = 2R*/2^{1/6}, ε) for the types the fixtures use.
 GAFF2 = {
@@ -197,7 +202,7 @@ def collate(frames: list[mp.Frame]) -> TensorDict:
     NeighborList(cutoff=CUTOFF).execute(batch)
     PairRelation().execute(batch)
     TotalCharge().execute(batch)
-    batch = batch.apply(lambda t: t.to(config.ftype) if t.is_floating_point() else t)
+    batch = batch.apply(lambda t: t.to(DTYPE) if t.is_floating_point() else t)
     batch["atoms", "forces"] = torch.zeros_like(batch["atoms", "pos"])
     return batch
 

@@ -21,33 +21,27 @@ atom ``a`` and component ``c ∈ {x, y, z}`` (``x0, y0, z0, x1, …``) that
 ``N`` is the number of atoms, ``B`` the number of molecules in a batch, and a
 "graph" is one molecule inside a packed (concatenated) batch.
 
-Where this sits relative to its siblings:
-
-* :mod:`molpot.derivation.force` owns the **first** derivative
-  (``F = -∂E/∂pos``) at the tensor level;
-  :class:`molix.autograd.Derivative` owns it at the batch level.
-* This module never re-derives it. Both :meth:`HessianDerivation.forward` and
-  :meth:`HessianDerivation.graph_blocks` compose
-  :func:`~molpot.derivation.force.autograd_forces_from_energy` on a leaf of
-  their own (:func:`molix.autograd.leaf`) — the op cannot serve them, because
-  the rows below need that leaf *after* the first derivative is taken and the
-  op never lets its leaf out; the only new differentiation here is the
-  **second** ``torch.autograd.grad`` walking the ``3N`` rows of ``∂E/∂pos``.
+Where this sits relative to its sibling: :class:`molix.autograd.Derivative`
+owns the **first** derivative (``F = -∂E/∂pos``, ``W = ∂E/∂ε``) on a frame.
+This module takes its own first derivative with ``torch.autograd.grad`` on a
+leaf of its own (:func:`molix.autograd.leaf`) — the op cannot serve it,
+because the rows below need that leaf *after* the first derivative is taken
+and the op never lets its leaf out; the only new differentiation here is the
+**second** ``torch.autograd.grad`` walking the ``3N`` rows of ``∂E/∂pos``.
 
 Scope — **autograd double-backward only**. "Autograd" is PyTorch's reverse-mode
 automatic differentiation; a *double* backward differentiates a quantity that is
-itself a gradient, which is what a second derivative needs. Unlike
-:class:`~molpot.derivation.force.ForceDerivation` there is deliberately no
-``method=`` dispatch and no functorch (``torch.func.jacrev ∘ grad``, PyTorch's
-functional-transform API) backend: differentiating twice through the *fused*
-cuEquivariance kernels (the GPU library behind this repo's equivariant encoders)
-is owned by the active ``cuet-force-doublebackward`` spec
+itself a gradient, which is what a second derivative needs. There is
+deliberately no ``method=`` dispatch and no functorch (``torch.func.jacrev ∘
+grad``, PyTorch's functional-transform API) backend: differentiating twice
+through the *fused* cuEquivariance kernels (the GPU library behind this repo's
+equivariant encoders) is owned by the active ``cuet-force-doublebackward`` spec
 (``.claude/specs/cuet-force-doublebackward.md``), so this module targets
 pure-PyTorch (Class-I shaped) energy graphs. Finite differences — rebuilding the
 Hessian from many displaced energy evaluations — are a test oracle at most,
 never a production path.
 
-Differentiability policy mirrors ``force.py``. ``create_graph`` is PyTorch's
+Differentiability policy mirrors the derivative op. ``create_graph`` is PyTorch's
 flag for "keep the derivative itself differentiable"; for the *second*
 derivative it resolves from the ambient :func:`torch.is_grad_enabled` **at
 entry**, so training keeps ``∂³E/∂pos²∂θ`` alive — with ``θ`` the model
@@ -85,7 +79,6 @@ from tensordict import TensorDict
 
 from molix.autograd import leaf as position_leaf
 from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY, has_energy
-from molpot.derivation.force import autograd_forces_from_energy
 
 __all__ = ["HessianDerivation"]
 
@@ -99,9 +92,7 @@ class HessianDerivation(nn.Module):
     """Cartesian second derivative ``H = ∂²E/∂pos²`` by autograd double backward.
 
     Stateless (no parameters, no buffers, no session side-channel) and
-    constructed with no arguments, like its sibling
-    :class:`~molpot.derivation.force.ForceDerivation`. One instance is reusable
-    across batches.
+    constructed with no arguments. One instance is reusable across batches.
 
     Two primitive entry points: :meth:`forward` for a dense ``(3N, 3N)`` Hessian
     of a tensor-level energy function, :meth:`graph_blocks` for one
@@ -121,10 +112,10 @@ class HessianDerivation(nn.Module):
         Evaluates ``energy_fn`` on a private ``requires_grad`` *leaf* — an input
         tensor of the autograd graph, i.e. the thing derivatives are taken with
         respect to — taken from ``pos.detach()`` inside
-        :func:`torch.enable_grad`, takes ``g = ∂E/∂pos`` via
-        :func:`~molpot.derivation.force.autograd_forces_from_energy` (negated
-        back from forces), then differentiates each of the ``3N`` entries of
-        ``g.reshape(-1)`` w.r.t. that leaf and stacks the resulting rows.
+        :func:`torch.enable_grad`, takes ``g = ∂E/∂pos`` with one
+        ``torch.autograd.grad`` kept differentiable, then differentiates each
+        of the ``3N`` entries of ``g.reshape(-1)`` w.r.t. that leaf and stacks
+        the resulting rows.
 
         The result is returned **as computed — not symmetrized**, so a broken
         energy graph shows up as asymmetry (``max|H - Hᵀ|``) instead of being
@@ -158,7 +149,7 @@ class HessianDerivation(nn.Module):
             leaf = position_leaf(pos)
             # create_graph=True on the first derivative regardless of the ambient
             # grad mode: the second derivative is exactly what differentiates it.
-            gradient = -autograd_forces_from_energy(energy_fn(leaf), leaf, create_graph=True)
+            (gradient,) = torch.autograd.grad(energy_fn(leaf).sum(), leaf, create_graph=True)
             flat = gradient.reshape(-1)
             rows = [
                 self._row(flat[i], leaf, create_graph=create_graph) for i in range(flat.shape[0])
@@ -173,8 +164,7 @@ class HessianDerivation(nn.Module):
         total.
 
         Installs its own position leaf on the batch and runs **one** energy
-        forward on it, takes ``∂E/∂pos`` with ``create_graph=True``
-        (:func:`~molpot.derivation.force.autograd_forces_from_energy`), then
+        forward on it, takes ``∂E/∂pos`` with ``create_graph=True``, then
         for each global row ``i`` differentiates ``(-forces).reshape(-1)[i]``
         w.r.t. the position leaf and keeps only the columns belonging to
         ``i``'s own graph, so the result held is ``Σ (3Nᵢ)²`` numbers rather
@@ -235,9 +225,8 @@ class HessianDerivation(nn.Module):
             energy(batch)
             if not has_energy(batch):
                 raise RuntimeError("energy must write batch['graphs', 'energy']")
-            batch[FORCES_KEY] = autograd_forces_from_energy(
-                batch[ENERGY_KEY], leaf, create_graph=True
-            )
+            (gradient,) = torch.autograd.grad(batch[ENERGY_KEY].sum(), leaf, create_graph=True)
+            batch[FORCES_KEY] = -gradient
 
         counts = torch.unique_consecutive(membership, return_counts=True)[1].tolist()
         blocks: list[torch.Tensor] = []

@@ -1,4 +1,4 @@
-"""Potential composer: head -> potential(mixing -> energy) -> forces.
+"""Potential composer: head -> potential(mixing -> energy), on the potential contract.
 
 Assembles a force field out of two learnable halves. A **parameter head** turns
 the per-atom feature vectors an encoder produced into per-atom physical
@@ -19,6 +19,15 @@ convention the per-atom key with an ``_ij`` suffix. Key sets differ per term
 :func:`~molpot.potentials.vdw.lj126.lorentz_berthelot` share no keys at all), so
 rules are not interchangeable between terms.
 
+Two public methods, as :mod:`molix.autograd.potential` prescribes: ``energy``
+reads ``atoms.node_features`` ``(N, D)`` — the pooled per-atom features the
+caller wrote — with ``atoms.{Z,pos,batch}`` and ``pairs.pair_index`` (the
+imaged ``pairs.pair_diff`` when present), and writes ``graphs.energy``, one
+``graphs.energy_<term>`` per term and one ``atoms.<parameter>`` per head
+output; ``forward`` is the :class:`~molix.autograd.Derivative` built from
+``wrt`` (``("atoms.pos",)`` adds ``atoms.forces``, ``("atoms.pos",
+"graphs.strain")`` adds ``graphs.virial`` on a one-graph periodic batch).
+
 Units are the model's own: whatever the head emits, the terms consume and the
 energy comes back in. This path is *not* the unit-pinned Class-I force field —
 that is :class:`~molpot.forcefield.Potentials`, whose Lennard-Jones rule is a
@@ -28,18 +37,24 @@ callable, because there the rule is part of the exported model's identity.
 
 from __future__ import annotations
 
-import torch
+from collections.abc import Mapping, Sequence
+
 import torch.nn as nn
+from tensordict import TensorDictBase
 
-from molpot.derivation import ForceDerivation
+from molix.autograd import Derivative, Potential
+from molix.schema import ENERGY_KEY
+from molrep.embedding.geometry import edge_lengths, edge_vectors
+
+__all__ = ["PotentialComposer"]
 
 
-class PotentialComposer(nn.Module):
+class PotentialComposer(Potential):
     """Compose parameter head + potentials into a force field.
 
     Pipeline::
 
-        node_features → head → atom_params (dict)
+        atoms.node_features → head → atom_params (dict)
             for each potential:
                 potential.mixing_fn(atom_params, pair_index) → pair_params
                 potential(distance, **pair_params) → energy
@@ -54,11 +69,17 @@ class PotentialComposer(nn.Module):
     Args:
         head: Maps per-atom features ``(N, D)`` to a dict of per-atom parameters,
             each ``(N,)``, in the model's own units. Called as
-            ``head(node_features, **head_kwargs)``.
+            ``head(node_features, batch=atoms.batch, Z=atoms.Z)``; a head
+            that needs neither ignores them (:class:`~molpot.composition.MultiHead`
+            forwards them to every member).
         potentials: Name → potential term. Each must expose a ``mixing_fn``
             attribute and accept the keys that rule returns as keyword arguments
             of its ``forward``, alongside ``distance`` / ``pair_batch`` /
-            ``num_graphs``. Names label the per-term energies in the output.
+            ``num_graphs``. Names label the per-term energies
+            ``graphs.energy_<name>``.
+        wrt: What :meth:`forward` derives beside the energy, as TensorFrame
+            keys (:class:`molix.autograd.Derivative`); ``()`` (the default)
+            writes the energy alone.
 
     Raises:
         ValueError: ``potentials`` is empty — a composed force field with no
@@ -68,94 +89,52 @@ class PotentialComposer(nn.Module):
     def __init__(
         self,
         head: nn.Module,
-        potentials: dict[str, nn.Module],
-    ):
+        potentials: Mapping[str, nn.Module],
+        *,
+        wrt: Sequence[str] = (),
+    ) -> None:
         super().__init__()
         if not potentials:
             raise ValueError("PotentialComposer requires at least one potential.")
         self.head = head
-        self.potentials = nn.ModuleDict(potentials)
-        self.force_derivation = ForceDerivation()
+        self.potentials = nn.ModuleDict(dict(potentials))
+        self._derivative = Derivative(self.energy, wrt=wrt)
 
-    def forward(
-        self,
-        *,
-        node_features: torch.Tensor,
-        data: dict[str, torch.Tensor],
-        compute_forces: bool = False,
-        head_kwargs: dict | None = None,
-    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """Compute composed energy and optionally forces.
+    def energy(self, frame: TensorDictBase) -> TensorDictBase:
+        """Write ``graphs.energy`` ``(B,)`` and the term and parameter columns in place.
 
         Args:
-            node_features: Pooled per-node features ``(N, D)``.
-            data: Must contain ``"pair_index"`` ``(E, 2)``, ``"batch"``
-                ``(N,)`` and ``"num_graphs"`` (the graph count ``B``,
-                ``graphs.batch_size[0]`` of the batch). Must contain ``"pos"``
-                ``(N, 3)`` if ``compute_forces=True``.
-            compute_forces: Derive forces as ``-dE/dpos``.
-            head_kwargs: Extra keyword arguments forwarded to the head
-                (e.g. ``batch``, ``Z`` for MultiHead).
+            frame: Post-collate batch carrying ``atoms.node_features`` ``(N, D)``,
+                ``atoms.{Z,pos,batch}``, ``pairs.pair_index`` ``(E, 2)`` and the
+                ``graphs`` namespace at ``batch_size=[B]``; ``pairs.pair_diff``
+                (the imaged displacement) when periodic.
 
         Returns:
-            Dict with ``"energy"``, ``"term_energies"``,
-            ``"parameters"``, and optionally ``"forces"``.
+            The same ``frame`` with ``graphs.energy``, ``graphs.energy_<term>``
+            per potential and ``atoms.<parameter>`` per head output written.
         """
-        pair_index = data["pair_index"]
-        batch = data["batch"]
-        src, dst = pair_index[:, 0], pair_index[:, 1]
+        pair_index = frame["pairs", "pair_index"]
+        batch = frame["atoms", "batch"]
+        keys = frame.keys(include_nested=True)
+        edge_diff = frame["pairs", "pair_diff"] if ("pairs", "pair_diff") in keys else None
+        distance = edge_lengths(
+            edge_vectors(frame["atoms", "pos"], pair_index, edge_diff=edge_diff)
+        )
+        pair_batch = batch[pair_index[:, 0]]
+        num_graphs = frame["graphs"].batch_size[0]
 
-        # 1. Head: features → per-atom params
-        atom_params = self.head(node_features, **(head_kwargs or {}))
-
-        # 2. Distance (recompute from pos so forces can flow pos -> distance)
-        pos = data.get("pos")
-        if pos is not None:
-            distance = (pos[dst] - pos[src]).norm(dim=-1)
-        else:
-            distance = data["pair_dist"]
-
-        # 3. Evaluate each potential (each applies its own mixing)
-        pair_batch = batch[src]
-        num_graphs = data["num_graphs"]
-
-        def _term_energies(distance: torch.Tensor) -> dict[str, torch.Tensor]:
-            terms: dict[str, torch.Tensor] = {}
-            for name, potential in self.potentials.items():
-                pair_params = potential.mixing_fn(atom_params, pair_index)
-                terms[name] = potential(
-                    distance=distance,
-                    pair_batch=pair_batch,
-                    num_graphs=num_graphs,
-                    **pair_params,
-                )
-            return terms
-
-        term_energies = _term_energies(distance)
-        total_energy: torch.Tensor | None = None
-        for energy in term_energies.values():
-            total_energy = energy if total_energy is None else total_energy + energy
-        assert total_energy is not None
-
-        outputs: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
-            "energy": total_energy,
-            "term_energies": term_energies,
-            "parameters": atom_params,
-        }
-
-        # 4. Forces via functorch: F = -∂E/∂pos, with the energy traced as a
-        #    pure function of positions (recomputing edge distances inside).
-        if compute_forces:
-            if pos is None:
-                raise RuntimeError("compute_forces=True requires data['pos'].")
-
-            def energy_fn(p: torch.Tensor) -> torch.Tensor:
-                d = (p[dst] - p[src]).norm(dim=-1)
-                total = None
-                for e in _term_energies(d).values():
-                    total = e if total is None else total + e
-                return total.sum()
-
-            outputs["forces"] = self.force_derivation(energy_fn, pos)
-
-        return outputs
+        atom_params = self.head(frame["atoms", "node_features"], batch=batch, Z=frame["atoms", "Z"])
+        total = None
+        for name, potential in self.potentials.items():
+            term = potential(
+                distance=distance,
+                pair_batch=pair_batch,
+                num_graphs=num_graphs,
+                **potential.mixing_fn(atom_params, pair_index),
+            )
+            frame["graphs", f"energy_{name}"] = term
+            total = term if total is None else total + term
+        frame[ENERGY_KEY] = total
+        for name, value in atom_params.items():
+            frame["atoms", name] = value
+        return frame

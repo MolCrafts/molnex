@@ -1,23 +1,43 @@
-"""Sonata composer — static permanent-electrostatics model line.
+"""Sonata — the static permanent-electrostatics potential.
 
-Sonata is a sibling (not subclass) of :class:`PotentialComposer`,
-specialised for the multipole-Ewald path. It owns three required
-sub-modules — an Allegro-style encoder with ``expose_tensor_track=True``,
-a :class:`PermMultipoleHead` predicting ``(q, μ, Θ)``, and an
-:class:`EwaldMultipoleEnergy` evaluator — plus an optional short-range
-energy head. Forward returns the batch. Totals land on ``graphs``
-(``energy``, ``energy_short``, ``energy_es``, ``molecular_dipole``, and
-``stress`` when requested) and per-atom quantities on ``atoms``
-(``atomic_charges`` / ``atomic_dipoles`` / ``atomic_quadrupoles``, ``phi``,
-``field``, and ``forces`` when requested).
+Sonata is a sibling (not subclass) of :class:`PotentialComposer`, specialised
+for the multipole-Ewald path, on the molnex potential contract
+(:class:`molix.autograd.Potential`). It owns an Allegro-style encoder built
+with ``expose_tensor_track=True``, a :class:`PermMultipoleHead` predicting
+``(q, μ, Θ)`` and an :class:`EwaldMultipoleEnergy` evaluator, plus any
+short-range energy heads. Two public methods, as
+:mod:`molix.autograd.potential` prescribes:
+
+``energy(frame) -> frame``
+    encoder → multipole head → Ewald → short-range heads, in place on the
+    frame. Reads ``atoms.{pos,batch}``, ``pairs.pair_index`` and the imaged
+    ``pairs.pair_diff`` when present, ``graphs.cell`` when present (the
+    reciprocal path) and ``graphs.total_charge`` when the head projects
+    charges. Writes ``graphs.energy = energy_short + energy_es``,
+    ``graphs.energy_short``, ``graphs.energy_es``, ``atoms.phi``,
+    ``atoms.field``, and whatever the heads write (``atoms.atomic_charges``
+    / ``atomic_dipoles`` / ``atomic_quadrupoles``,
+    ``graphs.molecular_dipole``, the charge-sum diagnostics).
+
+``forward(frame) -> frame``
+    The :class:`~molix.autograd.Derivative` built once in ``__init__`` from
+    the ``wrt`` keys: ``("atoms.pos",)`` adds ``atoms.forces`` ``(N, 3)``,
+    ``("atoms.pos", "graphs.strain")`` adds ``graphs.virial`` ``(1, 3, 3)`` on
+    a one-graph periodic batch (``W = ∂E/∂ε``, Cauchy stress ``σ = W / V``).
+
+One eager precondition on a periodic run: :meth:`Sonata.bind_cell` freezes
+the reciprocal integer grid on the lattice, like
+:meth:`molzoo.mace.polar.MacePolar.bind_cell`. Unbound, the Ewald term
+enumerates the grid from each frame's cell on every call.
 
 What this is NOT
     * **Not a composer for induced-response models.** The forthcoming
-      ``LesPolarizable`` composer line wraps :class:`EwaldMultipoleEnergy`
-      with ``kappa_head`` / ``alpha_head`` to add inline non-self-consistent
+      ``LesPolarizable`` line wraps :class:`EwaldMultipoleEnergy` with
+      ``kappa_head`` / ``alpha_head`` to add inline non-self-consistent
       linear response. Mixing those with the self-consistent CG Thole solve
       in :class:`molpot.potentials.Polarization` would double-count
-      induction. Sonata refuses such kwargs at construction time.
+      induction, so a :class:`Polarization` among the short-range heads is
+      refused at construction.
     * **Not invoking** :class:`PotentialComposer` — the latter's
       ``mixing_fn(atom_params, pair_index)`` per-pair contract does not
       match the global multipole-Ewald signature ``(q, pos, cell, batch,
@@ -44,15 +64,17 @@ References:
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Protocol
 
+import cuequivariance as cue
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
-from tensordict import TensorDict
+from tensordict import TensorDictBase
 
-from molix.autograd import leaf
-from molpot.derivation import ForceDerivation
+from molix.autograd import Derivative, Potential
+from molix.schema import ENERGY_KEY
 from molpot.heads.multipole import PermMultipoleHead, PermMultipoleHeadSpec
 from molpot.potentials.elec.ewald_multipole import (
     EwaldMultipoleEnergy,
@@ -60,25 +82,37 @@ from molpot.potentials.elec.ewald_multipole import (
 )
 from molpot.potentials.polarization import Polarization
 
-# ---------------------------------------------------------------------------
-# Refusal messages — used by the construction-time scope checks.
-# ---------------------------------------------------------------------------
-
-_INDUCED_REFUSE_MSG = (
-    "Sonata is the *static permanent-electrostatics* composer; "
-    "induced-response inputs ({name}={value!r}) belong to the future "
-    "`LesPolarizable` composer line, which wraps `EwaldMultipoleEnergy` "
-    "with κ / α heads for inline non-self-consistent linear response. "
-    "Use that composer (when implemented) for induced-response training."
-)
+__all__ = ["Sonata", "SonataSpec", "TensorTrackEncoder"]
 
 _POLARIZATION_REFUSE_MSG = (
-    "Sonata refuses `Polarization` in `short_range_head`: it would "
+    "Sonata refuses `Polarization` among its short-range heads: it would "
     "double-count induction against any future inline LES α-mode. "
-    "Polarization belongs to the `LesPolarizable` composer line; use "
-    "an `EdgeEnergyHead` (or any head that writes `graphs.energy_short`) "
-    "here instead."
+    "Polarization belongs to the `LesPolarizable` line; use an "
+    "`EdgeEnergyHead` (or any head that writes `graphs.energy_short`) here."
 )
+
+
+class TensorTrackEncoder(Protocol):
+    """What Sonata reads off its encoder: an Allegro body exposing its tensor track.
+
+    Attributes:
+        expose_tensor_track: Whether the body writes the equivariant
+            ``pairs.edge_tensor_features`` the multipole head reads.
+        l_max: Highest spherical-harmonic degree of that track; ``≥ 2`` for
+            dipoles and quadrupoles.
+        output_dim: Width of the scalar ``pairs.edge_features`` the heads read.
+        tensor_track_irreps: Irreps of the tensor track, the wiring of the
+            equivariant moment readouts.
+    """
+
+    expose_tensor_track: bool
+    l_max: int
+    output_dim: int
+    tensor_track_irreps: cue.Irreps
+
+    def __call__(self, frame: TensorDictBase) -> TensorDictBase:
+        """Write the edge features onto ``frame`` and return it."""
+        ...
 
 
 def _theta_to_cartesian_quadrupole(theta: torch.Tensor) -> torch.Tensor:
@@ -133,478 +167,167 @@ def _theta_to_cartesian_quadrupole(theta: torch.Tensor) -> torch.Tensor:
     return q
 
 
-# ---------------------------------------------------------------------------
-# SonataSpec — frozen Pydantic snapshot.
-# ---------------------------------------------------------------------------
-
-
 class SonataSpec(BaseModel):
-    """Frozen Pydantic snapshot of a :class:`Sonata` composer.
+    """Frozen Pydantic snapshot of a :class:`Sonata`: the head and the Ewald term.
 
     Mirrors the :class:`PermMultipoleHeadSpec` /
-    :class:`EwaldMultipoleEnergySpec` pattern: every constructor argument
-    is captured here so a trained checkpoint carries an exact, validated
-    description of the model line it was built with. ``head`` and
-    ``ewald`` are nested sub-specs; ``short_range`` is an opaque dict
-    (the head class is the user's choice and we deliberately do not
-    take a head-spec dependency from this layer).
+    :class:`EwaldMultipoleEnergySpec` pattern: every hyperparameter is
+    captured here so a trained checkpoint carries an exact, validated
+    description of the model it was built with. The encoder and the
+    short-range heads are wiring (they depend on the dataset and the
+    training script) and are handed to the constructor as modules.
 
     Attributes:
-        head: The :class:`PermMultipoleHeadSpec` for the multipole readout.
+        head: The :class:`PermMultipoleHeadSpec` for the multipole readout;
+            its ``input_dim`` must equal the encoder's ``output_dim``.
         ewald: The :class:`EwaldMultipoleEnergySpec` for the σ-screened
             multipole-Coulomb evaluator.
-        short_range: ``None`` when no short-range head is wired, else an
-            opaque metadata dict (``{"kind": "single", "type": ...}``
-            for a single head, ``{"kind": "list", "types": [...]}``
-            for an :class:`nn.ModuleList`).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     head: PermMultipoleHeadSpec
     ewald: EwaldMultipoleEnergySpec
-    short_range: dict | None = None
 
 
-# ---------------------------------------------------------------------------
-# Sonata
-# ---------------------------------------------------------------------------
-
-
-class Sonata(nn.Module):
-    """Static permanent-electrostatics composer.
+class Sonata(Potential):
+    """Static permanent-electrostatics potential on the two-method contract.
 
     Args:
-        encoder: Allegro-style encoder. Must be constructed with
-            ``expose_tensor_track=True``; ``l_max ≥ 2`` is required when
-            the head predicts dipoles or quadrupoles. Sonata reads
-            ``encoder.tensor_track_irreps`` to wire the equivariant
+        spec: Head and Ewald configuration (:class:`SonataSpec`).
+        encoder: Allegro-style body built with ``expose_tensor_track=True``
+            and ``l_max ≥ 2`` when the head predicts dipoles or
+            quadrupoles; its ``tensor_track_irreps`` wire the equivariant
             moment readouts.
-        perm_multipole_head: :class:`PermMultipoleHead` predicting
-            ``(q, μ, Θ)`` and writing them under ``("atoms", ...)``.
-        ewald: :class:`EwaldMultipoleEnergy` evaluator. Sonata calls it
-            directly (not via :class:`PotentialComposer`).
-        short_range_head: Optional ``nn.Module`` (or
-            ``list[nn.Module]``) that consumes ``batch`` and writes
-            ``graphs.energy_short`` ``(B,)``. Refused if it is, or contains,
-            a :class:`Polarization` — that would double-count induction
-            against any future inline LES α-mode.
+        short_range_heads: Modules that each consume the frame and write
+            ``graphs.energy_short`` ``(B,)``; their contributions are summed.
+            A :class:`Polarization` among them is refused — it would
+            double-count induction against a future inline LES α-mode.
+        wrt: What :meth:`forward` derives beside the energy, as TensorFrame
+            keys (:class:`molix.autograd.Derivative`): ``("atoms.pos",)``
+            (the default) adds ``atoms.forces``, ``("atoms.pos",
+            "graphs.strain")`` adds ``graphs.virial`` on a one-graph
+            periodic batch, ``()`` writes the energy alone.
+        dtype: Floating dtype the multipole head is built at. The encoder
+            and the short-range heads arrive built.
 
-    Refused construction kwargs (raise :class:`ValueError`):
-        * ``kappa_head=`` — induced-charge response head (future
-          ``LesPolarizable``).
-        * ``alpha_head=`` — induced-dipole response head (future
-          ``LesPolarizable``).
-        * Any ``induced_*`` kwarg.
-        * ``short_range_head`` containing a :class:`Polarization`.
-
-    Forward output (the batch):
-        * ``graphs.energy``: ``(B,)`` total per-graph energy.
-        * ``graphs.energy_short``: ``(B,)`` short-range contribution
-          (zeros when ``short_range_head`` is ``None``).
-        * ``graphs.energy_es``: ``(B,)`` electrostatic (Ewald) energy.
-        * ``atoms.atomic_charges``: ``(N,)`` per-atom charges.
-        * ``atoms.atomic_dipoles``: ``(N, 3)`` per-atom dipoles (only when
-          the head predicts them).
-        * ``atoms.atomic_quadrupoles``: ``(N, 5)`` per-atom quadrupoles in
-          the traceless-symmetric basis (only when the head predicts them).
-        * ``graphs.molecular_dipole``: ``(B, 3)`` molecular dipole moment.
-        * ``atoms.phi``: ``(N,)`` per-atom electrostatic potential.
-        * ``atoms.field``: ``(N, 3)`` per-atom electric field.
-        * ``graphs.charge_sum_pre_proj`` / ``graphs.charge_sum_post_proj``:
-          per-graph charge sums before and after the head's total-charge
-          projection (only when the head has projection on).
-        * ``atoms.forces``: ``(N, 3)`` only when ``compute_forces=True``.
-        * ``graphs.stress``: ``(B, 3, 3)`` symmetric, only when
-          ``compute_stress=True``.
+    Raises:
+        ValueError: The encoder does not expose its tensor track; the head
+            predicts dipoles or quadrupoles on an encoder with ``l_max < 2``;
+            ``spec.head.input_dim`` differs from ``encoder.output_dim``; a
+            short-range head is a :class:`Polarization`.
     """
+
+    _kvec_indices: torch.Tensor | None
 
     def __init__(
         self,
+        spec: SonataSpec,
+        encoder: TensorTrackEncoder,
         *,
-        encoder: nn.Module,
-        perm_multipole_head: PermMultipoleHead,
-        ewald: EwaldMultipoleEnergy,
-        short_range_head: nn.Module | list[nn.Module] | None = None,
-        **kwargs: Any,
+        short_range_heads: Sequence[nn.Module] = (),
+        wrt: Sequence[str] = ("atoms.pos",),
+        dtype: torch.dtype,
     ) -> None:
-        # Scope-refusal checks fire BEFORE super().__init__() so a failed
-        # construction does not leak partial state via registered modules.
-        if "kappa_head" in kwargs:
-            raise ValueError(
-                _INDUCED_REFUSE_MSG.format(name="kappa_head", value=kwargs["kappa_head"])
-            )
-        if "alpha_head" in kwargs:
-            raise ValueError(
-                _INDUCED_REFUSE_MSG.format(name="alpha_head", value=kwargs["alpha_head"])
-            )
-        for name in kwargs:
-            if name.startswith("induced_"):
-                raise ValueError(_INDUCED_REFUSE_MSG.format(name=name, value=kwargs[name]))
-        if kwargs:
-            raise TypeError(f"Sonata.__init__ got unexpected kwargs: {sorted(kwargs)}")
-
-        if isinstance(short_range_head, Polarization):
-            raise ValueError(_POLARIZATION_REFUSE_MSG)
-        if isinstance(short_range_head, (list, nn.ModuleList)) and any(
-            isinstance(h, Polarization) for h in short_range_head
-        ):
-            raise ValueError(_POLARIZATION_REFUSE_MSG)
-
-        super().__init__()
-        self.encoder = encoder
-        self.perm_multipole_head = perm_multipole_head
-        self.ewald = ewald
-        # Tensor-level autograd force over the pure-torch multipole-Ewald graph.
-        # Stress keeps a custom symmetric-ε post-process after torch.func.grad.
-        self.force_derivation = ForceDerivation()
-
-        # Wrap a list of heads in nn.ModuleList; otherwise store the single
-        # head (or None) directly. Storing as None on the attribute keeps
-        # forward branching simple.
-        self.short_range_head: nn.Module | nn.ModuleList | None
-        if short_range_head is None:
-            self.short_range_head = None
-        elif isinstance(short_range_head, nn.ModuleList):
-            self.short_range_head = short_range_head
-        elif isinstance(short_range_head, list):
-            self.short_range_head = nn.ModuleList(short_range_head)
-        else:
-            self.short_range_head = short_range_head
-
-        # Capture short_range head metadata opaquely (Sonata does not own
-        # a head-spec dependency from this layer).
-        short_range_meta: dict | None = None
-        if isinstance(self.short_range_head, nn.ModuleList):
-            short_range_meta = {
-                "kind": "list",
-                "types": [type(h).__name__ for h in self.short_range_head],
-            }
-        elif isinstance(self.short_range_head, nn.Module):
-            short_range_meta = {
-                "kind": "single",
-                "type": type(self.short_range_head).__name__,
-            }
-
-        self.config = SonataSpec(
-            head=perm_multipole_head.config,
-            ewald=ewald.config,
-            short_range=short_range_meta,
-        )
-
-    @classmethod
-    def from_spec(cls, spec: SonataSpec, encoder: nn.Module) -> "Sonata":
-        """Construct from a frozen :class:`SonataSpec` and an encoder.
-
-        ``spec.short_range`` is opaque metadata only — the user must
-        supply the actual short-range head externally if a round-trip
-        wiring with the same head is required. The encoder is wiring
-        (not a hyperparameter — it depends on the dataset and training
-        script) and is therefore a positional argument, mirroring the
-        :meth:`PermMultipoleHead.from_spec` pattern.
-
-        Args:
-            spec: The frozen configuration snapshot.
-            encoder: Allegro-style encoder providing
-                ``tensor_track_irreps``, ``output_dim``, ``l_max``,
-                and ``expose_tensor_track``.
-
-        Returns:
-            A new :class:`Sonata` whose architecture matches ``spec``.
-        """
-        head = PermMultipoleHead.from_spec(spec.head, tensor_irreps=encoder.tensor_track_irreps)
-        ewald = EwaldMultipoleEnergy.from_spec(spec.ewald)
-        return cls(
-            encoder=encoder,
-            perm_multipole_head=head,
-            ewald=ewald,
-            short_range_head=None,
-        )
-
-    # ------------------------------------------------------------------
-    # forward
-    # ------------------------------------------------------------------
-
-    def forward(
-        self,
-        batch: TensorDict,
-        *,
-        compute_forces: bool = False,
-        compute_stress: bool = False,
-        kvec_indices: torch.Tensor | None = None,
-    ) -> TensorDict:
-        """Run encoder → multipole head → Ewald → optional short-range.
-
-        Args:
-            batch: Post-collate :class:`TensorDict` carrying ``atoms``,
-                ``pairs``, and ``graphs`` sub-dicts. Periodic systems
-                must include ``("graphs", "cell")``.
-            compute_forces: Derive forces ``F = -∂U/∂pos`` via
-                :class:`~molpot.derivation.ForceDerivation`
-                (``method="functorch"``).
-            compute_stress: Derive stress ``σ = (1/V) ∂U/∂ε`` via
-                ``torch.func.grad`` through a differentiable strain
-                perturbation. Requires ``("graphs", "cell")``.
-            kvec_indices: optional ``(M, 3)`` precomputed integer
-                triplet array forwarded to
-                :meth:`EwaldMultipoleEnergy._compute_reciprocal` to
-                freeze the reciprocal-space integer grid for
-                finite-difference cell/strain validation. **Production
-                callers must leave this ``None``** — the Ewald cutoff
-                ``k² ≤ k_sq_max`` is a step discontinuity in cell
-                strain and freezing the grid is *only* appropriate
-                near a fixed reference cell where the keep-set would
-                not change anyway. See
-                :meth:`EwaldMultipoleEnergy.enumerate_kvec_indices`
-                for the canonical FD-stress technique.
-
-        Returns:
-            The evaluated batch, with the columns documented on the class.
-            This is a clone of the input: the force and stress paths re-run
-            the pipeline from the caller's batch.
-        """
-        atom_batch = batch["atoms", "batch"]
-        pair_index = batch["pairs", "pair_index"]
-        src, dst = pair_index[:, 0], pair_index[:, 1]
-        head = self.perm_multipole_head
-
-        pos0 = batch["atoms", "pos"].detach()
-        cell0 = batch.get(("graphs", "cell"))
-        if compute_stress and cell0 is None:
-            raise ValueError("compute_stress=True requires `('graphs', 'cell')` in the batch.")
-
-        def _run_pipeline(
-            b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None
-        ) -> tuple[torch.Tensor, TensorDict]:
-            """Encoder → multipole head → Ewald → short-range on a prepared batch.
-
-            ``b`` must already carry ``pos`` and (for the grad paths) the edge
-            geometry recomputed from ``pos``; ``pos`` / ``cell`` are passed
-            explicitly to Ewald so the gradient flows through them.
-            """
-            # -- encoder writes edge_features (and edge_tensor_features) --
-            self.encoder(b)
-            # -- head writes per-atom moments + molecular dipole --
-            head(b)
-
-            # -- Ewald: read moments from the batch --
-            q = b["atoms", head.out_charge_key]
-            mu = b.get(("atoms", head.out_dipole_key)) if head.dipole else None
-            Theta = b.get(("atoms", head.out_quadrupole_key)) if head.quadrupole else None
-
-            # Theta lives in the (N, 5) real-spherical 2e basis (cuequivariance
-            # output). EwaldMultipoleEnergy.forward expects Q in (N, 3, 3)
-            # symmetric traceless Cartesian form; convert here at the composer
-            # boundary so neither the head nor the potential needs to know
-            # about the basis swap.
-            Q_cart = _theta_to_cartesian_quadrupole(Theta) if Theta is not None else None
-
-            ewald_out = self.ewald(
-                q=q,
-                pos=pos,
-                cell=cell,
-                batch=atom_batch,
-                mu=mu,
-                Q=Q_cart,
-                kvec_indices=kvec_indices,
-            )
-            energy_es = ewald_out["pot"]
-            if energy_es.dim() == 0:
-                energy_es = energy_es.unsqueeze(0)
-
-            n_graphs = int(energy_es.shape[0])
-
-            # -- short-range head(s) --
-            energy_short = torch.zeros(n_graphs, dtype=energy_es.dtype, device=energy_es.device)
-            if self.short_range_head is not None:
-                heads_iter = (
-                    self.short_range_head
-                    if isinstance(self.short_range_head, nn.ModuleList)
-                    else [self.short_range_head]
-                )
-                for sr_head in heads_iter:
-                    sr_head(b)
-                    if "energy_short" not in b["graphs"].keys():
-                        raise KeyError(
-                            f"Short-range head {type(sr_head).__name__} must write "
-                            "graphs.energy_short; "
-                            f"graphs has {list(b['graphs'].keys())}."
-                        )
-                    energy_short = energy_short + b["graphs", "energy_short"]
-
-            energy = energy_short + energy_es
-            b["graphs", "energy_short"] = energy_short
-            b["graphs", "energy_es"] = energy_es
-            b["graphs", "energy"] = energy
-            b["atoms", "phi"] = ewald_out["phi"]
-            b["atoms", "field"] = ewald_out["field"]
-            return energy, b
-
-        def _strained(
-            pos_orig: torch.Tensor, strain: torch.Tensor
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Apply a symmetric strain to positions and cell (ε = 0 is identity)."""
-            sym_eps = 0.5 * (strain + strain.transpose(-1, -2))
-            eye_b = torch.eye(3, dtype=strain.dtype, device=strain.device).expand_as(strain)
-            i_plus = eye_b + sym_eps
-            pos = torch.einsum("aij,aj->ai", i_plus[atom_batch], pos_orig)
-            cell = torch.einsum("bij,blj->bli", i_plus, cell0)
-            return pos, cell
-
-        def _prepare(b: TensorDict, pos: torch.Tensor, cell: torch.Tensor | None) -> None:
-            """Write ``pos`` + recomputed edge geometry (and cell) into ``b`` in place.
-
-            The encoder reads ``pair_diff`` / ``pair_dist`` from the batch rather
-            than recomputing from ``pos``, so they must be refreshed for the
-            gradient to flow pos → geometry → energy.
-            """
-            pair_diff = pos[dst] - pos[src]
-            b[("atoms", "pos")] = pos
-            b[("pairs", "pair_diff")] = pair_diff
-            b[("pairs", "pair_dist")] = pair_diff.norm(dim=-1)
-            if cell is not None:
-                b[("graphs", "cell")] = cell
-
-        # -- eager pass: materialises lazy params and produces the outputs, using
-        #    the batch's cached edge geometry (the original non-grad path). --
-        _energy, out = _run_pipeline(batch.clone(), pos0, cell0)
-
-        # -- forces via ForceDerivation (autograd): F = -∂E/∂pos. At ε = 0
-        #    the strain is the identity, so differentiating w.r.t. positions
-        #    on the original geometry suffices whether or not stress is also
-        #    requested. --
-        if compute_forces:
-
-            def energy_of_pos(p: torch.Tensor) -> torch.Tensor:
-                b = batch.clone()
-                _prepare(b, p, cell0)
-                return _run_pipeline(b, p, cell0)[0].sum()
-
-            out["atoms", "forces"] = self.force_derivation(energy_of_pos, pos0)
-
-        # -- stress: σ = (1/V) ∂E/∂ε through a differentiable strain
-        #    perturbation of positions + cell, by the same autograd route the
-        #    forces above take. ``torch.func.grad`` cannot: this pipeline
-        #    reaches a custom ``autograd.Function`` without ``setup_context``,
-        #    which every functorch transform refuses, and the force path was
-        #    moved off functorch for that reason. --
-        if compute_stress:
-            assert cell0 is not None
-
-            strain = leaf(torch.zeros_like(cell0))
-            with torch.enable_grad():
-                pos_s, cell_s = _strained(pos0, strain)
-                b = batch.clone()
-                _prepare(b, pos_s, cell_s)
-                energy_strained = _run_pipeline(b, pos_s, cell_s)[0].sum()
-                (stress_eps,) = torch.autograd.grad(
-                    energy_strained,
-                    strain,
-                    create_graph=torch.is_grad_enabled(),
-                    allow_unused=True,
-                )
-            if stress_eps is None:
-                stress_eps = torch.zeros_like(strain)
-            cell_orig = cell0
-            # ``stress_eps`` is ``∂E/∂strain[a, b] = ∂E/∂sym_eps[a, b]``
-            # (chain rule through ``sym_eps = (strain + strainᵀ)/2``), which is
-            # the Cauchy stress numerator: ``σ_αβ = (1/V) ∂E/∂ε_αβ``, no
-            # doubling of the shear. Symmetrising only removes the asymmetry a
-            # finite-precision backward can leave behind.
-            stress_eps_sym = 0.5 * (stress_eps + stress_eps.transpose(-1, -2))
-            volume = torch.linalg.det(cell_orig).abs()
-            out["graphs", "stress"] = stress_eps_sym / volume.unsqueeze(-1).unsqueeze(-1)
-
-        return out
-
-    @classmethod
-    def from_encoder(
-        cls,
-        encoder: nn.Module,
-        *,
-        sigma: float = 1.0,
-        dl: float = 2.0,
-        prefactor: float = 90.4756,
-        charge: bool = True,
-        dipole: bool = True,
-        quadrupole: bool = True,
-        constrain_total_charge: bool = True,
-        short_range_head: nn.Module | list[nn.Module] | None = None,
-        total_charge_key: str = "total_charge",
-        hidden_dim: int = 128,
-        avg_num_neighbors: float | None = None,
-    ) -> "Sonata":
-        """Build a wired :class:`Sonata` from an encoder and loose hyperparameters.
-
-        Distinct from :meth:`__init__`, which takes the sub-modules
-        already built: this constructs the :class:`PermMultipoleHead` and
-        :class:`EwaldMultipoleEnergy` for you and validates that the
-        encoder can actually feed them.
-
-        Args:
-            encoder: Allegro-style encoder. Must satisfy
-                ``encoder.expose_tensor_track is True`` and (when ``dipole``
-                or ``quadrupole`` is on) ``encoder.l_max >= 2``.
-            sigma: σ-Gaussian charge-smearing length in Å. Default ``1.0``.
-            dl: Reciprocal-space grid resolution in Å. Default ``2.0``.
-            prefactor: Electrostatic prefactor ``1/(2 ε₀)``. Default
-                ``90.4756`` (eV·Å·e⁻²).
-            charge: Predict atomic charges. Default ``True``.
-            dipole: Predict atomic dipoles. Default ``True``. Requires
-                ``encoder.l_max >= 2``.
-            quadrupole: Predict atomic quadrupoles. Default ``True``.
-                Requires ``encoder.l_max >= 2``.
-            constrain_total_charge: Project per-graph charge sums onto
-                ``total_charge_key``. Default ``True``.
-            short_range_head: Optional ``nn.Module`` (or ``list``) writing
-                ``"energy_short"`` ``(B,)``.
-            total_charge_key: Per-graph total-charge key under ``graphs``.
-                Required when ``constrain_total_charge=True``.
-            hidden_dim: Hidden width of the multipole head's scalar MLPs.
-            avg_num_neighbors: Dataset-wide ⟨|N(i)|⟩ for the edge→atom
-                pool normalisation in the multipole head.
-
-        Returns:
-            A fully wired :class:`Sonata`.
-
-        Raises:
-            ValueError: If ``encoder.expose_tensor_track`` is not ``True``,
-                or if ``dipole`` / ``quadrupole`` is requested but
-                ``encoder.l_max < 2``.
-        """
-        if not getattr(encoder, "expose_tensor_track", False):
+        if not encoder.expose_tensor_track:
             raise ValueError(
                 "Sonata requires an encoder built with `expose_tensor_track=True` "
                 "to expose the equivariant tensor-track features the multipole "
                 "head consumes. Reconstruct your encoder with this flag set."
             )
-        if (dipole or quadrupole) and getattr(encoder, "l_max", 0) < 2:
+        if (spec.head.dipole or spec.head.quadrupole) and encoder.l_max < 2:
             raise ValueError(
-                "Sonata requires `encoder.l_max >= 2` when `dipole=True` or "
-                f"`quadrupole=True`; got `l_max={getattr(encoder, 'l_max', None)}`."
+                "Sonata requires `encoder.l_max >= 2` when the head predicts dipoles "
+                f"or quadrupoles; got `l_max={encoder.l_max}`."
             )
+        if spec.head.input_dim != encoder.output_dim:
+            raise ValueError(
+                f"spec.head.input_dim={spec.head.input_dim} must equal the encoder's "
+                f"output_dim={encoder.output_dim}: the head reads the encoder's edge features."
+            )
+        if any(isinstance(head, Polarization) for head in short_range_heads):
+            raise ValueError(_POLARIZATION_REFUSE_MSG)
 
-        head = PermMultipoleHead(
-            input_dim=encoder.output_dim,
-            avg_num_neighbors=avg_num_neighbors,
-            charge=charge,
-            dipole=dipole,
-            quadrupole=quadrupole,
-            constrain_total_charge=constrain_total_charge,
-            total_charge_key=total_charge_key,
-            hidden_dim=hidden_dim,
-            tensor_irreps=encoder.tensor_track_irreps,
+        super().__init__()
+        self.spec = spec
+        self.encoder = encoder
+        self.perm_multipole_head = PermMultipoleHead.from_spec(
+            spec.head, tensor_irreps=encoder.tensor_track_irreps, dtype=dtype
         )
-        ewald = EwaldMultipoleEnergy(
-            sigma=sigma,
-            dl=dl,
-            prefactor=prefactor,
-            remove_self_interaction=True,
-            use_epsilon_r_scaling=False,
+        self.ewald = EwaldMultipoleEnergy.from_spec(spec.ewald)
+        self.short_range_heads = nn.ModuleList(short_range_heads)
+        # The frozen reciprocal grid of ``bind_cell``; follows ``.to(device)``
+        # and stays out of the checkpoint — it is a property of the lattice.
+        self.register_buffer("_kvec_indices", None, persistent=False)
+        self._derivative = Derivative(self.energy, wrt=wrt)
+
+    def bind_cell(self, cell: torch.Tensor) -> None:
+        """Freeze the reciprocal integer grid on ``cell``. Eager only.
+
+        A precondition of the periodic path, like the element-table check of
+        an encoder: enumerating the keep-set ``0 < k² ≤ k_max²`` reads the
+        lattice norms back to the host, which a traced call cannot do, and
+        the cutoff is a step discontinuity in the cell — differentiating the
+        energy against a strain is only smooth on a grid fixed before the
+        cell moves. Every later :meth:`energy` uses this grid, whatever cell
+        the frame carries; calling again replaces it.
+
+        Args:
+            cell: Lattice vectors ``(3, 3)`` or ``(1, 3, 3)`` in Å, rows being
+                the lattice vectors.
+
+        Raises:
+            ValueError: ``cell`` is neither ``(3, 3)`` nor ``(1, 3, 3)``.
+        """
+        if cell.shape == (1, 3, 3):
+            cell = cell[0]
+        if cell.shape != (3, 3):
+            raise ValueError(f"cell must be (3, 3) or (1, 3, 3); got {tuple(cell.shape)}")
+        self._kvec_indices = self.ewald.enumerate_kvec_indices(cell)
+
+    def energy(self, frame: TensorDictBase) -> TensorDictBase:
+        """Write ``graphs.energy`` ``(B,)`` and the electrostatic columns in place.
+
+        Args:
+            frame: Post-collate batch carrying ``atoms.{Z,pos,batch}``,
+                ``pairs.pair_index`` and the ``graphs`` namespace at
+                ``batch_size=[B]``; ``pairs.pair_diff`` (the imaged
+                displacement) and ``graphs.cell`` ``(B, 3, 3)`` or ``(3, 3)``
+                when periodic; ``graphs.total_charge`` ``(B,)`` when the head
+                projects the charge sums.
+
+        Returns:
+            The same ``frame`` with ``graphs.energy``, ``graphs.energy_short``,
+            ``graphs.energy_es``, ``atoms.phi`` ``(N,)``, ``atoms.field``
+            ``(N, 3)`` and the heads' own columns written, attached to
+            whatever the caller's leaves are.
+        """
+        self.encoder(frame)
+        head = self.perm_multipole_head
+        head(frame)
+        keys = frame.keys(include_nested=True)
+        theta = frame["atoms", head.out_quadrupole_key] if head.quadrupole else None
+        # Θ lives in the (N, 5) real-spherical 2e basis (cuequivariance
+        # output); the Ewald term takes Q in (N, 3, 3) symmetric traceless
+        # Cartesian form. The basis swap is this potential's, so neither
+        # the head nor the term knows about it.
+        ewald_out = self.ewald(
+            q=frame["atoms", head.out_charge_key],
+            pos=frame["atoms", "pos"],
+            cell=frame["graphs", "cell"] if ("graphs", "cell") in keys else None,
+            batch=frame["atoms", "batch"],
+            mu=frame["atoms", head.out_dipole_key] if head.dipole else None,
+            Q=None if theta is None else _theta_to_cartesian_quadrupole(theta),
+            kvec_indices=self._kvec_indices,
         )
-        return cls(
-            encoder=encoder,
-            perm_multipole_head=head,
-            ewald=ewald,
-            short_range_head=short_range_head,
-        )
+        energy_es = ewald_out["pot"]
+        energy_short = torch.zeros_like(energy_es)
+        for short_range_head in self.short_range_heads:
+            short_range_head(frame)
+            energy_short = energy_short + frame["graphs", "energy_short"]
+        frame["graphs", "energy_short"] = energy_short
+        frame["graphs", "energy_es"] = energy_es
+        frame[ENERGY_KEY] = energy_short + energy_es
+        frame["atoms", "phi"] = ewald_out["phi"]
+        frame["atoms", "field"] = ewald_out["field"]
+        return frame

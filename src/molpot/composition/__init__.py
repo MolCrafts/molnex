@@ -1,9 +1,12 @@
-"""Modular potential composition (Sonata / generic PotentialComposer).
+"""Modular potential composition: :class:`Sonata` and the generic :class:`PotentialComposer`.
 
-Classical force fields live under :mod:`molpot.forcefield`
-(:class:`~molpot.forcefield.ForceField`, :class:`~molpot.forcefield.OPLSAAForceField`);
-the learnable Class-I heads are :mod:`molpot.heads.classical` and the torch
-twins of the molrs styles are :mod:`molpot.potentials`.
+Both are :class:`molix.autograd.Potential` products — ``energy(frame)`` plus
+the ``forward`` built from ``wrt`` — over the parameter heads in
+:mod:`molpot.composition.heads`. Classical force fields live under
+:mod:`molpot.forcefield` (:class:`~molpot.forcefield.ForceField`,
+:class:`~molpot.forcefield.OPLSAAForceField`); the learnable Class-I heads
+are :mod:`molpot.heads.classical` and the torch twins of the molrs styles are
+:mod:`molpot.potentials`.
 """
 
 from molpot.composition.composer import PotentialComposer

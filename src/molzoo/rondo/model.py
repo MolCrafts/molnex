@@ -3,8 +3,14 @@
 Spec: ``src/molzoo/specs/rondo.md``.
 
 ``Rondo(forcefield, spec, wrt=("atoms.pos",))`` is shaped like every other
-molzoo model: ``forward`` is the :class:`~molix.autograd.Derivative` of
-:meth:`Rondo.energy`. Three primitives sit underneath it —
+molzoo model (:class:`molix.autograd.Potential`): ``forward`` is the
+:class:`~molix.autograd.Derivative` of :meth:`Rondo.energy`, writing
+``graphs.energy`` and, for ``atoms.pos``, the force at ``atoms.forces_pred`` —
+a training batch holds the DFT force at ``atoms.forces``. Where the energy
+must sit beside its own label, the training step wraps the call in
+:func:`molix.frame.beside_labels` (``graphs.energy → graphs.energy_pred``), as
+:class:`molix.core.steps.JointTrainStep` does; the model itself moves nothing.
+Three primitives sit underneath it —
 
 * :meth:`tables` — the encoder and one head per parameter table turn the
   covalent graph into this batch's parameters (``bonds.k`` …), never reading a
@@ -42,9 +48,8 @@ from molpy.ff.forcefield import ForceField
 from tensordict import TensorDict
 
 from molix import config
-from molix.autograd import Derivative
-from molix.frame import beside_labels
-from molix.schema import ENERGY_KEY, ENERGY_PRED_KEY, FORCES_PRED_KEY, POS_KEY
+from molix.autograd import Derivative, Potential
+from molix.schema import ENERGY_KEY, FORCES_PRED_KEY, POS_KEY
 from molpot.charge import (
     AtomicChargeModel,
     ChiEtaHead,
@@ -72,7 +77,7 @@ __all__ = ["Rondo"]
 Tables = dict[str, dict[str, torch.Tensor]]
 
 
-class Rondo(nn.Module):
+class Rondo(Potential):
     """Predict every open Class-I parameter from the covalent graph and evaluate the energy.
 
     Args:
@@ -87,6 +92,8 @@ class Rondo(nn.Module):
         wrt: Variables :meth:`forward` differentiates against, as for every
             molzoo potential (``("atoms.pos",)`` writes ``atoms.forces_pred``;
             ``()`` makes ``forward`` the energy alone).
+        dtype: Floating dtype every parameter and buffer is built at; ``None``
+            is the (transitional) process-wide default.
 
     Raises:
         ValueError: A declared style has no potential or no head, or a
@@ -99,7 +106,7 @@ class Rondo(nn.Module):
         ff.def_style("bond", "harmonic")
         ...
         model = Rondo(ff, RondoSpec(), wrt=("atoms.pos",))
-        out = model(batch)      # graphs.energy_pred, atoms.forces_pred, atoms.charge, bonds.k …
+        out = model(batch)      # graphs.energy, atoms.forces_pred, atoms.charge, bonds.k …
     """
 
     #: Styles Rondo can supply parameters for, with the head each one needs.
@@ -222,20 +229,10 @@ class Rondo(nn.Module):
         }
         # The op ``forward`` runs, built once like every molzoo potential's.
         # A bound method, so no submodule is registered. The force lands beside
-        # the label (``atoms.forces_pred``); the energy is moved there by ``forward``.
+        # the label (``atoms.forces_pred``); the energy is the op's ``of``.
         keys = tuple(wrt)
-        outputs = tuple(
-            FORCES_PRED_KEY
-            if (key if isinstance(key, str) else ".".join(key)) == "atoms.pos"
-            else None
-            for key in keys
-        )
+        outputs = tuple(FORCES_PRED_KEY if key == "atoms.pos" else None for key in keys)
         self._derivative = Derivative(self.energy, wrt=keys, outputs=outputs)
-
-    @property
-    def derivative(self) -> Derivative:
-        """The op whose leaves the training step marks before the traced body."""
-        return self._derivative
 
     # ------------------------------------------------------------------
     # tables
@@ -423,47 +420,6 @@ class Rondo(nn.Module):
                     0, block[name].long(), per_term[:, i, :, j, :].reshape(n_terms, 9)
                 )
         return blocks
-
-    # ------------------------------------------------------------------
-    # forward
-    # ------------------------------------------------------------------
-
-    def forward(self, batch: TensorDict) -> TensorDict:
-        """Energy and its derivatives, written beside the labels.
-
-        The op's force lands at ``atoms.forces_pred`` and its energy is moved
-        to ``graphs.energy_pred`` (:func:`molix.frame.beside_labels`), so
-        ``graphs.energy`` / ``atoms.forces`` stay the labels. The table columns
-        :meth:`energy` wrote stay on the batch, detached when grad was off at
-        entry — the op frees the graph they were built in.
-
-        Args:
-            batch: Padded batch (see :meth:`energy`).
-
-        Returns:
-            ``batch``.
-        """
-        grad_at_entry = torch.is_grad_enabled()
-        beside_labels(batch, {ENERGY_KEY: ENERGY_PRED_KEY}, lambda: self._derivative(batch))
-        if not grad_at_entry:
-            for namespace, name in self.table_columns():
-                if namespace in batch.keys() and name in batch[namespace].keys():
-                    batch[namespace, name] = batch[namespace, name].detach()
-        return batch
-
-    # ------------------------------------------------------------------
-    # what the heads produce
-    # ------------------------------------------------------------------
-
-    def table_columns(self) -> tuple[tuple[str, str], ...]:
-        """Every ``(namespace, column)`` :meth:`tables` writes, references included."""
-        columns: list[tuple[str, str]] = []
-        for key, head in self.heads.items():
-            if key == "charge":
-                columns.append(("atoms", "charge"))
-                continue
-            columns += [(head.namespace, name) for name in (*head.produces, *head.references)]
-        return tuple(columns)
 
     # ------------------------------------------------------------------
     # private

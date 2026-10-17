@@ -13,7 +13,7 @@ import torch
 
 from molix.compile import Compiler
 from molzoo.rondo import Rondo
-from tests.test_molzoo.test_rondo.conftest import SPEC, with_hessian_pairs
+from tests.test_molzoo.test_rondo.conftest import DTYPE, SPEC, with_hessian_pairs
 
 
 class TestRondoCompile:
@@ -21,7 +21,7 @@ class TestRondoCompile:
     def test_forward_is_one_graph(self, forcefield, butane_batch):
         """Positions are marked first, as the training step's eager prologue does."""
         torch.manual_seed(0)
-        model = Rondo(forcefield, SPEC)
+        model = Rondo(forcefield, SPEC, dtype=DTYPE)
         batch = butane_batch.clone()
         model.derivative.mark_leaves(batch)
         explanation = Compiler.explain(model, batch)
@@ -33,7 +33,7 @@ class TestRondoCompile:
     @pytest.mark.slow
     def test_energy_is_one_graph(self, forcefield, butane_batch):
         torch.manual_seed(0)
-        model = Rondo(forcefield, SPEC)
+        model = Rondo(forcefield, SPEC, dtype=DTYPE)
         explanation = Compiler.explain(model.energy, butane_batch.clone())
         assert explanation.graph_count == 1, explanation.break_sites
         assert explanation.graph_break_count == 0, explanation.break_sites
@@ -42,7 +42,7 @@ class TestRondoCompile:
     def test_the_energy_of_named_styles_is_one_graph(self, forcefield, butane_batch):
         """The style loop is a tuple of names fixed at the call: straight-line code."""
         torch.manual_seed(0)
-        model = Rondo(forcefield, SPEC)
+        model = Rondo(forcefield, SPEC, dtype=DTYPE)
 
         def bonded(frame):
             return model.energy(frame, styles=("bond:harmonic", "angle:harmonic"))
@@ -54,7 +54,7 @@ class TestRondoCompile:
     @pytest.mark.slow
     def test_partial_hessian_is_one_graph(self, forcefield, butane_batch):
         torch.manual_seed(0)
-        model = Rondo(forcefield, SPEC)
+        model = Rondo(forcefield, SPEC, dtype=DTYPE)
         batch = butane_batch.clone()
         with_hessian_pairs(batch)
         model.derivative.mark_leaves(batch)
@@ -67,7 +67,7 @@ class TestRondoCompile:
         """Eval runs with grad off at entry: ``autograd.grad`` frees the graph, so
         no column may keep a ``grad_fn`` from it (GH200 3304497)."""
         torch.manual_seed(0)
-        model = Rondo(forcefield, SPEC)
+        model = Rondo(forcefield, SPEC, dtype=DTYPE)
         batch = butane_batch.clone()
         with torch.no_grad():
             model.derivative.mark_leaves(batch)
