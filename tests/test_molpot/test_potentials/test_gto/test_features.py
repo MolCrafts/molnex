@@ -7,6 +7,7 @@ import torch
 
 from molix import config
 from molix.compile import Compiler
+from molpot.potentials.elec.prefactors import eV_A
 from molpot.potentials.gto.features import GTOFieldFeatures
 
 #: Two atoms 6 Å apart (Å), placed by each test.
@@ -231,6 +232,94 @@ class TestGTOFieldFeatures:
         a = block(q, pos, batch, num_graphs=1)
         b = block(q, pos + 1.7, batch, num_graphs=1)
         assert torch.allclose(a, b, atol=1e-8)
+
+    def test_two_graph_batch_matches_explicit_pair_loop(self):
+        """``l = 0``: each row's potential is the loop over same-graph sources ``j ≠ i``.
+
+        Graph 1 starts at the origin like graph 0, so the masked cross-graph
+        pair ``(0, 2)`` sits at zero distance — evaluated, zeroed, harmless.
+        """
+        block = GTOFieldFeatures(
+            density_sigma=1.5, density_lmax=0, feature_lmax=0, feature_widths=[1.5, 3.0]
+        )
+        pos = torch.tensor(
+            PAIR_POS + [[0.0, 0.0, 0.0], [1.1, -0.4, 0.8], [-0.7, 0.9, 0.2]], dtype=torch.float64
+        )
+        q = torch.tensor([0.5, -0.5, 0.3, -0.2, -0.1], dtype=torch.float64)
+        batch = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+        out = block(q.unsqueeze(-1), pos, batch, num_graphs=2)
+        sigma = block.combined_sigma
+        expect = torch.zeros(5, 2, dtype=torch.float64)
+        for i in range(5):
+            for j in range(5):
+                if i == j or batch[i] != batch[j]:
+                    continue
+                r = (pos[i] - pos[j]).norm()
+                expect[i] += q[j] * eV_A * torch.erf(r / (2.0 * sigma)) / r
+        expect = expect * block.l0_factors
+        assert out.shape == (5, 2)
+        assert torch.allclose(out, expect, rtol=1e-12, atol=0.0)
+
+    def test_copy_layout_matches_explicit_pair_loop(self):
+        """``orig`` masks the sources that are copies of the receiving atom.
+
+        Three atoms in two graphs, four copies each; copies ``0`` and ``3`` of
+        an atom coincide, so masked zero-distance pairs occur inside a graph
+        as well as across graphs.
+        """
+        block = _dump_block()
+        pos = torch.tensor(PAIR_POS + [[1.0, 2.0, 3.0]], dtype=torch.float64).repeat_interleave(
+            4, dim=0
+        )
+        pos[1::4, 0] += 0.3
+        pos[2::4, 1] -= 0.2
+        orig = torch.arange(3).repeat_interleave(4)
+        batch = torch.tensor([0, 0, 1], dtype=torch.long).repeat_interleave(4)
+        q = torch.linspace(-0.6, 0.6, 12, dtype=torch.float64)
+        out = block._pair_features(q, pos, batch, orig)
+        sigma = block.combined_sigma
+        expect = torch.zeros(12, 2, dtype=torch.float64)
+        for i in range(12):
+            for j in range(12):
+                if i == j or batch[i] != batch[j] or orig[i] == orig[j]:
+                    continue
+                r = (pos[i] - pos[j]).norm()
+                expect[i] += q[j] * eV_A * torch.erf(r / (2.0 * sigma)) / r
+        assert out.shape == (12, 2)
+        assert torch.allclose(out, expect, rtol=1e-12, atol=0.0)
+
+    def test_coincident_graphs_keep_features_and_gradient_finite(self):
+        """Two graphs at the same coordinates: the masked zero-distance pairs are inert.
+
+        Every cross-graph pair ``(i, i')`` has ``r = 0``. The batch features
+        and their position gradient must equal those of the graph alone — and
+        in particular carry no NaN from ``0 · inf`` in either direction.
+        """
+        block = _dump_block()
+        feats = torch.tensor(PAIR_FEATS, dtype=torch.float64)
+        pos = torch.tensor(PAIR_POS, dtype=torch.float64)
+        leaf = torch.cat([pos, pos]).requires_grad_(True)
+        batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+        out = block(torch.cat([feats, feats]), leaf, batch, num_graphs=2)
+        (grad,) = torch.autograd.grad(out.sum(), leaf)
+        single = pos.clone().requires_grad_(True)
+        alone = block(feats, single, torch.zeros(2, dtype=torch.long), num_graphs=1)
+        (grad_alone,) = torch.autograd.grad(alone.sum(), single)
+        assert bool(torch.isfinite(grad).all())
+        assert torch.allclose(out, torch.cat([alone, alone]), rtol=1e-12, atol=0.0)
+        assert torch.allclose(grad, torch.cat([grad_alone, grad_alone]), rtol=1e-12, atol=0.0)
+
+    @pytest.mark.slow
+    def test_isolated_branch_compiles_to_one_graph(self) -> None:
+        """A pair list that is a function of ``N`` alone → 1 graph, 0 breaks, two graphs in."""
+        block = _dump_block()
+        feats = torch.tensor(PAIR_FEATS + PAIR_FEATS, dtype=torch.float64)
+        pos = torch.tensor(PAIR_POS + PAIR_POS, dtype=torch.float64)
+        batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+        explanation = Compiler.explain(block, feats, pos, batch, num_graphs=2)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )
 
     def test_periodic_self_overlap_constants(self):
         """``r → 0`` limits of the two real-space kernels, per feature width.

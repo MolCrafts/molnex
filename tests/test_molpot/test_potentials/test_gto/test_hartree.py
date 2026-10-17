@@ -10,7 +10,11 @@ import torch
 from molix import config
 from molix.compile import Compiler
 from molpot.potentials.elec.prefactors import eV_A
-from molpot.potentials.gto.hartree import GTOHartreeEnergy, gto_self_overlap
+from molpot.potentials.gto.hartree import (
+    GTOHartreeEnergy,
+    complete_directed_pairs,
+    gto_self_overlap,
+)
 from molpot.potentials.gto.kspace import KSpaceGrid
 
 #: Madelung (Wigner) constant of the simple-cubic lattice with a neutralising
@@ -86,14 +90,6 @@ PROBE_ISOLATED_SI = 0.04313372746319044
 PROBE_ISOLATED_L0_NOSI = -0.6665851178517852
 PROBE_ISOLATED_L0_SI = 0.03750614756736037
 
-# -- Retained isolated-branch enumeration --------------------------
-#
-# ``inspect.getsource`` of the four pair-enumeration helpers, captured from the
-# same pre-change tree. They are *not* touched by the k-grid work (their break
-# is a named, deliberate debt owned by ``polar-compile-clean-04-pairs``), so a
-# character-for-character comparison is the guard. A line-range git diff is not
-# usable: the imports above them shift.
-
 
 @pytest.fixture(autouse=True)
 def fp64():
@@ -101,6 +97,20 @@ def fp64():
     config.set_precision("fp64")
     yield
     config.set_precision("fp64" if previous == torch.float64 else "fp32")
+
+
+class TestCompleteDirectedPairs:
+    """The all-pairs list is a pure function of the row count."""
+
+    @pytest.mark.parametrize("n", [1, 4])
+    def test_enumerates_every_ordered_pair_once(self, n: int) -> None:
+        """``n (n - 1)`` rows, each ordered pair ``i != j`` exactly once; ``n = 1`` is empty."""
+        src, dst = complete_directed_pairs(n, torch.device("cpu"))
+        assert src.shape == dst.shape == (n * (n - 1),)
+        assert src.dtype == dst.dtype == torch.long
+        pairs = list(zip(src.tolist(), dst.tolist(), strict=True))
+        assert len(set(pairs)) == len(pairs)
+        assert set(pairs) == {(i, j) for i in range(n) for j in range(n) if i != j}
 
 
 class TestGTOHartreeEnergy:
@@ -153,34 +163,84 @@ class TestGTOHartreeEnergy:
         e1 = GTOHartreeEnergy(sigma=1.5, l_max=1)(q1, pos, batch, num_graphs=1)
         assert torch.allclose(e0, e1, rtol=1e-10, atol=1e-12)
 
-    def test_l1_pair_count_skips_same_atom_copies(self):
-        """2 atoms × 4 copies → 32 directed pairs, not 8×7."""
-        from molpot.potentials.gto.hartree import _complete_directed_pairs
+    def test_two_graph_batch_matches_explicit_pair_loop(self):
+        """``l_max=0``: the batch energy is the loop over same-graph pairs ``i ≠ j``.
 
-        orig = torch.arange(2).repeat_interleave(4)
-        batch = torch.zeros(8, dtype=torch.long)
-        src, dst = _complete_directed_pairs(batch, orig)
-        assert src.numel() == 32
-        assert int((orig[src] == orig[dst]).sum()) == 0
-
-    def test_graphs_do_not_mix(self):
-        """Two isolated pairs in different graphs keep their own energies."""
+        Graph 1 starts at the origin like graph 0, so the masked cross-graph
+        pair ``(0, 3)`` sits at zero distance — evaluated, zeroed, harmless.
+        """
         energy = GTOHartreeEnergy(sigma=1.5, l_max=0)
-        pos = torch.tensor(
-            [
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [10.0, 0.0, 0.0],
-                [11.0, 0.0, 0.0],
-            ],
-            dtype=torch.float64,
-        )
-        q = torch.ones(4, 1, dtype=torch.float64)
-        batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
-        out = energy(q, pos, batch, num_graphs=2)
-        expect = eV_A * math.erf(1.0 / 3.0)
+        pos = torch.tensor(PROBE_POS + [[0.0, 0.0, 0.0], [1.1, -0.4, 0.8]], dtype=torch.float64)
+        q = torch.tensor([0.4, -0.3, -0.1, 0.7, -0.7], dtype=torch.float64)
+        batch = torch.tensor([0, 0, 0, 1, 1], dtype=torch.long)
+        out = energy(q.unsqueeze(-1), pos, batch, num_graphs=2)
+        expect = torch.zeros(2, dtype=torch.float64)
+        for i in range(5):
+            for j in range(5):
+                if i == j or batch[i] != batch[j]:
+                    continue
+                r = (pos[i] - pos[j]).norm()
+                expect[batch[i]] += 0.5 * eV_A * q[i] * q[j] * torch.erf(r / 3.0) / r
         assert out.shape == (2,)
-        assert torch.allclose(out, torch.full((2,), expect, dtype=torch.float64), rtol=1e-10)
+        assert torch.allclose(out, expect, rtol=1e-12, atol=0.0)
+
+    def test_copy_layout_matches_explicit_pair_loop(self):
+        """``orig`` masks the pairs of one atom's copies; every other same-graph pair is summed.
+
+        Three atoms in two graphs, four copies each; copies ``0`` and ``3`` of
+        an atom coincide, so masked zero-distance pairs occur inside a graph
+        as well as across graphs.
+        """
+        model = GTOHartreeEnergy(sigma=1.5, l_max=1)
+        pos = torch.tensor(PROBE_POS, dtype=torch.float64).repeat_interleave(4, dim=0)
+        pos[1::4, 0] += 0.3
+        pos[2::4, 1] -= 0.2
+        orig = torch.arange(3).repeat_interleave(4)
+        batch = torch.tensor([0, 0, 1], dtype=torch.long).repeat_interleave(4)
+        q = torch.linspace(-0.6, 0.6, 12, dtype=torch.float64)
+        out = model._pair_energy(q, pos, batch, 2, orig)
+        expect = torch.zeros(2, dtype=torch.float64)
+        for i in range(12):
+            for j in range(12):
+                if i == j or batch[i] != batch[j] or orig[i] == orig[j]:
+                    continue
+                r = (pos[i] - pos[j]).norm()
+                expect[batch[i]] += 0.5 * eV_A * q[i] * q[j] * torch.erf(r / 3.0) / r
+        assert out.shape == (2,)
+        assert torch.allclose(out, expect, rtol=1e-12, atol=0.0)
+
+    def test_coincident_graphs_keep_energy_and_force_finite(self):
+        """Two graphs at the same coordinates: the masked zero-distance pairs are inert.
+
+        Every cross-graph pair ``(i, i')`` has ``r = 0``. The batch energy and
+        its position gradient must equal those of the graph alone — and in
+        particular carry no NaN from ``0 · inf`` in either direction.
+        """
+        model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=True)
+        feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
+        pos = torch.tensor(PROBE_POS, dtype=torch.float64)
+        leaf = torch.cat([pos, pos]).requires_grad_(True)
+        batch = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long)
+        energy = model(torch.cat([feats, feats]), leaf, batch, num_graphs=2)
+        (grad,) = torch.autograd.grad(energy.sum(), leaf)
+        single = pos.clone().requires_grad_(True)
+        alone = model(feats, single, torch.zeros(3, dtype=torch.long), num_graphs=1)
+        (grad_alone,) = torch.autograd.grad(alone.sum(), single)
+        assert bool(torch.isfinite(grad).all())
+        assert torch.allclose(energy, torch.cat([alone, alone]), rtol=1e-12, atol=0.0)
+        assert torch.allclose(grad, torch.cat([grad_alone, grad_alone]), rtol=1e-12, atol=0.0)
+
+    @pytest.mark.slow
+    def test_isolated_branch_compiles_to_one_graph(self) -> None:
+        """A pair list that is a function of ``N`` alone → 1 graph, 0 breaks, two graphs in."""
+        model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
+        feats = torch.tensor(PROBE_FEATS + PROBE_FEATS, dtype=torch.float64)
+        pos = torch.tensor(PROBE_POS + PROBE_POS, dtype=torch.float64)
+        batch = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.long)
+        explanation = Compiler.explain(model, feats, pos, batch, num_graphs=2)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )
 
     def test_large_cell_kspace_matches_isolated(self):
         """A 60 Å cell reproduces the isolated energy — images are all that differ.
@@ -607,20 +667,6 @@ class TestGTOHartreeEnergyKspace:
         flat = model(feats, pos, batch, cell=cell, num_graphs=1)
         batched = model(feats, pos, batch, cell=cell.unsqueeze(0), num_graphs=1)
         assert torch.equal(flat, batched)
-
-    @pytest.mark.slow
-    def test_isolated_branch_still_breaks_by_design(self) -> None:
-        """the retained all-pairs enumeration is a *named* break."""
-        model = GTOHartreeEnergy(sigma=1.5, l_max=1, include_self_interaction=False)
-        feats = torch.tensor(PROBE_FEATS, dtype=torch.float64)
-        pos = torch.tensor(PROBE_POS, dtype=torch.float64)
-        batch = torch.zeros(3, dtype=torch.long)
-        explanation = Compiler.explain(model, feats, pos, batch, num_graphs=1)
-        assert explanation.graph_break_count > 0, (
-            "the isolated all-pairs enumeration is retained on purpose (D6); "
-            "its break is owned by spec polar-compile-clean-04-pairs and must "
-            "not become an accidental silent contract."
-        )
 
     @pytest.mark.slow
     def test_compiling_without_bind_cell_names_bind_cell(self) -> None:

@@ -18,13 +18,9 @@ status is non-zero when any check fails.
      ``Compiler(cuda_graphs=True)`` under ``torch.no_grad()`` vs eager.
 2. MACE (tiny MatPES / OMol / Polar fixtures)
    * CUDA eager vs the CPU reference ``_gh200_verify/step7_ref.pt``.
-   * explain → 0 breaks for MatPES / OMol ``forward``, Polar's ``forward``
-     on its periodic path and ``MACEEncoder.forward``;
-     ``Compiler(cuda_graphs=True)`` vs eager for the same four. Polar's
-     non-periodic path is reported as SKIP: its real-space Hartree pair list
-     (``molpot/potentials/gto/hartree.py::cached_complete_directed_pairs``)
-     reads ``.item()`` for a cache key and masks pairs data-dependently (34
-     graphs / 33 breaks, pre-existing; notes 2026-10-17).
+   * explain → 0 breaks for MatPES / OMol / Polar ``forward``, Polar's
+     ``forward`` on its periodic path and ``MACEEncoder.forward``;
+     ``Compiler(cuda_graphs=True)`` vs eager for the same five.
 
 Every ``cuda-graphs vs eager`` check also asserts that inductor recorded a
 CUDA graph (``cudagraph_trees.get_manager``), so a silently skipped capture
@@ -102,11 +98,6 @@ TOL_GRAPH_E = 1e-11  # eV, |E| ~ 1e3-1e4 so 2e-13 is below one ulp
 #: whose terms inductor reorders: per-atom energies replay to 0.0, the k-space
 #: term to 2.3e-12 eV and its force gradient to 1.3e-12 eV/A (job 3978557).
 TOL_GRAPH_F_KSPACE = 5e-12
-#: Why Polar's non-periodic path is not a compile seam here (notes 2026-10-17).
-POLAR_NON_PERIODIC = (
-    "non-periodic path: hartree.py cached_complete_directed_pairs reads .item() and "
-    "masks pairs data-dependently (34 graphs / 33 breaks, pre-existing)"
-)
 
 
 class Report:
@@ -508,11 +499,10 @@ def check_mace_reference(device: torch.device) -> dict:
 def check_mace_compile(device: torch.device, moved: dict) -> None:
     on_cuda = device.type == "cuda"
     # explain: products' forward (eager forward already spent the element gate)
-    for name in ("matpes", "omol"):
+    for name in ("matpes", "omol", "polar"):
         if name in moved:
             model, batch = moved[name]
             guarded(f"mace.{name} explain")(explain_one_graph, f"mace.{name} forward", model, batch)
-    report.skip("mace.polar forward explain", POLAR_NON_PERIODIC)
     # Polar periodic seam (bind_cell + k-space grids), as test_polar does
     name = "mace.polar periodic forward"
     try:
@@ -566,11 +556,10 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
     if not on_cuda:
         report.skip("mace cuda-graphs", f"device {device}")
         return
-    for name in ("matpes", "omol"):
+    for name in ("matpes", "omol", "polar"):
         if name in moved:
             model, batch = moved[name]
             guarded(f"mace.{name} cuda-graphs")(cuda_graph_vs_eager, f"mace.{name}", model, batch)
-    report.skip("mace.polar cuda-graphs", POLAR_NON_PERIODIC)
 
 
 # --------------------------------------------------------------------------- main

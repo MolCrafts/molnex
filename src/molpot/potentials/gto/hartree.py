@@ -85,89 +85,53 @@ def gto_self_overlap(sigma: float, l_max: int) -> torch.Tensor:
     return out
 
 
-def _skip_diagonal(n: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """All directed pairs ``(i, j)`` with ``i != j``, no ``N×N`` mask."""
-    if n < 2:
-        empty = torch.empty(0, dtype=torch.long, device=device)
-        return empty, empty
+def complete_directed_pairs(n: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """All ``n (n - 1)`` directed pairs ``(i, j)`` with ``i != j``.
+
+    A pure function of the row count: ``src`` is ``i`` repeated ``n - 1``
+    times and ``dst`` runs over the other rows, skipping ``i`` by one
+    arithmetic step — no ``N×N`` mask, nothing read back from a tensor, no
+    data-dependent shape. Graph membership and the same-atom exclusion are
+    applied downstream as a multiplicative mask (:func:`pair_mask`), which is
+    what lets the molecular path trace as one graph and record into a CUDA
+    graph.
+
+    Args:
+        n: Number of rows (atoms, or atom copies on the ``l_max=1`` layout).
+        device: Device of the returned indices.
+
+    Returns:
+        ``src, dst``, each ``(n (n - 1),)`` of ``torch.long``.
+    """
     idx = torch.arange(n * (n - 1), device=device)
     src = torch.div(idx, n - 1, rounding_mode="floor")
     dst = idx.remainder(n - 1)
     return src, dst + (dst >= src).to(dtype=dst.dtype)
 
 
-def _skip_equal_orig_regular(
-    n_atoms: int, copies: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Directed pairs of ``n_atoms * copies`` sites whose original atom differs.
+def pair_mask(
+    src: torch.Tensor, dst: torch.Tensor, batch: torch.Tensor, orig: torch.Tensor | None
+) -> torch.Tensor:
+    """Which directed pairs interact: same graph and, with ``orig``, different atom.
 
-    Layout is ``orig = arange(n_atoms).repeat_interleave(copies)``.
+    ``orig`` is the pre-duplication atom id of each row (``None`` for
+    ``l_max=0``; ``arange(n).repeat_interleave(4)`` for the dipole
+    finite-difference copies). Copies of one atom never interact — that is
+    the optional self-interaction term.
+
+    Args:
+        src: Pair sources ``(P,)``.
+        dst: Pair targets ``(P,)``.
+        batch: Graph id per row ``(N,)``.
+        orig: Original atom id per row ``(N,)``, or ``None``.
+
+    Returns:
+        Boolean ``(P,)``, ``True`` where the pair contributes.
     """
-    atom_src, atom_dst = _skip_diagonal(n_atoms, device)
-    copy = torch.arange(copies, device=device)
-    src, dst = torch.broadcast_tensors(
-        atom_src[:, None, None] * copies + copy[None, :, None],
-        atom_dst[:, None, None] * copies + copy[None, None, :],
-    )
-    return src.reshape(-1), dst.reshape(-1)
-
-
-def _complete_directed_pairs(
-    batch: torch.Tensor,
-    orig: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Directed pairs that share a graph and come from different original atoms.
-
-    ``orig`` is the pre-duplication atom id (identity for ``l_max=0``; repeated
-    4× for the dipole finite-difference copies). Copies of the same atom never
-    interact — that is the optional self-interaction term.
-    """
-    n = int(batch.shape[0])
-    device = batch.device
-    empty = torch.empty(0, dtype=torch.long, device=device)
-    if n == 0:
-        return empty, empty
-    single = bool((batch == batch[0]).all().item())
+    keep = batch[src] == batch[dst]
     if orig is None:
-        src, dst = _skip_diagonal(n, device)
-        if single:
-            return src, dst
-        keep = batch[src] == batch[dst]
-        return src[keep], dst[keep]
-
-    if single:
-        first = orig[0]
-        copies = int((orig == first).sum().item())
-        n_atoms = n // copies if copies else 0
-        if copies > 1 and n_atoms * copies == n:
-            expected = torch.arange(n_atoms, device=device, dtype=orig.dtype).repeat_interleave(
-                copies
-            )
-            if torch.equal(orig, expected):
-                return _skip_equal_orig_regular(n_atoms, copies, device)
-        src, dst = _skip_diagonal(n, device)
-        keep = orig[src] != orig[dst]
-        return src[keep], dst[keep]
-
-    src, dst = _skip_diagonal(n, device)
-    keep = (batch[src] == batch[dst]) & (orig[src] != orig[dst])
-    return src[keep], dst[keep]
-
-
-def cached_complete_directed_pairs(
-    owner: object,
-    batch: torch.Tensor,
-    orig: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reuse pair indices while ``N``, graph membership and orig layout stay put."""
-    osum = 0 if orig is None else int(orig.sum().item()) + 1
-    key = (int(batch.shape[0]), int(batch.sum().item()), osum, batch.device)
-    cached = getattr(owner, "_pair_cache", None)
-    if cached is not None and cached[0] == key:
-        return cached[1], cached[2]
-    src, dst = _complete_directed_pairs(batch, orig)
-    owner._pair_cache = (key, src, dst)
-    return src, dst
+        return keep
+    return keep & (orig[src] != orig[dst])
 
 
 class _KSpaceGridHolder(nn.Module):
@@ -328,11 +292,32 @@ class GTOHartreeEnergy(_KSpaceGridHolder, nn.Module):
         num_graphs: int,
         orig: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        src, dst = cached_complete_directed_pairs(self, batch, orig)
-        if src.numel() == 0:
-            return charges.new_zeros(num_graphs)
+        """Masked all-pairs sum ``½ eV_A Σ_{i≠j} q_i q_j erf(r_ij/(2σ))/r_ij`` per graph.
+
+        Every one of the ``N (N - 1)`` directed pairs of the batch is
+        evaluated and the ones that do not interact are zeroed by the mask, so
+        a multi-graph batch costs ``N²`` over the whole batch — the same as a
+        single graph of that size. A masked pair may sit at zero distance
+        (coincident atoms of two graphs: molecules are routinely centred at
+        the origin), so the distance is replaced by ``1`` before the kernel
+        and the kernel by ``0`` after it — no ``0 · inf`` in the forward, no
+        NaN in the backward.
+
+        Args:
+            charges: Point charges ``(N,)`` in e.
+            positions: ``(N, 3)`` in Å.
+            batch: Graph id ``(N,)``.
+            num_graphs: Number of graphs ``B``.
+            orig: Original atom id ``(N,)`` on the copy layout, else ``None``.
+
+        Returns:
+            Per-graph energy ``(B,)`` in eV.
+        """
+        src, dst = complete_directed_pairs(charges.shape[0], charges.device)
+        keep = pair_mask(src, dst, batch, orig)
         r = (positions[dst] - positions[src]).norm(dim=-1)
-        edge = 0.5 * eV_A * self.kernel(r) * charges[src] * charges[dst]
+        kernel = torch.where(keep, self.kernel(torch.where(keep, r, 1.0)), 0.0)
+        edge = 0.5 * eV_A * kernel * charges[src] * charges[dst]
         node = scatter_sum_compile_safe(edge, dst, charges.shape[0])
         return scatter_sum_compile_safe(node, batch, num_graphs)
 

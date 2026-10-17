@@ -37,7 +37,11 @@ import torch.nn as nn
 
 from molix.F.scatter import scatter_sum_compile_safe
 from molpot.potentials.elec.prefactors import eV_A
-from molpot.potentials.gto.hartree import _KSpaceGridHolder, cached_complete_directed_pairs
+from molpot.potentials.gto.hartree import (
+    _KSpaceGridHolder,
+    complete_directed_pairs,
+    pair_mask,
+)
 from molpot.potentials.gto.kspace import (
     KSpaceGrid,
     cartesian_dipole,
@@ -226,17 +230,35 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
         positions: torch.Tensor,
         batch: torch.Tensor,
         orig: torch.Tensor | None,
-        n_out: int,
     ) -> torch.Tensor:
-        src, dst = cached_complete_directed_pairs(self, batch, orig)
-        out = charges.new_zeros(n_out, self.num_radial)
-        if src.numel() == 0:
-            return out
-        r = (positions[src] - positions[dst]).norm(dim=-1, keepdim=True)
+        """Masked all-pairs potential ``eV_A Σ_{j≠i} q_j erf(r_ij/(2σ_w))/r_ij`` per row and width.
+
+        Every one of the ``N (N - 1)`` directed pairs of the batch is
+        evaluated and the ones that do not interact are zeroed by the mask, so
+        a multi-graph batch costs ``N²`` over the whole batch — the same as a
+        single graph of that size. A masked pair may sit at zero distance
+        (coincident atoms of two graphs: molecules are routinely centred at
+        the origin), so the distance is replaced by ``1`` before the kernel
+        and the kernel by ``0`` after it — no ``0 · inf`` in the forward, no
+        NaN in the backward.
+
+        Args:
+            charges: Point charges ``(N,)`` in e.
+            positions: ``(N, 3)`` in Å.
+            batch: Graph id ``(N,)``.
+            orig: Original atom id ``(N,)`` on the copy layout, else ``None``.
+
+        Returns:
+            ``(N, n_radial)`` in eV/e.
+        """
+        n = charges.shape[0]
+        src, dst = complete_directed_pairs(n, charges.device)
+        keep = pair_mask(src, dst, batch, orig)
+        r = torch.where(keep, (positions[src] - positions[dst]).norm(dim=-1), 1.0).unsqueeze(-1)
         sigma = self.combined_sigma.to(dtype=charges.dtype)
         kernel = torch.erf(r / (2.0 * sigma)) / r.clamp(min=1e-6)
-        contrib = charges[src].unsqueeze(-1) * kernel * eV_A
-        return scatter_sum_compile_safe(contrib, dst, n_out)
+        contrib = charges[src].unsqueeze(-1) * torch.where(keep.unsqueeze(-1), kernel, 0.0) * eV_A
+        return scatter_sum_compile_safe(contrib, dst, n)
 
     def forward(
         self,
@@ -289,7 +311,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             return self._kspace_features(feats, positions, batch, cell, num_graphs)
         need_fd = self.density_lmax == 1 or self.feature_lmax == 1
         if not need_fd:
-            scalars = self._pair_features(feats[:, 0], positions, batch, None, n)
+            scalars = self._pair_features(feats[:, 0], positions, batch, None)
             return scalars * self.l0_factors.to(dtype=feats.dtype)
 
         offset = self.offset
@@ -307,7 +329,7 @@ class GTOFieldFeatures(_KSpaceGridHolder, nn.Module):
             charges[0::4] = feats[:, 0]
         ext_batch = batch.repeat_interleave(4)
         orig = torch.arange(n, device=batch.device).repeat_interleave(4)
-        scalar = self._pair_features(charges, ext_pos, ext_batch, orig, n * 4)
+        scalar = self._pair_features(charges, ext_pos, ext_batch, orig)
         l0 = self.l0_factors.to(dtype=feats.dtype)
         if self.feature_lmax == 0:
             return scalar[0::4] * l0
