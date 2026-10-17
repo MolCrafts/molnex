@@ -49,6 +49,12 @@ class EarlyStop(BaseHook):
             mid-epoch, which loses the epoch and can lose the checkpoint the next
             curriculum stage needs; asked to stop, it exits the batch loop at
             once and still writes one.
+        regression_factor: Stop when *monitor* stays above this multiple of its
+            best for ``regression_patience`` consecutive evaluations. ``None``
+            (default) never stops on a spike. One evaluation past the line does
+            not count — a single reading the next one undoes (56 then 1.27 on a
+            Hessian eval) is noise; two in a row is a run leaving its basin
+            (511 then 844, and the next reading 51918).
 
     Example::
 
@@ -67,6 +73,8 @@ class EarlyStop(BaseHook):
         monitor: str | tuple[str, ...] | None = None,
         min_delta: float = 0.0,
         max_seconds: float | None = None,
+        regression_factor: float | None = None,
+        regression_patience: int = 2,
     ) -> None:
         if if_nan and model is None:
             raise ValueError("EarlyStop(if_nan=True) requires `model=` for the NaN checkpoint.")
@@ -78,6 +86,10 @@ class EarlyStop(BaseHook):
             raise ValueError(f"min_delta must be >= 0, got {min_delta}")
         if max_seconds is not None and max_seconds <= 0.0:
             raise ValueError(f"max_seconds must be > 0, got {max_seconds}")
+        if regression_factor is not None and not (regression_factor > 1.0):
+            raise ValueError(f"regression_factor must be > 1, got {regression_factor}")
+        if regression_patience < 1:
+            raise ValueError(f"regression_patience must be >= 1, got {regression_patience}")
         self._if_nan = if_nan
         self._model = model
         self._out_dir = Path(out_dir) if out_dir is not None else None
@@ -90,6 +102,9 @@ class EarlyStop(BaseHook):
         self._best: float | None = None
         self._stale = 0
         self._started: float | None = None
+        self._regression_factor = None if regression_factor is None else float(regression_factor)
+        self._regression_patience = int(regression_patience)
+        self._regressed = 0
 
     def on_train_start(self, trainer, state) -> None:
         """Start the clock. Nothing else — the budget is wall time, not steps."""
@@ -111,7 +126,7 @@ class EarlyStop(BaseHook):
         A missing metric is not a plateau — it is counted as nothing at all, since
         a stage whose eval has not reported yet has told us nothing.
         """
-        if self._patience is None:
+        if self._patience is None and self._regression_factor is None:
             return
         path = self._monitor_path(trainer)
         value = state.get(path)
@@ -121,7 +136,20 @@ class EarlyStop(BaseHook):
         if not math.isfinite(current):
             return
         if self._best is None or current < self._best - self._min_delta:
-            self._best, self._stale = current, 0
+            self._best, self._stale, self._regressed = current, 0, 0
+            return
+        if self._regression_factor is not None and current > self._regression_factor * self._best:
+            self._regressed += 1
+            if self._regressed >= self._regression_patience:
+                trainer.stop(
+                    f"{'/'.join(path)} is {current:.6g}, more than "
+                    f"{self._regression_factor:g}x its best {self._best:.6g} for "
+                    f"{self._regressed} evaluations"
+                )
+                return
+        else:
+            self._regressed = 0
+        if self._patience is None:
             return
         self._stale += 1
         if self._stale >= self._patience:

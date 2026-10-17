@@ -19,7 +19,6 @@ batch keys. This mirrors the molrep / molzoo encoder convention.
 from __future__ import annotations
 
 import cuequivariance as cue
-import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from molix import config
 from molpot.heads._common import scalar_mlp as _scalar_mlp
+from molrep import cueq
 
 
 def _find_irrep_offset(tensor_irreps: cue.Irreps, target_ir: cue.Irrep) -> int:
@@ -153,12 +153,19 @@ class HardnessHead(nn.Module):
             ReLU. Default 1.0.
     """
 
-    def __init__(self, *, input_dim: int, hidden_dim: int = 128, softplus_beta: float = 1.0):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dim: int = 128,
+        softplus_beta: float = 1.0,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         self.config = HardnessHeadSpec(
             input_dim=input_dim, hidden_dim=hidden_dim, softplus_beta=softplus_beta
         )
-        self.mlp = _scalar_mlp(input_dim, [hidden_dim], 1)
+        self.mlp = _scalar_mlp(input_dim, [hidden_dim], 1, dtype=dtype)
         self.softplus_beta = softplus_beta
 
     def forward(self, atom_features: torch.Tensor) -> torch.Tensor:
@@ -215,15 +222,19 @@ class PolarizabilityHead(nn.Module):
         softplus_beta: float = 1.0,
         tensor_irreps: cue.Irreps | None = None,
         avg_num_neighbors: float | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.config = PolarizabilityHeadSpec(
             input_dim=input_dim,
             hidden_dim=hidden_dim,
             anisotropic=anisotropic,
             softplus_beta=softplus_beta,
         )
-        self.iso_mlp = _scalar_mlp(input_dim, [hidden_dim], 1)
+        self.iso_mlp = _scalar_mlp(input_dim, [hidden_dim], 1, dtype=dtype)
         self.softplus_beta = softplus_beta
         self.anisotropic = anisotropic
         self.avg_num_neighbors = avg_num_neighbors
@@ -250,11 +261,12 @@ class PolarizabilityHead(nn.Module):
                     f"build the encoder with l_max>=2. ({e})"
                 ) from None
             self._dev_size = 5 * self._u
-            self.dev_proj = nn.Linear(input_dim, self._u, dtype=config.ftype)
-            self.dev_collapse = cuet.Linear(
+            self.dev_proj = nn.Linear(input_dim, self._u, dtype=dtype)
+            self.dev_collapse = cueq.Linear(
                 irreps_in=cue.Irreps(G, [(self._u, "2e")]),
                 irreps_out=cue.Irreps(G, [(1, "2e")]),
                 layout=cue.ir_mul,
+                dtype=dtype,  # was torch's default, not the model's, under fp64 builds
             )
 
     def forward(

@@ -10,6 +10,8 @@ Reference:
     Pergamon, 1985.
     Batatia et al. "A foundation model for atomistic materials chemistry"
     (MACE-MP-0), § pair repulsion. https://arxiv.org/abs/2401.00096
+    LAMMPS ``pair_style zbl`` (``pair_zbl_const.h``) — the form
+    :class:`UniversalZBL` follows, as nequip's ``ZBL`` does.
 """
 
 from __future__ import annotations
@@ -63,14 +65,15 @@ class ZBLRepulsion(nn.Module):
         a_prefactor: float = 0.4543,
         max_z: int = 118,
         trainable: bool = False,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        ftype = config.ftype
+        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.exponent = int(exponent)
 
         self.register_buffer("c", torch.tensor(_SCREENING_C, dtype=ftype))
         self.c: torch.Tensor
-        self.register_buffer("covalent_radii", covalent_radii(max_z))
+        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=ftype))
         self.covalent_radii: torch.Tensor
 
         for name, value in (("a_exp", a_exp), ("a_prefactor", a_prefactor)):
@@ -118,3 +121,60 @@ class ZBLRepulsion(nn.Module):
 
         v_edges = 0.5 * (_COULOMB_CONSTANT * z_source * z_target) / r * phi * envelope
         return _scatter_sum(v_edges, target, Z.shape[0])
+
+
+class UniversalZBL(nn.Module):
+    """LAMMPS ``pair_zbl`` universal screened repulsion with a polynomial envelope.
+
+    For each directed pair ``(i → j)``:
+
+    .. math::
+
+        x &= \\frac{(Z_i^{0.23} + Z_j^{0.23})\\, r}{a_0}, \\quad
+        \\phi(x) = \\sum_k c_k e^{d_k x} \\\\
+        V_{ij} &= \\tfrac12 k_e \\frac{Z_i Z_j}{r} \\phi(x)\\, u_p(r / r_{max})
+
+    summed onto the **source** atom ``i``; a bidirectional list counts each pair
+    once in total. Constants are LAMMPS ``pair_zbl_const.h`` (``a_0 = 0.46850``
+    Å) and ``k_e = 14.399645`` eV·Å (LAMMPS ``metal``); the envelope is cut at
+    the model's ``r_max``, not at covalent radii — the difference from
+    :class:`ZBLRepulsion` (MACE's form).
+
+    Args:
+        r_max: Envelope radius in Å.
+        exponent: Polynomial-envelope exponent ``p``.
+
+    Reference:
+        ``nequip/nn/pair_potential.py::ZBL`` (nequip 0.19).
+    """
+
+    _C = (0.02817, 0.28022, 0.50986, 0.18175)
+    _D = (-0.20162, -0.40290, -0.94229, -3.19980)
+
+    def __init__(
+        self, *, r_max: float, exponent: int = 6, dtype: torch.dtype | None = None
+    ) -> None:
+        super().__init__()
+        self.cutoff = PolynomialCutoff(r_cut=r_max, exponent=exponent, dtype=dtype)
+        self.register_buffer(
+            "_qqr2exesquare", torch.tensor(14.399645 * 0.5, dtype=torch.float64), persistent=False
+        )
+
+    def forward(self, r: torch.Tensor, Z: torch.Tensor, pair_index: torch.Tensor) -> torch.Tensor:
+        """Per-atom repulsion energy.
+
+        Args:
+            r: Pair distances ``(E,)`` in Å.
+            Z: Atomic numbers ``(N,)``.
+            pair_index: ``(E, 2)``, ``[:, 0]`` source.
+
+        Returns:
+            ``(N,)`` in eV, in ``r``'s dtype.
+        """
+        source, target = pair_index[:, 0], pair_index[:, 1]
+        z_i = Z[source].to(r.dtype)
+        z_j = Z[target].to(r.dtype)
+        x = (z_i.pow(0.23) + z_j.pow(0.23)) * r / 0.46850
+        phi = sum(c * torch.exp(d * x) for c, d in zip(self._C, self._D))
+        v = (self._qqr2exesquare * (z_i * z_j / r) * phi).to(r.dtype) * self.cutoff(r)
+        return _scatter_sum(v, source, Z.shape[0])

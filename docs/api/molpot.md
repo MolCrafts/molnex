@@ -24,9 +24,11 @@
 
 ::: molpot.derivation
 
+::: molpot.derivation.energy
+
 ::: molpot.derivation.force
 
-::: molpot.derivation.stress
+::: molpot.derivation.hessian
 
 ## ForceField
 
@@ -35,8 +37,6 @@
 ::: molpot.forcefield.container
 
 ::: molpot.forcefield.potentials
-
-::: molpot.forcefield.classical_imm
 
 ::: molpot.ir
 

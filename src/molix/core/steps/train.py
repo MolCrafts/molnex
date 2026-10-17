@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from molix.config import config
-from molix.core.steps.base import _mark_leaves
+from molix.core.steps.base import _mark_leaves, publish_terms
 
 if TYPE_CHECKING:
     from molix.core.state import TrainState
@@ -18,11 +17,10 @@ if TYPE_CHECKING:
 class DefaultTrainStep:
     """Default training step with AMP + gradient-accumulation support.
 
-    Precision is controlled globally via :meth:`molix.config.MolnexConfig.set_precision`
-    which writes ``use_amp`` and ``amp_dtype`` into the global
-    :data:`molix.config.config`. When ``use_amp`` is true the forward pass
-    runs under :func:`torch.amp.autocast` and backward uses the
-    :class:`torch.amp.GradScaler` owned by the :class:`Trainer`.
+    Autocast is the Trainer's: with ``Trainer(autocast=torch.bfloat16)`` (or
+    ``torch.float16``) the forward pass runs under :func:`torch.amp.autocast`
+    at that dtype, and under float16 the backward uses the
+    :class:`torch.amp.GradScaler` the :class:`Trainer` owns.
 
     Gradient accumulation is a *Trainer* concern: this step reads
     ``trainer.accumulate_grad_batches`` and ``trainer._micro_step`` to decide
@@ -61,8 +59,8 @@ class DefaultTrainStep:
     :meth:`on_train_batch` stays eager Python around that call: the
     accumulation window, ``GradScaler``, ``on_after_backward`` and the
     optimizer. The autocast context wraps the call from outside — dynamo
-    guards on the autocast state and captures the ops under it — because
-    resolving it reads :data:`molix.config.config`, which must not enter the
+    guards on the autocast state and captures the ops under it — so the
+    ``trainer.autocast`` read stays in eager Python and never enters the
     trace.
 
     Which shipped losses trace (no tensor-valued Python control flow):
@@ -193,13 +191,12 @@ class DefaultTrainStep:
         is_window_start = trainer._micro_step % accum == 0
         is_window_end = (trainer._micro_step + 1) % accum == 0
 
-        # Only resolve the model device + AMP dtype when autocast is actually
-        # used — otherwise this walked model.parameters() and hit the config
-        # dict every micro-batch for a context that is a no-op.
-        amp_enabled = bool(config["use_amp"])
-        if amp_enabled:
+        # Only resolve the model device when autocast is actually used —
+        # otherwise this walked model.parameters() every micro-batch for a
+        # context that is a no-op.
+        if trainer.autocast is not None:
             device_type = next(trainer.model.parameters()).device.type
-            ctx = torch.amp.autocast(device_type, dtype=config["amp_dtype"])
+            ctx = torch.amp.autocast(device_type, dtype=trainer.autocast)
         else:
             ctx = nullcontext()
         with ctx:
@@ -208,7 +205,7 @@ class DefaultTrainStep:
         if is_window_start:
             trainer.optimizer.zero_grad()
 
-        scaler = trainer.scaler if amp_enabled else None
+        scaler = trainer.scaler  # None unless the Trainer autocasts at float16
         scaled_loss = loss / accum
         if scaler is not None:
             scaler.scale(scaled_loss).backward()
@@ -233,6 +230,7 @@ class DefaultTrainStep:
                 optimizer_applied = True
 
         state["train"]["loss"] = loss.detach()
+        publish_terms(trainer.loss_fn, predictions, batch, state["train"])
         return {
             "loss": loss,
             "predictions": predictions,

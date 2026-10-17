@@ -37,7 +37,7 @@ def _soft_load_library(path):  # noqa: ANN001
 torch.ops.load_library = _soft_load_library  # type: ignore[method-assign]
 
 from molix.profiler import MockBatch  # noqa: E402
-from molzoo.pinet import PiNetPotential  # noqa: E402
+from molzoo.pinet import PiNetPotential, PiNetSpec  # noqa: E402
 
 ATOM_TYPES = list(range(1, 8))
 
@@ -82,17 +82,18 @@ def build(
     hidden: int = 64,
 ) -> PiNetPotential:
     return PiNetPotential(
-        atom_types=ATOM_TYPES,
-        r_max=5.0,
-        n_basis=5,
-        pp_nodes=[hidden, hidden],
-        pi_nodes=[hidden, hidden],
-        ii_nodes=[hidden, hidden],
-        depth=depth,
-        rank=rank,
-        hidden_dim=hidden,
+        PiNetSpec(
+            atomic_numbers=ATOM_TYPES,
+            r_max=5.0,
+            n_basis=5,
+            pp_nodes=[hidden, hidden],
+            pi_nodes=[hidden, hidden],
+            ii_nodes=[hidden, hidden],
+            depth=depth,
+            rank=rank,
+            out_nodes=[hidden],
+        ),
         wrt=("atoms.pos",) if compute_forces else (),
-        emit_property_features=False,
     )
 
 

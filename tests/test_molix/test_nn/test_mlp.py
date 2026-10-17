@@ -1,27 +1,9 @@
 """Unit tests for KeyedMLP with dict-based inputs."""
 
-from collections.abc import Iterator
-
 import pytest
 import torch
 
-from molix import config
 from molix.nn.mlp import KeyedMLP, KeyedMLPSpec
-
-
-@pytest.fixture
-def fp64() -> Iterator[None]:
-    """Run the case under the global fp64 precision, restoring the previous one.
-
-    :class:`KeyedMLP` bakes ``config["ftype"]`` into its parameters at
-    construction time (the contract documented in :mod:`molix.config`), so
-    the precision has to be switched *before* the module is built and
-    handed back afterwards.
-    """
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
 
 
 class TestKeyedMLPSpec:
@@ -195,11 +177,10 @@ class TestKeyedMLP:
         [[32], [32, 16], [8, 8, 8]],
         ids=["one-hidden", "two-hidden", "three-hidden"],
     )
-    def test_all_parameters_honour_the_fp64_precision(self, fp64, hidden_dims):
-        """Every parameter is fp64 when the MLP is built under fp64.
+    def test_all_parameters_honour_the_requested_dtype(self, hidden_dims):
+        """Every parameter is fp64 when the MLP is built with ``dtype=float64``.
 
-        ``config["ftype"]`` is the single source of truth for the working
-        precision; a layer that ignores it leaves the module
+        A layer that ignores the constructor's dtype leaves the module
         mixed-precision and its first forward dies on a dtype-mismatched
         matmul. The depth sweep covers the first / intermediate / final
         linear layers, which are constructed on three separate code paths.
@@ -210,11 +191,12 @@ class TestKeyedMLP:
             in_dim=8,
             hidden_dims=hidden_dims,
             out_dim=4,
+            dtype=torch.float64,
         )
 
         assert {p.dtype for p in mlp.parameters()} == {torch.float64}
 
-    def test_forward_runs_under_the_fp64_precision(self, fp64):
+    def test_forward_runs_at_the_requested_dtype(self):
         """A module built at fp64 consumes fp64 inputs and emits fp64."""
         mlp = KeyedMLP(
             input_key="rbf",
@@ -222,6 +204,7 @@ class TestKeyedMLP:
             in_dim=8,
             hidden_dims=[32, 16],
             out_dim=4,
+            dtype=torch.float64,
         )
 
         out = mlp({"rbf": torch.ones(10, 8, dtype=torch.float64)})

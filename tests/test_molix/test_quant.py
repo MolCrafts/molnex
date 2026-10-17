@@ -15,10 +15,10 @@ from molix.quant import (
     Quantizer,
     QuantScheme,
 )
-from molzoo.pinet import PiNetPotential
+from molzoo.pinet import PiNetPotential, PiNetSpec
 from tests.conftest import make_graph_batch
 
-# PiNet uses lazy params and make_graph_batch builds CPU metadata; keep tensors on CPU.
+# make_graph_batch builds CPU metadata; keep tensors on CPU.
 _DEVICE = torch.device("cpu")
 
 
@@ -182,15 +182,17 @@ def _tiny_potential() -> PiNetPotential:
     torch.manual_seed(0)
     return (
         PiNetPotential(
-            atom_types=[1, 6, 7, 8],
-            r_max=4.0,
-            n_basis=3,
-            pp_nodes=[8, 8],
-            pi_nodes=[8, 8],
-            ii_nodes=[8, 8],
-            depth=2,
-            rank=3,
-            hidden_dim=16,
+            PiNetSpec(
+                atomic_numbers=[1, 6, 7, 8],
+                r_max=4.0,
+                n_basis=3,
+                pp_nodes=[8, 8],
+                pi_nodes=[8, 8],
+                ii_nodes=[8, 8],
+                depth=2,
+                rank=3,
+                out_nodes=[16],
+            ),
             # Monomorphic: what is derived is fixed at construction.
             wrt=("atoms.pos",),
         )

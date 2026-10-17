@@ -181,8 +181,8 @@ class TestForceFieldToIR:
         assert torch.allclose(ir.charges.charge, torch.tensor([0.1, -0.1]))
 
     def test_is_molpy_forcefield_and_realize(self):
-        from molpy import BondType
-        from molpy import ForceField as MolpyForceField
+        from molpy.ff.forcefield import BondType
+        from molpy.ff.forcefield import ForceField as MolpyForceField
 
         ff = (
             ForceField(name="class-i", units="real")

@@ -4,27 +4,27 @@ Every batch-level derivative in molnex is this one module. A caller states
 *which quantity with respect to which variable*, as TensorFrame keys, and
 composes it around any energy::
 
-    model = Derivative(MaceMatpes(...), wrt=("atoms.pos",))            # E, F = -∂E/∂pos
-    npt = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))         # + W = ∂E/∂ε
+    model = Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))     # E, F = -∂E/∂pos
+    npt = Derivative(pots.energy, wrt=("atoms.pos", "graphs.strain"))  # + W = ∂E/∂ε
     frame = model(frame)      # graphs.energy, atoms.forces[, graphs.virial] on the frame
     model = Compiler(fullgraph=True)(model)                            # the only compile spelling
 
 A potential builds the same op over its own ``energy`` method in ``__init__``
-(``MaceMatpes(..., wrt=("atoms.pos",))``), so ``pot(frame)`` and
-``Derivative(pot, wrt=...)(frame)`` are one code path — there is no second
-kernel, no ``compute_forces`` flag and no ``compile_core``.
+(``MaceMatpes(..., wrt=("atoms.pos",))``, :class:`molix.autograd.Potential`),
+so ``pot(frame)`` and ``Derivative(pot.energy, wrt=...)(frame)`` are one code
+path — there is no second kernel, no ``compute_forces`` flag and no
+``compile_core``.
 
 **Contract of** ``energy``. ``energy(frame) -> frame`` reads only the frame it
-is handed — ``atoms.pos``, ``edges.pair_index`` / ``pair_diff`` (live, imaged),
+is handed — ``atoms.pos``, ``pairs.pair_index`` / ``pair_diff`` (live, imaged),
 ``graphs.cell`` — and writes ``of`` (per-graph ``(B,)`` or a scalar) and,
 optionally, ``atoms.energy``. An ``nn.Module`` is registered as the submodule
 ``energy`` so its parameters flow through the op under an ``energy.`` prefix;
 a plain callable such as a bound method is held without registration, which
-is how a potential wraps its own method without a module cycle. An object
-that exposes an ``energy(frame)`` method — every molnex potential — is
-differentiated **through that method**, whatever its own ``wrt`` is: its
-``forward`` is an op of its own, and an op nested over an op would put a
-second leaf between the energy and the first.
+is how a potential wraps its own method without a module cycle. The op calls
+exactly what it is handed: a potential is passed as ``pot.energy``, never as
+the object — its ``forward`` is an op of its own, and an op nested over an op
+would put a second leaf between the energy and the first.
 
 **Who owns the leaf.** The op makes a leaf unless the column already is one.
 For a plain column — no ``requires_grad``, or attached to some history — the
@@ -39,12 +39,12 @@ the columns before the traced region — :meth:`Derivative.mark_leaves`, which
 the default training and evaluation steps run in ``forward_loss``.
 
 **Geometry.** The frame may carry a cached neighbour geometry —
-``edges.pair_diff`` (imaged, ``pos[t] - pos[s] + S``), ``edges.pair_dist``,
-``edges.shifts``. The op rebuilds it once from the perturbed positions and
+``pairs.pair_diff`` (imaged, ``pos[t] - pos[s] + S``), ``pairs.pair_dist``,
+``pairs.shifts``. The op rebuilds it once from the perturbed positions and
 lattice remainder for the energy call and puts the caller's buffers back
 afterwards, so ``∂/∂pos`` (and, straining positions, cell and remainders
 alike, ``∂/∂ε``) flows through the geometry the energy actually reads. The
-remainder is ``edges.shifts`` when the list stored it, otherwise
+remainder is ``pairs.shifts`` when the list stored it, otherwise
 ``pair_diff − (pos[t] − pos[s])``, a constant with respect to the positions
 either way. An energy that recomputes its geometry from ``atoms.pos`` itself
 (bonded terms, an open-system encoder) is served by the same leaf.
@@ -76,7 +76,7 @@ what the energy writes.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -113,7 +113,8 @@ class Derivative(nn.Module):
         energy: ``energy(frame) -> frame``, writing ``of`` (per-graph ``(B,)``
             or a scalar) and optionally ``atoms.energy``. An
             :class:`~torch.nn.Module` is registered as the submodule
-            ``energy``; any other callable (a bound method) is held as is.
+            ``energy``; any other callable (a bound method such as
+            ``pot.energy``) is held as is. Called exactly as handed.
         of: The quantity differentiated, as a TensorFrame key. Defaults to
             ``graphs.energy``.
         wrt: The variables, in order — TensorFrame keys spelled as dotted
@@ -144,15 +145,15 @@ class Derivative(nn.Module):
     :meth:`mark_leaves`.
 
     Examples:
-        >>> op = Derivative(pot, wrt=("atoms.pos",))    # pot(frame) -> frame writes graphs.energy
-        >>> frame = op(frame)                           # + atoms.forces (N, 3)
-        >>> npt = Derivative(pot, wrt=("atoms.pos", "graphs.strain"))
+        >>> op = Derivative(pot.energy, wrt=("atoms.pos",))   # pot.energy writes graphs.energy
+        >>> frame = op(frame)                                 # + atoms.forces (N, 3)
+        >>> npt = Derivative(pot.energy, wrt=("atoms.pos", "graphs.strain"))
         >>> frame = npt(frame)                             # + graphs.virial (1, 3, 3)
         >>> compiled = Compiler(fullgraph=True)(npt)
         >>> frame = compiled(npt.mark_leaves(frame))       # training: one graph on stock torch
     """
 
-    _call: Callable[[TensorDictBase], TensorDictBase]
+    _call: Callable[..., TensorDictBase]
 
     def __init__(
         self,
@@ -165,16 +166,14 @@ class Derivative(nn.Module):
         super().__init__()
         if not callable(energy):
             raise TypeError(
-                "energy must be callable — energy(frame) -> frame, or a potential exposing "
-                f"such an energy method; got {type(energy).__name__}"
+                "energy must be callable — energy(frame) -> frame, e.g. pot.energy; "
+                f"got {type(energy).__name__}"
             )
         # ``nn.Module.__setattr__`` registers a module and stores anything else.
         self.energy = energy
-        # A potential is differentiated through its ``energy`` seam, never
-        # through its ``forward`` (which is an op of its own). Stored past
-        # ``nn.Module.__setattr__`` so a module energy is registered once.
-        seam = getattr(energy, "energy", None)
-        object.__setattr__(self, "_call", seam if callable(seam) else energy)
+        # Stored past ``nn.Module.__setattr__`` so a module energy is
+        # registered once, under ``energy`` only.
+        object.__setattr__(self, "_call", energy)
         self.of: Key = _key(of)
         keys = tuple(_key(spec) for spec in wrt)
         if len(set(keys)) != len(keys):
@@ -261,7 +260,7 @@ class Derivative(nn.Module):
             leaves.append(var.leaf(buffer, pos))
         return leaves
 
-    def forward(self, frame: TensorDictBase) -> TensorDictBase:
+    def forward(self, frame: TensorDictBase, **energy_kwargs: Any) -> TensorDictBase:
         """Derive and write in place.
 
         Args:
@@ -269,6 +268,13 @@ class Derivative(nn.Module):
                 view) carrying ``atoms.pos`` ``(N, 3)`` Å, whatever geometry the
                 energy reads, and ``graphs.cell`` ``(3, 3)`` or ``(1, 3, 3)`` Å
                 when ``graphs.strain`` is a variable.
+            **energy_kwargs: Handed to the energy unchanged —
+                ``energy(frame, **energy_kwargs)``. A training step that has
+                already predicted a model's parameter tables on this batch
+                passes them here (``op(frame, tables=tables)``) so the energy
+                does not predict them again; the derivative is still only
+                with respect to ``wrt``, through whatever graph the kwargs
+                carry.
 
         Returns:
             The same ``frame``, with ``of`` written by the energy and one
@@ -282,7 +288,7 @@ class Derivative(nn.Module):
                 leaf is one lattice.
         """
         if not self._variables:
-            return self._call(frame)
+            return self._call(frame, **energy_kwargs)
         # ``create_graph`` is the caller's grad mode, resolved before grad is
         # forced on for the derivative.
         create_graph = torch.is_grad_enabled()
@@ -336,7 +342,7 @@ class Derivative(nn.Module):
                     frame[PAIR_DIST_KEY] = diff.norm(dim=-1)
                 if has_shifts:
                     frame[SHIFTS_KEY] = shifts
-            frame = self._call(frame)
+            frame = self._call(frame, **energy_kwargs)
             energy = cast(torch.Tensor, frame[self.of])
             grads = torch.autograd.grad(
                 energy.sum(), leaves, create_graph=create_graph, allow_unused=True

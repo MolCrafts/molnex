@@ -69,6 +69,13 @@ class NeighborList:
             aggregate to the source node.
             If ``False``, only the upper-triangle pairs are returned
             (``E = n_pairs``, ``pair_index[:, 0] > pair_index[:, 1]``).
+
+    The cutoff graph of one molecule depends only on that molecule, so
+    :meth:`~molix.data.prepared.PreparedRow.capture` may run this task per row
+    and the loader then skips it for rows captured with it. Stored per row it
+    is ~36 B a pair for every conformer (a relax trajectory row 3.3 MB, a
+    shard 285 GB); rebuilt per packed batch it is 0.2 s
+    (:meth:`_execute_batched`), so the Class-I loader rebuilds it.
     """
 
     def __init__(
@@ -144,7 +151,7 @@ class NeighborList:
                 f"max_num_pairs={max_pairs} (N={n_atoms}, cutoff={self.cutoff}). "
                 "Increase max_num_pairs or lower the cutoff. "
                 "Note: the kernel is O(N²); large condensed-phase systems need a "
-                "cell-list/Verlet neighbour algorithm (not yet in molix.op)."
+                "cell-list/Verlet neighbour algorithm (not yet in the native op library, csrc/)."
             )
 
         pair_index = _normalize_to_E2(neighbors)

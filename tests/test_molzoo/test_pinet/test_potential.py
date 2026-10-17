@@ -1,197 +1,99 @@
-"""Unit tests for molzoo.pinet.potential.PiNetPotential (forces + energy)."""
+"""Unit tests for molzoo.pinet.potential.PiNetPotential."""
 
 from __future__ import annotations
 
+import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.autograd import Derivative
-from molzoo.pinet import PiNet, PiNetPotential
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def _batch(
-    *, n_graphs: int = 2, atoms_per_graph: int = 6, dtype: torch.dtype = torch.float32
-) -> TensorDict:
-    n_atoms = n_graphs * atoms_per_graph
-    z_cycle = torch.tensor([1, 6, 7, 8], device=DEVICE)
-    z = z_cycle[torch.arange(n_atoms, device=DEVICE) % 4]
-    torch.manual_seed(0)
-    pos = torch.randn(n_atoms, 3, dtype=dtype, device=DEVICE)
-    atom_batch = torch.arange(n_graphs, device=DEVICE).repeat_interleave(atoms_per_graph)
-    edges = [
-        (g * atoms_per_graph + i, g * atoms_per_graph + j)
-        for g in range(n_graphs)
-        for i in range(atoms_per_graph)
-        for j in range(atoms_per_graph)
-        if i != j
-    ]
-    edge_index = torch.tensor(edges, dtype=torch.long, device=DEVICE)
-    return TensorDict(
-        atoms=TensorDict(
-            Z=z,
-            pos=pos,
-            batch=atom_batch,
-            forces=torch.zeros(n_atoms, 3, dtype=dtype, device=DEVICE),
-            batch_size=[n_atoms],
-        ),
-        pairs=TensorDict(pair_index=edge_index, batch_size=[edge_index.shape[0]]),
-        graphs=TensorDict(
-            num_atoms=torch.full((n_graphs,), atoms_per_graph, dtype=torch.long, device=DEVICE),
-            energy=torch.zeros(n_graphs, dtype=dtype, device=DEVICE),
-            batch_size=[n_graphs],
-        ),
-        batch_size=[],
-    )
-
+from molix.compile import Compiler
+from molzoo.pinet import PiNetPotential, PiNetSpec
+from tests.conftest import make_graph_batch
+from tests.test_molzoo.test_pinet.conftest import PAIRS, TINY
 
 FORCES = ("atoms.pos",)
 
 
-def _model(*, wrt: tuple[str, ...] = FORCES) -> PiNetPotential:
-    torch.manual_seed(0)
-    return PiNetPotential(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=4,
-        pp_nodes=[16, 16],
-        pi_nodes=[16],
-        ii_nodes=[16, 16],
-        depth=3,
-        rank=3,
-        hidden_dim=16,
-        wrt=wrt,
-    ).to(DEVICE)
+def _model(*, wrt=FORCES, seed: int = 0, **overrides) -> PiNetPotential:
+    torch.manual_seed(seed)
+    return PiNetPotential(PiNetSpec(**{**TINY, "rank": 3, **overrides}), wrt=wrt)
 
 
-def test_energy_and_force_shapes():
-    model = PiNetPotential(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=3,
-        hidden_dim=8,
-        wrt=FORCES,
-    )
-    n = 4
-    batch = TensorDict(
-        atoms=TensorDict(
-            Z=torch.tensor([1, 6, 7, 8]),
-            pos=torch.randn(n, 3),
-            batch=torch.zeros(n, dtype=torch.long),
-            batch_size=[n],
-        ),
-        pairs=TensorDict(
-            pair_index=torch.tensor(
-                [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
-                dtype=torch.long,
-            ),
-            batch_size=[8],
-        ),
-        graphs=TensorDict(num_atoms=torch.tensor([n]), batch_size=[1]),
-        batch_size=[],
-    )
-    batch = model(batch)
-    assert batch["graphs", "energy"].shape == (1,)
-    assert batch["atoms", "forces"].shape == (n, 3)
-
-
-def test_derivative_exposes_the_init_fixed_op():
-    """The training step marks the leaves through ``derivative`` — the op ``forward`` runs."""
-    assert _model(wrt=FORCES).derivative.wrt == (("atoms", "pos"),)
-
-
-def test_forward_is_the_same_op_composed_outside():
-    """``wrt`` at construction and ``Derivative(model, wrt=...)`` are one code path."""
-    built_in = _model(wrt=FORCES).eval()
-    composed = Derivative(_model(wrt=()).eval(), wrt=FORCES)
-    with torch.no_grad():
-        inside = built_in(_batch())["atoms", "forces"]
-        outside = composed(_batch())["atoms", "forces"]
-    assert torch.equal(inside, outside)
-
-
-def test_encoder_kwarg_composition():
-    enc = PiNet(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=1,
-    )
-    model = PiNetPotential(encoder=enc, hidden_dim=8)
-    assert model.encoder is enc
-
-
-def test_forces_match_an_autograd_reference():
-    model = _model()
-    model.eval()
-    batch = _batch()
-
-    b1 = model(batch.clone())
-    f_head = b1["atoms", "forces"].detach()
-
-    # Energy-only model for the reference path (same architecture / weights).
-    ref_model = _model(wrt=())
-    ref_model.load_state_dict(
-        {k: v for k, v in model.state_dict().items()},
-        strict=False,
-    )
-    # Copy only shared params (force pipeline has no extra params).
-    ref_model.load_state_dict(model.state_dict())
-    ref_model.eval()
-
-    ref = batch.clone()
-    pos = ref["atoms", "pos"].detach().clone().requires_grad_(True)
-    ref["atoms", "pos"] = pos
-    with torch.enable_grad():
-        ref = ref_model(ref)
-        energy = ref["graphs", "energy"].sum()
-    f_autograd = -torch.autograd.grad(energy, pos)[0].detach()
-
-    assert f_head.shape == f_autograd.shape
-    assert torch.allclose(f_head, f_autograd, atol=1e-5, rtol=1e-5), (
-        f"max abs diff {(f_head - f_autograd).abs().max().item():.3e}"
+def _moved(batch: TensorDict, pos: torch.Tensor) -> TensorDict:
+    """``batch`` with its pair geometry rebuilt from ``pos``."""
+    return make_graph_batch(
+        pos, batch["atoms", "Z"], batch["pairs", "pair_index"], batch["atoms", "batch"]
     )
 
 
-def test_eval_and_train_forward_match():
-    model = _model()
-    torch.manual_seed(1)
-    batch = _batch()
+class TestPiNetPotential:
+    def test_writes_energy_atomic_energy_and_forces(self, cluster):
+        out = _model()(cluster)
+        assert out["graphs", "energy"].shape == (1,)
+        assert out["atoms", "energy"].shape == (4,)
+        assert out["atoms", "forces"].shape == (4, 3)
+        torch.testing.assert_close(out["atoms", "energy"].sum(), out["graphs", "energy"][0])
 
-    model.train()
-    out_train = model(batch.clone())
-    model.eval()
-    out_eval = model(batch.clone())
+    def test_state_dict_is_flat(self):
+        assert not any(key.startswith("encoder.") for key in _model().state_dict())
 
-    for key in (("graphs", "energy"), ("atoms", "energy"), ("atoms", "forces")):
-        assert torch.allclose(out_eval[key], out_train[key].detach(), atol=1e-6, rtol=1e-6), key
+    def test_forces_match_central_differences(self, cluster):
+        model = _model(wrt=())
+        forces = _model()(cluster.clone())["atoms", "forces"]
+        pos = cluster["atoms", "pos"]
+        h = 1e-5
+        atoms = (0, 3)
+        fd = torch.zeros(len(atoms), 3, dtype=pos.dtype)
+        with torch.no_grad():
+            for row, i in enumerate(atoms):
+                for k in range(3):
+                    plus, minus = pos.clone(), pos.clone()
+                    plus[i, k] += h
+                    minus[i, k] -= h
+                    fd[row, k] = -(
+                        model.energy(_moved(cluster, plus))["graphs", "energy"]
+                        - model.energy(_moved(cluster, minus))["graphs", "energy"]
+                    ).sum() / (2 * h)
+        torch.testing.assert_close(forces[list(atoms)], fd, atol=1e-7, rtol=1e-6)
 
+    def test_atomic_energies_add_the_per_element_dress(self, cluster):
+        dress = [-0.5, -37.8, -54.6, -75.1]
+        bare = _model(wrt=())(cluster.clone())["graphs", "energy"]
+        dressed = _model(wrt=(), atomic_energies=dress)(cluster.clone())["graphs", "energy"]
+        torch.testing.assert_close(dressed - bare, torch.tensor([sum(dress)], dtype=torch.float64))
 
-def test_force_loss_single_backward_populates_param_grads():
-    model = _model()
-    model.train()
-    batch = model(_batch().clone())
-    batch["atoms", "forces"].pow(2).mean().backward()
+    def test_scale_multiplies_the_network_energy(self, cluster):
+        one = _model(wrt=())(cluster.clone())["graphs", "energy"]
+        three = _model(wrt=(), scale=3.0)(cluster.clone())["graphs", "energy"]
+        torch.testing.assert_close(three, 3.0 * one)
 
-    n_grad = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
-    assert n_grad > 0, "no parameter received a gradient from the force loss"
+    def test_out_activation_defaults_to_pinn_linear(self):
+        assert not any(isinstance(m, torch.nn.Tanh) for m in _model().out_layers.modules())
 
+    def test_a_padded_batch_returns_the_unpadded_energy(self, cluster):
+        model = _model(wrt=())
+        ref = model(cluster.clone())["graphs", "energy"]
+        pos = torch.cat([cluster["atoms", "pos"], torch.full((2, 3), 50.0, dtype=torch.float64)])
+        padded = make_graph_batch(
+            pos,
+            torch.tensor([1, 6, 7, 8, 1, 1]),
+            torch.tensor(PAIRS),
+            torch.zeros(6, dtype=torch.long),
+        )
+        padded["atoms", "mask"] = torch.tensor([True] * 4 + [False] * 2)
+        torch.testing.assert_close(model(padded)["graphs", "energy"], ref)
 
-class TestPiNetPotentialCompile:
-    """The removed ``compile`` override — ``nn.Module.compile`` is in-place."""
+    def test_force_loss_reaches_the_parameters(self, cluster):
+        model = _model()
+        model(cluster)["atoms", "forces"].pow(2).mean().backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
 
-    def test_compile_falls_back_to_the_nn_module_contract(self):
-        """The override returned a *new* module, so an unassigned call ran eager."""
-        assert PiNetPotential.compile is torch.nn.Module.compile
-        assert "compile" not in PiNetPotential.__dict__
-        assert not hasattr(PiNetPotential, "compiled")
+    @pytest.mark.slow
+    def test_forward_compiles_to_one_graph_in_inference(self, cluster):
+        model = _model()
+        model(cluster.clone())  # spend the eager element gate
+        with torch.no_grad():
+            explanation = Compiler.explain(model, cluster)
+        assert (explanation.graph_count, explanation.graph_break_count) == (1, 0), (
+            explanation.break_sites
+        )

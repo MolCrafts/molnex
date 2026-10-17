@@ -28,16 +28,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn as nn
 from tensordict import TensorDict, TensorDictBase
 
 from molix import logger as _logger_mod
-from molix.autograd import Derivative
+from molix.autograd import Derivative, Potential
 from molix.autograd.variables import get_column
 from molix.frame import TensorFrame, as_tensor_frame
-from molix.schema import STRAIN_KEY, CellBound
+from molix.schema import ENERGY_KEY, STRAIN_KEY, CellBound
 from molpot.contract import Contribution, ExclusionClass
-from molpot.derivation.protocol import ENERGY_KEY, call_energy
 from molpot.forcefield.exclusions import ExclusionTable
 from molpot.forcefield.pair_terms import (
     CoulombOpenPotential,
@@ -47,15 +45,12 @@ from molpot.forcefield.pair_terms import (
 from molpot.forcefield.partial_hessian import TermHessian
 from molpot.forcefield.schema import ForceFieldSchemaView, PotentialMeta
 from molpot.ir import ProperTorsionBag
-from molpot.potentials import (
-    AngleHarmonic,
-    BondHarmonic,
-    ImproperHarmonic,
-    ImproperPeriodic,
-    ProperTorsionPeriodic,
-)
+from molpot.potentials.angles import AngleHarmonic
 from molpot.potentials.base import BasePotential
+from molpot.potentials.bonds import BondHarmonic
+from molpot.potentials.dihedrals import ProperTorsionPeriodic
 from molpot.potentials.elec.prefactors import kcalmol_A
+from molpot.potentials.impropers import ImproperHarmonic, ImproperPeriodic
 from molpot.potentials.vdw.lj126 import MixingRule
 
 if TYPE_CHECKING:
@@ -207,17 +202,17 @@ def _resolved(value: float | None, option: str) -> float:
     return value
 
 
-class Potentials(nn.Module):
-    """Classical Class-I energy on the batch schema (``nn.Module``).
+class Potentials(Potential):
+    """Classical Class-I energy on the batch schema (a :class:`molix.autograd.Potential`).
 
     Embed in a larger torch model, or reach MD through the owning
     :class:`~molpot.forcefield.container.ForceField` and
     :meth:`molix.md.MD.set_forcefield`. :meth:`energy` writes
-    ``graphs.energy`` onto a batch; :meth:`forward` is the
+    ``graphs.energy`` onto a batch; :meth:`forward` (the base class's) is the
     :class:`molix.autograd.Derivative` built over it from the ``wrt`` keys
     given at construction, so ``Potentials(ff)(batch)`` writes the energy
     alone and ``Potentials(ff, wrt=("atoms.pos",))(batch)`` the energy and
-    forces — the same op ``Derivative(pots, wrt=...)`` composes outside, which
+    forces — the same op ``Derivative(pots.energy, wrt=...)`` composes outside, which
     is how MD takes forces and virial. There is no analytic force branch:
     every derivative is the op's one ``torch.autograd.grad`` through the same
     energy, and the pair terms hand the minimum-image separation *vector* the
@@ -303,7 +298,7 @@ class Potentials(nn.Module):
         self.lj: LJCutPotential | None = None
         self.coulomb_open: CoulombOpenPotential | None = None
         self.coulomb_periodic: CoulombPeriodicPotential | None = None
-        self.mlip = getattr(forcefield, "_mlip", None)
+        self.mlip: Potential | None = forcefield._mlip
         self._exclusions: ExclusionTable | None = None
         # Exclusion-table fingerprint, not an F29 cache: a mismatch against the
         # live batch raises and demands an explicit rebind (:meth:`_scaled_pairs`).
@@ -610,40 +605,12 @@ class Potentials(nn.Module):
             f"no {' / '.join(missing)} under {table}"
         )
 
-    def forward(self, system: TensorDict | TensorFrame) -> TensorDict | TensorFrame:
-        """The batch with ``graphs.energy`` — and the ``wrt`` derivatives — written.
-
-        The :class:`molix.autograd.Derivative` of construction over
-        :meth:`energy`: with ``wrt=()`` it is :meth:`energy` itself, with
-        ``wrt=("atoms.pos",)`` it adds ``atoms.forces``, with
-        ``("atoms.pos", "graphs.strain")`` ``graphs.virial`` too. Composes into
-        the MD driver's force adapter and any training step.
-
-        Args:
-            system: Post-collate batch, or its :class:`~molix.data.TensorFrame`
-                view — the view *is* the caller's leaves (:meth:`_frame`), so a
-                write through it lands in the caller's own storage.
-
-        Returns:
-            The same ``system`` object, written in place.
-        """
-        return self._derivative(system)
-
-    @property
-    def derivative(self) -> Derivative:
-        """The op :meth:`forward` runs: ``Derivative(self.energy, wrt=...)``, fixed in ``__init__``.
-
-        What a training step marks its leaves through
-        (:meth:`molix.autograd.Derivative.mark_leaves`).
-        """
-        return self._derivative
-
     def energy(
         self,
-        system: TensorDict | TensorFrame,
+        frame: TensorDict | TensorFrame,
         tables: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
     ) -> TensorDict | TensorFrame:
-        """Write ``graphs.energy`` onto the batch — the Derivative seam.
+        """Write ``graphs.energy`` onto the batch — the Derivative seam, :meth:`forward`'s energy.
 
         The kernel compiled MD captures: :meth:`_sum_energy` plus this write.
         It does **not** call :meth:`calc_energy`, :meth:`_check_geometry` or
@@ -689,12 +656,12 @@ class Potentials(nn.Module):
         batch is refused here; energy and forces alone stay exact on it.
 
         Args:
-            system: Post-collate batch or its typed view, carrying
+            frame: Post-collate batch or its typed view, carrying
                 ``atoms.pos`` ``(N, 3)`` Å and the topology; an mlip field
                 hands it whole to the mlip's own ``energy``.
 
         Returns:
-            The same ``system`` object, with ``graphs.energy`` written
+            The same ``frame`` object, with ``graphs.energy`` written
             (kcal/mol under ``units="real"``; the mlip's native unit on that
             branch).
 
@@ -707,12 +674,12 @@ class Potentials(nn.Module):
                 refusal — bind-once exclusion work, not a later-geometry
                 voucher. Bonded-only fields never take that path.
         """
-        frame = self._frame(system)
+        view = self._frame(frame)
         if (
             self.mlip is None
-            and get_column(frame, STRAIN_KEY) is not None
-            and get_column(frame, ("pairs", "pair_index")) is not None
-            and get_column(frame, ("pairs", "shifts")) is None
+            and get_column(view, STRAIN_KEY) is not None
+            and get_column(view, ("pairs", "pair_index")) is not None
+            and get_column(view, ("pairs", "shifts")) is None
             and self._rebuilds_pairs()
         ):
             raise ValueError(
@@ -724,17 +691,17 @@ class Potentials(nn.Module):
                 "(which writes edges.shifts), or ask for energy and forces only — those are "
                 "exact on this batch."
             )
-        total = self._sum_energy(frame, tables)
-        graphs_ns = getattr(frame, "_tensordict", None)
+        total = self._sum_energy(view, tables)
+        graphs_ns = getattr(view, "_tensordict", None)
         if not (isinstance(graphs_ns, dict) and graphs_ns.get("graphs") is not None):
-            frame["graphs"] = TensorDict({}, batch_size=[])
-        graphs_bs = frame.graphs.batch_size
+            view["graphs"] = TensorDict({}, batch_size=[])
+        graphs_bs = view.graphs.batch_size
         # A ``batch_size=[]`` graphs namespace constrains nothing, so the
         # energy is stored as produced; a sized one is the shape to answer in.
-        frame[ENERGY_KEY] = total.reshape(*graphs_bs) if graphs_bs else total
+        view[ENERGY_KEY] = total.reshape(*graphs_bs) if graphs_bs else total
         # The caller's own container back, not the view: the write above went
         # into its storage, so the one that was handed in composes onward.
-        return system
+        return frame
 
     #: Bonded namespaces the partial-Hessian target covers, and how each is
     #: priced: the attribute holding its term, the index kwarg its forward
@@ -906,9 +873,8 @@ class Potentials(nn.Module):
         if "k1" in called:
             return ("k1", "k2", "k3", "k4")
         if "a" in called or "b" in called:
-            # Cartesian ``(a, b)`` is a complete dialect of its own — it is what
-            # ``ProperTorsionParamHead`` predicts, because ``(k, gamma)`` has a
-            # coordinate singularity at ``k = 0``.
+            # Cartesian ``(a, b)`` is a complete dialect of its own, smooth
+            # through ``k = 0`` where ``(k, gamma)`` is singular.
             return ("a", "b", "periodicity")
         return ("k", "phase")
 
@@ -942,7 +908,7 @@ class Potentials(nn.Module):
         Derivative seam (:meth:`energy`), not :meth:`calc_energy`::
 
             pots.warmup(batch)
-            run = Compiler(fullgraph=True)(Derivative(pots, wrt=("atoms.pos",)))
+            run = Compiler(fullgraph=True)(Derivative(pots.energy, wrt=("atoms.pos",)))
 
         Idempotent: warming twice with the same batch does the work once.
         Warming with a *different* topology rebinds — which is what a new
@@ -1382,16 +1348,17 @@ class Potentials(nn.Module):
         frame: TensorFrame,
         tables: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
     ) -> torch.Tensor:
-        """Classical term sum, or the mlip ``call_energy`` branch.
+        """Classical term sum, or the mlip ``energy`` branch.
 
         Shared by public :meth:`calc_energy` (after F29 on the classical path)
         and :meth:`energy` (after the F13 guard). Not a new type, and not
-        :meth:`molzoo.mace.potential.MacePotential._sum_energy` (that is a
-        per-atom scatter × ``atoms.mask``). Does not run
+        the per-atom-then-scatter sum inside `molzoo.mace.potential.MacePotential.energy`
+        (that one multiplies ``atoms.mask`` in first). Does not run
         :meth:`_check_geometry`.
 
-        When :attr:`mlip` is not ``None`` this returns
-        :func:`~molpot.derivation.protocol.call_energy` of that module under
+        When :attr:`mlip` is not ``None`` this returns what the mlip's own
+        ``energy(frame)`` — the :class:`molix.autograd.Potential` seam, never
+        its ``forward``, which is an op of its own — wrote under
         ``ENERGY_KEY``. Otherwise it zeros a tensor of the batch's graph
         count and adds every :meth:`term_energies` value — starting from a
         tensor zero so an empty field does not collapse to Python ``0``.
@@ -1407,16 +1374,13 @@ class Potentials(nn.Module):
         Returns:
             Energy ``(B,)`` over the ``B`` molecules, or ``()`` for a single
             molecule. Classical path: the ForceField's unit convention
-            (``units="real"`` default: kcal/mol). mlip path: whatever
-            :func:`~molpot.derivation.protocol.call_energy` wrote under
-            ``ENERGY_KEY``.
+            (``units="real"`` default: kcal/mol). mlip path: whatever the
+            mlip's ``energy`` wrote under ``ENERGY_KEY``.
         """
         if self.mlip is not None:
-            # Which entry of the mlip evaluates the energy is ``call_energy``'s
-            # policy alone — this branch must not reimplement it by probing the
-            # mlip. The view shares the caller's storage, so whatever the mlip
+            # The view shares the caller's storage, so whatever the mlip
             # writes lands on the caller's own batch.
-            return call_energy(self.mlip, frame)[ENERGY_KEY]
+            return self.mlip.energy(frame)[ENERGY_KEY]
         p = self._pos(frame)
         num_graphs = self._num_graphs(frame)
         total = torch.zeros((num_graphs,) if num_graphs > 1 else (), device=p.device, dtype=p.dtype)
@@ -1439,8 +1403,8 @@ class Potentials(nn.Module):
         **The mlip branch.** When :attr:`mlip` is not ``None`` (``def_pairstyle``
         was given an ``nn.Module`` instead of a classical style name) this
         method never runs F29 and never sums the classical term energies —
-        :meth:`_sum_energy` hands the whole batch to
-        :func:`molpot.derivation.protocol.call_energy`. What the batch is
+        :meth:`_sum_energy` hands the whole batch to the mlip's own
+        ``energy``. What the batch is
         *carried in* decides nothing here: a ``TensorDict`` and its
         :class:`~molix.data.TensorFrame` view are one system (:meth:`_frame`).
 
@@ -1468,8 +1432,8 @@ class Potentials(nn.Module):
         Returns:
             Energy ``(B,)`` over the ``B`` molecules of the batch — shape ``()`` for
             a single molecule. Classical path: the ForceField's unit convention
-            (``units="real"`` default: kcal/mol). mlip path: whatever
-            :func:`~molpot.derivation.protocol.call_energy` wrote under
+            (``units="real"`` default: kcal/mol). mlip path: whatever the
+            mlip's ``energy`` wrote under
             ``ENERGY_KEY`` — the mlip's native energy unit (eV for the MACE
             family) — which the ForceField's declared ``units`` (``"metal"``
             for an MLIP pair style) is expected to already match; neither

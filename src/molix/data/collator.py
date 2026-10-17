@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol
 
 import torch
 from tensordict import TensorDict
 
 from molix.data.collate import MoleculeCollator, freeze_graph_columns, graph_schema_from
 from molix.data.pad import _VALENCE, MoleculePadder, _live_count
+
+
+class Prepare(Protocol):
+    """A per-record transform run before concat: ``execute_record(frames) -> frames``.
+
+    One call per dataset row (every frame of a record), so a transform can
+    perceive what the frames share once. Implemented by the Class-I
+    ``ClassIPrepare`` (bonds, units, labels).
+    """
+
+    def execute_record(self, frames: Sequence[Any]) -> Sequence[Any]: ...
 
 
 class FrameCollator:
@@ -23,8 +34,11 @@ class FrameCollator:
         collator: :class:`~molix.data.collate.MoleculeCollator`.
         padder: :class:`~molix.data.pad.MoleculePadder`, or ``None`` for
             ragged concat (tests).
-        prepare: Optional per-frame transform (bonds / units / labels)
-            applied on each sample **before** concat. The DataLoader
+        prepare: Optional per-sample transform (bonds / units / labels)
+            applied on each sample **before** concat, as
+            ``prepare.execute_record(frames) -> tuple[Frame, ...]`` — per
+            sample, so a transform can perceive what a sample's frames share
+            once rather than once per frame. The DataLoader
             collate wrapper calls :meth:`prepare_samples` then concat,
             neighbor list, then pad — wrapping this object in another
             collate callable is skipped by that wrapper.
@@ -35,7 +49,7 @@ class FrameCollator:
         *,
         collator: MoleculeCollator,
         padder: MoleculePadder | None = None,
-        prepare: Any | None = None,
+        prepare: Prepare | None = None,
     ) -> None:
         self.collator = collator
         self.padder = padder
@@ -57,7 +71,7 @@ class FrameCollator:
                 frames: Sequence[Any] = (sample,)
             else:
                 frames = sample
-            prepared.append(tuple(self.prepare.execute(frame) for frame in frames))
+            prepared.append(tuple(self.prepare.execute_record(frames)))
         return prepared
 
     def __call__(self, frames: Sequence[Any]) -> TensorDict:

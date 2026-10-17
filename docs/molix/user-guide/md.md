@@ -177,8 +177,8 @@ write by hand:
 from molix.autograd import Derivative
 
 pots = ff.to_potentials()
-nve = Derivative(pots, wrt=("atoms.pos",))                 # graphs.energy, atoms.forces
-npt = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))  # + graphs.virial (1, 3, 3)
+nve = Derivative(pots.energy, wrt=("atoms.pos",))                 # graphs.energy, atoms.forces
+npt = Derivative(pots.energy, wrt=("atoms.pos", "graphs.strain"))  # + graphs.virial (1, 3, 3)
 ```
 
 The op owns the position and strain leaves, rebuilds the edge geometry from
@@ -200,7 +200,7 @@ for the split-precision arm above.
 ### Compiling an MLIP field
 
 A neural potential mounted with `def_pairstyle(model)` compiles through the
-same op: `MD` composes `Derivative(pots, wrt=...)` over the container whose
+same op: `MD` composes `Derivative(pots.energy, wrt=...)` over the container whose
 `energy` hands the batch to the model's own `energy`, evaluates it once eagerly
 and compiles it:
 
@@ -220,7 +220,7 @@ one eager forward, then compile the composed op:
 ```python
 pots = ff.to_potentials()
 pots.bind_cell(cell)                                   # size the reciprocal grids + capacity check
-op = Derivative(pots, wrt=("atoms.pos", "graphs.strain"))
+op = Derivative(pots.energy, wrt=("atoms.pos", "graphs.strain"))
 op(work)                                               # one eager forward: element table + grids
 op = Compiler(cuda_graphs=True)(op)
 ```

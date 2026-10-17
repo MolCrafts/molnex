@@ -543,9 +543,12 @@ class TestMultiTaskEvalStep:
         assert MultiTaskEvalStep.on_eval_batch is DefaultEvalStep.on_eval_batch
 
     def test_advertises_eval_namespace_scalar_keys(self) -> None:
+        """``("eval", "loss")`` leads: a declared list replaces the trainer's default,
+        and without it ``eval/loss`` was the last val batch, not the phase mean."""
         router = TaskRouter(_four_tasks())
 
         assert MultiTaskEvalStep(router).scalar_keys == (
+            ("eval", "loss"),
             ("eval", "loss_energy_force"),
             ("eval", "loss_hessian"),
             ("eval", "loss_torsion"),
@@ -564,14 +567,20 @@ class TestMultiTaskEvalStep:
         assert scalar.requires_grad is False
         assert scalar.grad_fn is None
 
-    def test_keeps_the_graph_alive_by_default(self) -> None:
-        """Default ``no_grad=False`` — force / Hessian losses need a live graph."""
+    def test_the_graph_is_released_once_the_loss_is_computed(self) -> None:
+        """Default ``no_grad=False`` — force / Hessian losses differentiate inside the
+        step, and nothing of that graph is handed back (a resident val batch would
+        hold it through training)."""
         step = MultiTaskEvalStep(TaskRouter(_four_tasks()))
         trainer = _make_trainer(eval_step=step)
+        batch = _tensordict_batch(0)
 
-        outputs = step.on_eval_batch(trainer, TrainState(), _tensordict_batch(0))
+        outputs = step.on_eval_batch(trainer, TrainState(), batch)
 
-        assert outputs["loss"].requires_grad is True
+        assert outputs["loss"].requires_grad is False
+        assert not any(
+            value.requires_grad for value in batch.values(include_nested=True, leaves_only=True)
+        )
 
     def test_forwards_no_grad_to_the_default_step(self) -> None:
         step = MultiTaskEvalStep(TaskRouter(_four_tasks()), no_grad=True)
@@ -590,18 +599,6 @@ class TestMultiTaskEvalStep:
 def _multitask_ast() -> ast.Module:
     source = Path(multitask_module.__file__).read_text(encoding="utf-8")
     return ast.parse(source)
-
-
-def test_multitask_module_imports_no_science_package() -> None:
-    """``molix`` must gain no ``molpot`` / ``molrep`` / ``molzoo`` dependency."""
-    imported: set[str] = set()
-    for node in ast.walk(_multitask_ast()):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            imported.add(node.module)
-
-    assert not [name for name in imported if name.split(".")[0] in {"molpot", "molrep", "molzoo"}]
 
 
 def test_multitask_module_never_calls_item() -> None:

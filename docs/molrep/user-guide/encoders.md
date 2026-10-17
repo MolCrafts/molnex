@@ -38,19 +38,18 @@ cutoff = CosineCutoff(r_cut=5.0)
 
 ## Interaction Blocks
 
-Interaction modules process geometric message passing and equivariant updates:
-
-- `ConvTP`
-- `EquivariantLinear`
-- `SymmetricContraction`
-- `MessageAggregation`
+`molrep.interaction.product` holds the irreps-string helpers
+(`irreps_from_l_max`, `sh_irreps_from_l_max`) every equivariant encoder
+builds its irreps from. The message-passing blocks live with the model that
+owns them — MACE's interactions, product basis and `RadialMLP` in
+`molzoo.mace.layers`, Allegro's in `molzoo.allegro.layers`.
 
 ## Readout
 
 Readout modules convert learned features into scalar or structured outputs:
 
-- `ProductHead`
-- pooling functions from `molrep.readout.pooling`
+- MACE's `LinearReadout` / `NonLinearReadout` from `molzoo.mace.heads`
+- `ScalarHead` from `molrep.heads`
 - downstream heads in `molpot`
 
 Use `molrep` when you need reusable representation blocks. Use `molzoo` when

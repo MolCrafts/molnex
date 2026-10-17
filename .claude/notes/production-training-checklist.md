@@ -40,6 +40,885 @@ hardware calibration, and a bounded smoke. Those must be re-established
 whenever the code, data, batching, precision or hardware changes — that rule is
 about *staleness of measurement*, not about version control.
 
+## 2026-10-11 — Rondo joint training (ByteFF realignment): what is verified, what is not
+
+The sequential six-stage curriculum this checklist was last signed against no
+longer exists. Rondo is `Rondo(ff, spec, wrt=)` on the molrs force-field IR,
+trained by `molix.core.steps.JointTrainStep` over three joint stages
+(`configs.CURRICULUM`: `s1-hessian-mbis` → `s2-torsion` → `s3-relax`), each
+step drawing one batch per source and summing per-objective losses whose
+`trainable` sets detach every other table. Plan `rondo-byteff-squishy-iverson`.
+Every checkpoint written before 2026-10-11 is invalid.
+
+- [x] Environment: molrs/molpy **0.17 from source** (`molrs-rondo` / `molpy-rondo`
+  worktrees at origin/dev f786a891 / f7ddb1e), `.venv-x86_64` rebuilt
+  (`build_env.sh --fresh`, `ONLY=` reinstall mode for pure packages); molnex
+  fast tier 3427 passed, slow compile tests (Rondo forward / energy /
+  partial_hessian; joint bodies) 1 graph / 0 breaks. aarch64 env: job 3676710
+  (GH200 n570, 15 min, same molrs/molpy revisions; the 0.15 env kept as
+  `.venv-aarch64-015`).
+- [x] Data contract: molhub THEMol frames carry `formal_charge`,
+  `ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`,
+  `bond_type`, `in_ring` (verified on a real hessian record, 0.5 s decode;
+  `AtdTypifier("gaff2")` construction 3.6 s, per-thread cached); impropers
+  carry three cyclic rows per centre (`label_sample`).
+- [x] Item 2 (parity): style potentials against the molrs oracle
+  (`ExplicitTerms`) to 1e-12; forces = −∇E; partial Hessian = full Hessian on
+  bonded pairs; mirror / rigid-motion / improper-leg symmetries (`tests/test_molzoo/test_rondo`).
+- [x] Bounded real-data smoke (login node, CPU, 8 hessian + 8 MBIS molecules,
+  capacity 4096, `small` tier, 2026-10-11 15:28): compiled joint step, 3 steps,
+  eval, checkpoint; start losses hessian_k 0.41 / hessian_geom 1539 (uniform
+  field at QM minima, before any r0/θ0 learning) / mbis 0.052. Found: an
+  atom GAFF2 cannot type (Si in the 4th hessian row) makes the LJ energy NaN by
+  design — the GAFF2 census (`Gaff2Census`, `bond_census.py`) must exclude those
+  rows; the smoke bypassed it and got a NaN loss on step 0.
+- [x] Censuses for all four sources (job 3678026, cpu, 6.5 min; files under
+  `workspaces/lab-new/runs/bond-census/*.json`, fingerprinted): bond stretch /
+  GAFF2 untyped — hessian 31 / 6 908 of 61 796 (11.2 %), mbis 200 / 50 397 of
+  430 906 (11.7 %), torsion-scan 80 / 2 780 of 83 951 (3.3 %), hessian-relax
+  2 922 / 0 of 89 161. The GAFF2 exclusions are the ByteFF element filter in
+  practice: a direct scan of the first 300 rows finds the hessian shard
+  carrying B, P, Si (46/300 rows untyped) while the relax shard's molecules
+  are all {H, C, N, O, F, S, Cl, Br, I} (0/300) — its zero is real.
+- [x] Item 3 per objective, 8 GAFF2-typeable molecules, train = val, 300 Adam
+  steps at lr 3e-3, `small` tier, CPU job 3678072 (`.jobs/overfit/`):
+  `hessian_k` partial-Hessian 0.49 → 0.44 with bond K differentiating from the
+  uniform 450 (p10 213 / p50 361 / p90 383) — the ~0.4 floor is the Class-I 1-3
+  coupling the form cannot express; `hessian_geom` stationary-force 1539 → 18
+  (r0 and θ0 move, K held at 450/40 by construction); `mbis` charge MSE
+  0.052 → 2.8e-4; `torsion` proper |k| median 2.8 / max 28.5 kcal/mol after
+  300 steps (train 3.4, eval 8.8 — the gradient path is live; the amplitude
+  ceiling is a stage-2 calibration question); `relax` (job 3678323, capacity
+  16384 — a hessian-relax record is a whole relaxation, 5460 atoms as one
+  sample): loss 0.56 eval / 0.91 train, gradient path live, **and trained alone
+  it collapses K exactly as every earlier chain did** (bond K 450 → p50 8.6,
+  angle K 40 → 1.0 in 300 steps): relaxed-frame E/F cannot identify stiffness.
+  That is the finding behind the joint design — in `s3-relax` the
+  `hessian_k` objective is in every step and the handoff gate's K bounds
+  ([0.3×, 3×] of k_ref) would refuse a collapsed checkpoint. Never run
+  `relax` as a lone objective.
+- [x] Item 6 on the exact launcher path (`term_curriculum.py small --stages
+  s1-hessian-mbis --max-steps 10 --capacity 4096 --device cpu`, CPU job
+  3679652, 8 min, run `workspaces/lab-new/runs/dryrun-s1-cpu-3679652`): both
+  censuses → molecule split (hessian 52 136 / 2 752, mbis 361 483 / 19 026) →
+  `stage()` (14 loader workers, 7 per source) → `compile(fullgraph=True)` →
+  smoke → baseline eval → 10 steps → `best.pt` → `parameter_report` on real
+  nested val batches → `handoff_failures`. Baseline val losses hessian_k 0.49 /
+  hessian_geom 2072 / mbis 0.090. The report reads as the untrained field
+  should: every bond K 449.8 ± 0.1, angle K 40.02, θ0 by centre hybridisation
+  (C4 109.5°, C3 120°, **C2 177.5° against 179.2° measured**), r0 per element
+  pair from the covalent radii, proper curvature 0, improper |k| 1e-4, LJ
+  log-ratio 0, charge MAE 0.24 e, feature RMS 1.00 on every stream. The gate
+  passes on it (its bounds catch collapse and runaway, not "unchanged").
+  `--capacity` / `--device` were added to the launcher for this; production
+  leaves both at the tier's capacity and `cuda`. Per-record decode measured on
+  the login node: hessian 74 ms, mbis 39 ms, torsion-scan 295 ms,
+  hessian-relax 168 ms (the 0.5 s above was a first cold call).
+- [x] **S1 small, 1500 steps on GH200 (job 3680093, n526, 2026-10-11 18:12-18:37;
+  run `workspaces/lab-new/runs/rondo-joint-s1-small-20261011`).** 1.91 steps/s
+  at capacity 131072 per source (4 batches per step), peak GPU 8.58 GiB, 13 min
+  of training after an 11-min smoke (first-pass decode + compile). Train losses
+  at 500 / 1000 / 1500: hessian_k 0.438 / 0.440 / 0.448 (flat), hessian_geom
+  27.65 / 24.18 / 23.42, mbis 0.0197 / 0.0106 / 0.0088; grad norm 32 / 110 / 85
+  against clip 10 (always clipped). **Found**: every eval "missing" — the
+  hessian source sits under two objective names and a persistent-worker
+  DataLoader hands both names one iterator, so they split its batches; the val
+  set packs into one batch at this capacity, the second name got
+  `StopIteration`, the joint val loader yielded nothing, no best.pt, exit 1.
+  Fixed in `molix.data.joint._Lockstep` (one iterator per distinct loader,
+  shared names get the same batch, each a copy — ByteFF's step) with a unit
+  test; `fit()` now fails closed on a scoreless baseline eval. Report built
+  from `last.pt` (CPU job 3680621, `.jobs/report-x86.sbatch`,
+  `param_report_last1500.json`): **gate passes**. Bond K differentiated by
+  chemistry (p50: H1-C4 353, C3-C3 355, H1-C3 376, C4-C4 197, C3-C4 257, C3-N3
+  285, C3-O1 724, H1-N3 302; ref 450), r0 chemically right (H-C 1.09, C4-C4
+  1.52, C3-C3 1.39, C=O 1.23), angle K 39-72 by centre (ref 40), θ0 by centre:
+  **C4 99.7° against 109.6° measured (9.9°, at the gate's 10° limit)**, C3
+  126.9 vs 120.1, N3 118 vs 118, S4 102 vs 108, N4 103 vs 109, C2 179.5 vs
+  178.9 (the sp centre that every earlier chain failed is right from step 0).
+  Charge MAE 0.061 e (untrained 0.24). Improper |k| per row p50 2.4 / p90 9.4.
+  LJ log-ratio 0 (no LJ loss in S1, by design). Feature RMS 1.0-1.3. Open:
+  hessian_k does not fall in 1500 steps; sp3 θ0 sits 10° under measured while
+  the geometry loss is still falling — both are what the rerun (3680577, with
+  eval, best.pt and plateau schedule) and a longer S1 must answer.
+- [x] **S1 small rerun with the loader fix (job 3680577, n208, 18:34-18:56; run
+  `runs/rondo-joint-s1-small-20261011b`)**: eval scores every 200 steps now.
+  Eval loss 2050 → 827 → 74.1 → 53.6 → 44.1 → 40.9 → 39.1 → 38.1 → 37.97 at
+  step 1500 (hessian_geom 2049 → 37.5, still falling ~1 per 200 steps;
+  hessian_k 0.491 → 0.4377 at step 800, then creeping back to 0.449; mbis
+  0.0906 → 0.0087); train hessian_geom 23.4 against eval 37.5. 2.50 steps/s,
+  peak GPU 18.6 GiB (the shared hessian batch is now cloned for the second
+  name), 10 min of training. Report from best.pt (= step 1500): same tables as
+  the first run within 1 % (bond K H1-C4 353 / C3-C3 358 / C4-C4 197 / C3-O1
+  722, angle K 39-72, charge MAE 0.060 e, C2 θ0 179.5° vs 179.0°).
+  **Handoff gate FAILS on one check: θ0 C4 median 99.1° against 109.6°
+  measured (10.5° > 10°)**; every other check passes. Not handed on. Open
+  questions for the next (longer) S1: whether sp3 θ0 keeps closing or turns
+  back once the geometry loss flattens (torsions are zero in S1 by design, so
+  the angle term is the only bonded term left to absorb what they would
+  carry), and whether hessian_k's rise after step 800 is the two hessian
+  objectives trading through the shared encoder.
+- [x] **S1 small, unbounded, two clips (user ruling 2026-10-11 ~22:35: "两个都提，
+  clip 放到 50")**: `term_curriculum.py --clip NORM` and `CLIP=` in
+  `run_term_curriculum.sbatch` added (default stays `configs.CLIP_MAX_NORM`
+  10). No `MAX_STEPS`: plateau (factor 0.5, patience 5 evals), early stop
+  (patience 50 evals), or the 4 h stage clock ends the stage. Jobs 3685025
+  (clip 10, `runs/rondo-joint-s1-small-20261011c-clip10`, n159) and 3685026
+  (clip 50, `runs/rondo-joint-s1-small-20261011d-clip50`, n204), both
+  `--time=04:45:00` on naiss2026-1-53-gpu, started within a minute. What the
+  pair answers: where sp3 θ0 settles once hessian_geom flattens (gate needs
+  C4 within 10° of 109.6°), whether hessian_k keeps creeping up, and whether
+  letting grad norms 85-135 through (clip 50) changes either.
+  **Result (2026-10-12 00:08 / 00:05)**: both early-stopped on patience (50
+  evals past best): clip 10 best step 5600 (eval 32.06, hessian_geom 31.6),
+  stopped 15600, 1 h 31; clip 50 best step 4800 (32.12), stopped 14800, 1 h 28;
+  3.4 steps/s, peak 18.6 GiB. Past the best the eval geometry loss turns
+  noisy and rises (40-59 at steps 14400-15000 for clip 10, 45 for clip 50)
+  **while plateau had cut lr to 1e-6** — that swing cannot be weight drift and
+  is unexplained (candidate: an ill-conditioned part of the geometry
+  objective, e.g. the EEM solve on a few hessian-val molecules). hessian_k
+  0.437 → 0.46 in both; mbis 0.0087 → 0.0037/0.0043 (charge MAE 0.044/0.046
+  e). **Gate fails on more checks than at 1500 steps**: every sp3 centre's
+  θ0 median dropped a further ~4° (C4 95.4/95.5°, S4 95.0/100.4°, N4
+  96.1/98.3°, P4 93.4/94.3° against measured 109.6/108.2/109.1/107.5), while
+  the two runs disagree by 10° on sp2 C3 θ0 (117.0 vs 127.5, measured 120.1)
+  and C2 stays 179.5°. Bond K/r0 unchanged within a few % (H1-N3 K 295 →
+  464/482 the one mover); angle K unchanged except C2 39.9 → 21/23 (n=216);
+  improper |k| p50 2.9 → 6.2 (clip 10) / 2.0 (clip 50). Clip 10 vs 50: no
+  difference in any table or in the trajectory (grad norms 80-230 both; one
+  1284 spike on clip 50 at step 8000). **Diagnosis**: at a symmetric centre
+  (planar trigonal, tetrahedral) a common shift of every θ0 produces zero
+  net force on each ligand, so the Force→0 loss on minimum geometries only
+  determines θ0 *differences* between inequivalent angles; the common mode is
+  a null direction (exact for sp2 — hence 117 vs 127.5 — and near-null for
+  sp3, with a consistent weak downward push from whatever residual forces the
+  angle term is asked to absorb). hessian_k detaches θ0, so the Hessian's
+  (θ−θ0)·∂²θ term that would pin it never reaches it. ByteFF's
+  `Partial_Hessian_MAPE` and `Force_MSE` train exactly our sets (`loss.py:319,
+  370`), but ByteFF also has `Angle_Energy` / `Bond_Energy` loss types
+  (`loss.py:302-314`: the term's energy on the QM-minimum geometry / n_terms,
+  trainable θ0 / r0 — the K-weighted regression of θ0 onto the measured
+  angle) and a `skip_large_nb` mask on `Force_MSE` (molecules whose
+  nonbonded forces exceed a threshold leave the force loss). Proposed next:
+  add an `hessian_eq` objective (angle + bond energy at the minimum →
+  `angles.theta0`, `bonds.r0`) to S1 and re-check the gate at 1500 steps
+  before any longer run. **User ruling 2026-10-12: "加 hessian_eq 和 skip_large_nb 一起上，1500 步看门".**
+- [ ] **hessian_eq + skip_large_nb (2026-10-12)**. Code: `Rondo.energy(frame,
+  tables=None, styles=None)` sums a named subset of styles (ByteFF
+  `calc_terms`; A18); `JointObjective(styles=, nonbonded=)` — `styles` restricts
+  the `energy` / `forward` body, `nonbonded` makes the `forward` body write the
+  pair styles' own force to `atoms.forces_nonbonded` first (every table
+  detached, under `no_grad`, so no graph is kept); `StationaryForceLoss(
+  skip_above=, skip_key=)` zeroes every row of a molecule in which any
+  non-bonded force component exceeds the threshold (per-graph `index_add` +
+  gather, static shapes; divisor counts kept rows only, unlike ByteFF);
+  `MeanTermEnergyLoss(namespaces=("bonds","angles"))` = Σ energy of the priced
+  styles / Σ live terms (pooled over the two namespaces — ByteFF normalises
+  each type in its own loss; one body here). Lab: `OBJECTIVES["hessian_eq"]`
+  (hessian source, `output="energy"`, `styles=(bond:harmonic, angle:harmonic)`,
+  trainable `bonds.r0`/`angles.theta0`, weight 1), `hessian_geom` gains
+  `nonbonded=(pair:lj/cut, pair:coul/cut)`, every stage lists `hessian_eq`;
+  `STATIONARY_FORCE_SKIP_ABOVE` = 50 kcal/mol/Å, read off the census (job
+  3688938, 1 min 41 on a CPU node, `.jobs/nb_force_census.py` on the clip-10
+  best.pt, the whole hessian val set = 2752 molecules, report
+  `runs/rondo-joint-s1-small-20261011c-clip10/s1-hessian-mbis/nb_force_census.json`):
+  per-molecule max |F component| of the pair styles alone p50 10.8 / p90 20.9
+  / p95 26.3 / p99 40.6 / p99.9 72 / max 279; LJ alone max 283, Coulomb alone
+  max 34 (the tail is the LJ wall); every style with the S1 parameters p50
+  17.7 / p90 33.5. Fraction of molecules above 20 / 30 / 50 / 100: 11.5 % /
+  3.5 % / 0.4 % / 0.07 % → 50 removes the wall tail and nothing of the bulk.
+  Tests: full fast tier 3443 passed / 15 skipped (login node needs
+  `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 -n 6`: at 48 BLAS threads per
+  xdist worker it hits the thread limit and dies with INTERNALERROR); slow
+  explain green for the two new body shapes (forward+nonbonded, energy+styles)
+  and `Rondo.energy(styles=)`. CPU dry run of the exact launcher path with 4
+  bodies: job 3688940 passed (7 min 25; baseline eval hessian_k 0.4907 /
+  hessian_geom 2047.7 / **hessian_eq 1.123 kcal/mol per term** / mbis 0.0902;
+  10 steps; best.pt; report; gate). **S1 small 1500 steps submitted: GPU job
+  3689502, `runs/rondo-joint-s1-small-20261012-eq`, `--time=01:00:00`,
+  naiss2026-1-53-gpu.** The gate on its best.pt is the question: does sp3 θ0
+  stay within 10° of 109.6° with the strain objective in the step.
+  **Result (n463, 00:41-01:05, 24 min 41, exit 0): handoff gate PASSES.**
+  Eval 2049 → 836 → 74.3 → 49.7 → 42.8 → 39.6 → 37.7 → 36.7 → 37.9 at step
+  1500 (hessian_geom 37.1 — same as the baseline's 37.5, so the strain term
+  costs the force objective nothing; hessian_k 0.4905 → 0.4352 **falling
+  monotonically**, no turn-up — the baseline bottomed at 0.4377 and rose to
+  0.449; hessian_eq 1.124 → 0.369 kcal/mol per term; mbis 0.0082). Train loss
+  24.2, grad norm 58 / 114 / 262 at steps 500 / 1000 / 1500 (clip 10). 2.24
+  steps/s (4 bodies, was 2.50 with 3), peak GPU 22.9 GiB (was 18.6).
+  **θ0 medians (eq vs measured)**: C4 107.8 vs 109.6 (p10-p90 105.6-110.8 vs
+  106.6-112.9), C3 119.9 vs 120.1, N3 117.5 vs 117.9, N2 112.8 vs 115.3, O2
+  109.2 vs 112.3, S4 106.8 vs 108.2, N4 110.4 vs 109.1, P4 110.8 vs 107.5, S2
+  96.3 vs 91.9 (n=380), C2 179.5 vs 179.0 — every centre within 5° except S2
+  (4.4°); at 1500 steps the baseline had C4 99.1 / C3 125.7 / S4 101.0 / P4
+  105.1. Angle K 44-69 (C2 back to 43.7 from the long runs' 21). Bond K / r0
+  unchanged from the baseline within a few % (H1-C4 360 / C3-C3 359 / C4-C4
+  202 / C3-O1 713; r0 to the thousandth). Charge MAE 0.059 e, improper |k| p50
+  4.7, feature RMS 1.0-1.3, LJ untouched. Report:
+  `runs/rondo-joint-s1-small-20261012-eq/s1-hessian-mbis/param_report.json`.
+  Still open: whether the geometry eval keeps falling past 1500 steps now that
+  θ0 is pinned (the baseline's post-5000-step rise and the lr-1e-6 eval swings
+  are not yet re-examined), and the skip fraction is not logged (the loss
+  cannot write state; a hook reading `atoms.forces_nonbonded` could).
+- [ ] **Architecture diagnostics (2026-10-12, CPU job 3691055, 5 min,
+  `.jobs/arch_diagnostics.py` on the eq best.pt over the whole hessian val
+  set; JSON beside the report)**. (A) The partial-Hessian loss 0.435 is **97 %
+  1-3 blocks**: 1-2 rows (176 k) residual 0.0385 (|trace| p50 938), 1-3 rows
+  (309 k) residual 0.66 (|trace| p50 26; C-C 1-3 = 1.00, H-C 0.56). The bond
+  stiffnesses are fit to 4 %; the 1-3 blocks — angle term only in S1, the QM
+  block also carries torsion and through-space stiffness — are the plateau,
+  and they are what the angle K is fit against. Loss-form / FF-form, not
+  network. (B) Force loss per molecule: p50 26.7, p90 76, p99 190, max 1839;
+  top 1 % of molecules carry 9 %, top 10 % carry 33 % — a broad distribution,
+  not outliers. **The "train 24 vs eval 37 gap" is the knee**: train reports
+  `log_knee(mean, 10)`, 24 ⇔ raw mean 40.6; eval reports the raw mean 37.4. No
+  generalisation gap. (C) EEM is well conditioned: η on val atoms p0.1 1.63 /
+  p50 3.84 / p99 4.97, none near the 1e-3 floor, max sensitivity 1/η 0.7;
+  |q| p50 0.16, p99 0.78, max 1.68. (D) Resolution of the 2-hop encoder:
+  bonds 17 k rows → 4.6 k distinct feature vectors, measured-length variance
+  explained 0.999 (within-group std 0.006 Å vs 0.195 total); angles 30 k rows
+  → 18 k distinct, variance explained 0.991 (within 1.15° vs 7.7° total). The
+  receptive field resolves what the S1 data distinguishes. (S) clip-10 run
+  best (5600) → last (15600) on val: 31.6 → 40.8; the worst molecules went
+  15-38 → 190-260 (alkyl-rich, the sp3 θ0 drift); per-atom charge moved p50
+  0.08 e / max 0.29 e between the two checkpoints while mbis val stayed
+  0.004 — the charges are underdetermined on hessian-set chemistry by the
+  mbis set alone (noted, not acted on). The lr-1e-6 eval swings stay
+  unexplained beyond "a strained state is hypersensitive"; watch the eq long
+  run (3690962) for a recurrence.
+  **Untrained baseline (job 3691174, the 10-step dry-run checkpoint, 3 val
+  batches)**: 1-2 residual 0.091 → 0.0385 trained (bond K learned, 2.4×),
+  1-3 residual 0.719 → 0.661 (8 %: the angle term's block structure cannot
+  follow the QM 1-3 block, so the Hessian objective identifies angle K only
+  weakly). Resolution is the same untrained (bonds 0.999, angles 0.988): the
+  input channels + 2-hop topology already separate the geometric classes; the
+  test says the receptive field suffices, not that the trained features are
+  good. Untrained η sits at 10.0 (sigmoid mid-range), trained 1.6-5.0.
+  **Architecture review written up**: `.claude/notes/rondo-architecture-review-2026-10-12.md`
+  — no defect behind the S1 symptoms; four real issues for S2/S3 (contexts
+  blind to their term's bonds; 100-1000× head-gain spread through the shared
+  trunk; diagonal EEM non-local / zero start / dead Coulomb gradient at init;
+  unbounded K), with fixes and diagnostics. Operator decision pending.
+- [ ] **S1 small unbounded run with eq + skip (2026-10-12, GPU job 3690962,
+  `runs/rondo-joint-s1-small-20261012-eq-long`, clip 10, patience 50 evals,
+  2 h 02 min, 19 600 steps, 3.13 step/s, 22.9 GiB) — gate FAILED on best.pt
+  (step 10 000)**: θ0 N3 median 129.3° vs measured 117.9° (per-angle p10 60.8° /
+  p90 157.1°), P4 97.1° vs 107.5°; every other centre inside the gate (C4 107.8,
+  C3 120.3, N2 112.1, O2 109.2, S4 105.0, N4 107.0, S2 96.0, C2 179.5, S3
+  115.8). Trajectory: geometry eval fell 35.0 (step 1 600) → 28.2 (9 600; best
+  total 29.4) while hessian_eq **rose** 0.358 → 0.758 — the optimizer traded
+  equilibrium strain for force; past 10 000 both train (knee'd geom 20.4 →
+  25.9) and eval (29 → 37-49) got worse as the lr halved 1.5e-4 → 5.9e-7, and
+  the eval only settled (37.17 → 37.46 over 1 200 steps) at lr ≤ 1.2e-6.
+  hessian_k 0.4905 → 0.4317 (flat from step 4 000); mbis 0.0035; charge MAE
+  0.039 (1500-step run: 0.059). Bond k moved on the rare pairs between the two
+  runs (C-Cl 327 → 189, C-F 376 → 232, H-N 301 → 507, C≡N 934 → 1316); angle k
+  at C2 collapsed 43.7 → 14.2 (linear-angle Hessian degeneracy). Patience 50
+  evals = 10 000 steps past the best were wasted.
+  **Diagnostics (CPU jobs 3693119 / 3693135, `.jobs/skip_theta_diag.py`,
+  `.jobs/n3_force_decomp.py`, JSON beside the report)**: (1) the skip mask is
+  not the swing — best and last skip the same 10 of 2 752 val molecules, no
+  flips, 24 sit in the 40-60 band; the trainer loss 28.23 → 36.31 (+8.07) is
+  entirely on the common kept set, so the model genuinely worsened. (2) θ0 by
+  centre on best.pt: C3 / C4 / N4 / S4 are shifted > 10° at ≤ 5 % of centres
+  (within-centre std 1.5-2.2°). **N3 is the pathology: 3 201 val centres, 67 %
+  shifted > 10°, half of those common-mode (the three θ0 together, within-centre
+  std 2.6°)**. Planar N3 (Σθ ≥ 355°, 2 164 centres — amide / aniline): θ0 median
+  131° vs 120°, 30 % above 140° — the exact force null mode, held by hessian_eq
+  alone. Pyramidal N3 (1 037 — amines): bimodal, 46 % below 90° (the worst
+  centres have all three θ0 at the 0.5° clamp floor), 26 % above 140°, eq
+  strain p50 83 kcal/mol per centre — a common θ0 shift at a pyramidal centre
+  is an axial force, so it is cancelling another style's axial force there. P4:
+  32 centres, θ0 97° vs 109°, not common-mode (std 7°). The pooled normalisation
+  of `MeanTermEnergyLoss` gives the 6 % of angles at N3 and the 0.1 % at P4 a
+  proportionally tiny pull, and unlike ByteFF's tanh window θ0 has no
+  chemically bounded range (only the 0.5-179.5° clamp). (3) axial-force
+  decomposition at N3 (job 3693135, `.jobs/n3_force_decomp.py`): **the
+  improper is the culprit**. Every N3 centre carries an improper (ByteFF's
+  rule: C/N with three neighbours). At pyramidal N3 on best.pt the improper
+  alone pushes the N along the pyramid axis by |F| p50 116 kcal/mol/Å and the
+  angle term cancels it (|F| p50 108): on the 477 centres with θ0 ≪ measured
+  the medians are improper +139 / angle −138 (total +6); on the 304 with θ0 ≫
+  measured, improper −92 / angle +86 (the anti-planar sign the signed cvff
+  amplitude allows). Bonds, LJ, Coulomb are all < 6. At planar N3 the
+  improper force is < 1 and the θ0 drift there is the pure null mode. Cause:
+  `hessian_k` trains `impropers.k` on curvature only, `hessian_geom` cannot
+  reach it, so the force objective's only handle on the improper's force at a
+  pyramidal minimum was θ0. ByteFF has a third equilibrium objective,
+  `ImproperTorsion_Energy` (`loss.py:302-314`, improper energy on the minimum
+  trained through the improper k), which I had not ported. **Fixed 2026-10-12**:
+  `OBJECTIVES["hessian_eq_improper"]` (hessian source, energy body, styles
+  `improper:cvff`, trainable `impropers.k`, weight 1) in all three stages;
+  `OBJECTIVE_LOSSES["term_energy_improper"]` =
+  `MeanTermEnergyLoss(namespaces=("impropers",))`. **The first CPU dry run of
+  the five-objective config (3693163) died on `Dynamo recompile limit exceeded`
+  at the baseline eval**: dynamo keys its cache on the function's code object,
+  and every `energy_body` closure in `molix.core.steps.joint` shared one, so K
+  energy objectives × (train, eval) looked like K recompiles of a single
+  function (guards on the closure and on the sub-batch's key count, which
+  grows as earlier bodies write their columns); the 4-objective runs sat at ≤ 8
+  entries silently and the fifth objective was the ninth. Fixed in
+  `joint.py::_own_code`: each body is handed back under a renamed code object
+  of its own (`energy_body[mbis]`), one cache per objective per step
+  (`test_joint.py::test_each_body_owns_its_code_object`; fast 33 + slow 5
+  green). Dry run 3693225 (CPU, 8 min) passes the whole launcher path with the
+  five objectives: baseline eval `hessian_eq_improper` 0 at init (zero-init
+  amplitude), −3e-6 after 10 steps (roundoff of a non-negative form), gate
+  report builds. **Operator 2026-10-12: "提，patience 改 10"** → `PATIENCE`
+  50 → 10 evals (2 000 steps; the plateau scheduler needs 5) in `configs.py`,
+  and GPU job 3703994 submitted (`runs/rondo-joint-s1-small-20261012-eqimp`,
+  SIZE=small, STAGES=s1-hessian-mbis, MAX_STEPS=1500, default clip 10,
+  account naiss2026-1-53-gpu, 2 h wall; the earlier 1500-step gate took
+  25 min). **Result (11:20): gate fails, worse** — N3 θ0 163.0° vs 117.9°
+  (p10 149°), N4 121.5° vs 109.1°, P4 120.7° vs 107.5°; stopped at step 1400
+  by the 10× divergence guard (eval 7780, best 54.7 at step 800). The new
+  objective itself is the cause: `hessian_eq_improper` went 0 → −0.004 →
+  −0.107 → −0.38 → −0.75 → −1.06 → −1.46 → −4.41. The improper strain
+  `k (1 − cos 2ψ)` is linear in `k`, and `CvffHead` predicted a **signed** `k`
+  from a zero start, so minimising the strain has no floor: `k` runs negative
+  wherever ψ ≠ 0, the improper force grows (|k| p90 9.5 → 34.8), the angle θ0
+  at every N3 rises to cancel it, and the force eval blows up (94.9 → 1123 →
+  7780 from step 1000; hessian_k 0.443 → 0.556). The dry run's −3e-6 after 10
+  steps was the first sign of it, misread as roundoff. ByteFF's `k` is
+  `4.29 + 3.71·15·tanh(·)` under a configurable `param_range` straight-through
+  clamp (`mlparams.py:104-110`); the repository has no training config, so the
+  floor it trains with is not documented — but the loss is bounded only with
+  one. **Fix (A20, uncommitted)**: `CvffHead` predicts `k_ref · exp(raw)`
+  (`heads.improper_k_ref` = 4.291/3 per row, ByteFF's GAFF2 mean per centre
+  over three rows), `impropers.k_ref` is a new column;
+  `test_classical.py::TestCvffHead` (starts on the reference, stays positive
+  for raw = −3); fast tests of heads / rondo / joint 86 green; slow compile
+  tests (rondo `test_compile.py` + joint bodies) 10 green. Dry run 3704940
+  (CPU, 8.5 min): `hessian_eq_improper` starts at +0.0316 kcal/mol/term (most
+  impropers are planar) and falls to 0.03157 after 10 steps, improper |k|
+  1.43 at init, report builds, gate passes. GPU gate run resubmitted as
+  3705406 (`runs/rondo-joint-s1-small-20261012-eqimp2`, same recipe).
+  **Result (3705406, 25 min, n161): gate passes.** N3 θ0 116.5° vs 117.9°
+  (p10 109° / p90 123°), N4 110.4°, P4 110.3°, C4 108.1°, C3 121.0°, S4
+  107.4°, S2 97.5° (measured 91.9°), C2 179.5°. `hessian_eq_improper` 0.0315 →
+  0.0016; improper |k| p10 0.003 / p50 4.26 / p90 7.9 (3689502 without the
+  strain objective: 1.7 / 4.7 / 9.5) — pyramidal centres lose their improper,
+  planar ones keep it, which is what the objective was for. hessian_k 0.4348
+  (3689502: 0.4352), force eval 35.2 (37.1), hessian_eq 0.350 (0.369), mbis
+  0.0082, charge MAE 0.058; bond k / r0 tables within ±5 kcal/mol/Å² / 0.004 Å
+  of 3689502. 2.14 steps/s, 26.2 GiB. Whether the long-run N3 drift is gone
+  needs the unbounded run (patience 10 now). **Operator 2026-10-12:
+  "提不限步数的，跑完把 param_report 发我"** → GPU job 3707870
+  (`runs/rondo-joint-s1-small-20261012-eqimp-long`, SIZE=small, no
+  MAX_STEPS: patience 10 evals / 4 h stage clock, clip 10, account
+  naiss2026-1-53-gpu, 4.5 h wall). Still open: pooled normalisation (N3 6 % /
+  P4 0.1 % of angles) and no chemical window on θ0.
+  **Result (3707870, 4 h 13 min, n442, 40 879 steps at 2.96 step/s): gate
+  passes.** Best 22.65 at step 40 600 (eval 36.0 at 1 500); lr cut by the
+  plateau scheduler at 26 800 / 30 600 / ~36 000, eval monotone with ±0.05
+  wiggles through every cut, hessian_eq 1.12 → 0.22 and never rose — none of
+  the 3690962 symptoms. N3 θ0 116.9° vs 117.9° (per-angle p10 108.8 / p90
+  123.7 against measured 109.4 / 126.2), P4 105.8 vs 107.5, N4 106.0 vs 109.1,
+  S2 96.2 vs 91.9, O2 108.6 vs 112.3; improper |k| p50 3.9 / p90 8.8 with p10
+  at zero; charge MAE 0.031; hessian_k 0.4295 (the 1-3 floor). **New finding:
+  sp-carbon angle K collapsed to 1.1** (47 at 1 500 steps, 14 in 3690962)
+  with every C2 θ0 pinned at the 179.5° ceiling against measured 179.0° (p90
+  179.9°): a θ0 below 180° makes the linear geometry the top of a Mexican hat
+  whose Cartesian curvature grows as 1/sin θ, and the Hessian fit can only
+  match the QM block by K → 0; molpot's angle kernel is C^∞ at linearity, so
+  θ0 = 180° exactly is the smooth isotropic bend. Operator 2026-10-12
+  (evening): **"先修 bug，最后再长跑！不需要考虑之前的 ckpt！"** → three
+  fixes, uncommitted, every earlier checkpoint invalid: (A21) every valence
+  context reads the term's own bond features through a per-batch
+  `molrep.chem.BondTable` (sort + `searchsorted`, static shapes; the angle /
+  proper / improper MLPs widen — ByteFF `OutputWithBond`; the Kekulé probe of
+  the architecture review); (A22) `ExpAround(lo=, hi=)` straight-through
+  windows on K / ε [1/8, 8], improper k [1/64, 8], r0 / σ [0.7, 1.4]; (A23)
+  θ0 ceiling 179.5° → 180° and the linear reference 177.5° → 180°. Not done on
+  purpose: θ0 "chemical window" (ByteFF's tanh on θ0 spans ±149°, i.e. none),
+  per-term normalisation of hessian_eq (ByteFF's two means with weight 1 vs
+  our one pooled mean: a constant factor), gain rebalancing (ByteFF's own
+  gains have the same r0 : θ0 : torsion ratio; measured instead by
+  `.jobs/head_grad_probe.py`, job 3723477: at init hessian_geom r0 1.1e-2
+  vs θ0 1.5e-3 per unit raw, bond K ≈ angle K ≈ 2e-5 ≫ improper 1.7e-6; after
+  30 steps the trunk share is hessian_geom ~1e-4 to 3e-4 against ~1e-6 for
+  hessian_k — the geometry objective owns the trunk ~100×; no S1 cost, the
+  S2/S3 lever is a per-head backward scale). Tests: fast 364 (chem, heads,
+  rondo, potentials) + joint 33; slow compile (Rondo forward / energy /
+  styles / partial_hessian / eval forward + 5 joint bodies) 10 green, 1
+  graph / 0 breaks with the BondTable inside the traced body. CPU dry runs
+  3723026 (A21 + A22) and 3723579 (A21 + A22 + A23) on the exact launcher
+  path **both pass** (8-9 min each; 3723579: C2 θ0 180.0° at init, angle K
+  40.01, improper |k| 1.43, baseline hessian_k 0.4832, gate passes on the
+  untrained field). GPU: gate run 3723815 (1500 steps,
+  `runs/rondo-joint-s1-small-20261012-fix3-gate`, 2 h wall) and the long run
+  3723816 (`…-fix3-long`, no MAX_STEPS, 4.5 h wall) submitted together with
+  `--dependency=afterok:3723815` — the launcher exits with
+  `term_curriculum.py`'s status, so a failed gate cancels the long run.
+  **Gate run 3723815 (29 min, n137): passes**, every S1 metric at or better
+  than 3705406: eval 34.55 (36.00), hessian_k 0.4339 (0.4348), geom 33.8
+  (35.2), hessian_eq 0.340 (0.350), mbis 0.0079, charge MAE 0.060. C2 θ0 p50
+  180.0° (p10 177.8°), C2 angle K 42.3 at 1500 steps (47 before — the long
+  run is the A23 test); N3 116.3° vs 117.9°, N4 107.9, P4 106.3, S2 100.2
+  (91.9), O2 109.0 (112.3); improper |k| p10 0.022 = the 1/64 floor, p50 4.12,
+  p90 7.98. 2.10 step/s, 28.4 GiB (+2.2 GiB for the wider context MLPs).
+  Long run 3723816 released by the dependency.
+  **2026-10-12 21:00, user "提，两条都提"**: (a) S1 large gate run 3732774
+  (`SIZE=large STAGES=s1-hessian-mbis MAX_STEPS=1500`,
+  `runs/rondo-joint-s1-large-20261012-gate`, 4.5 h wall) — doubles as the
+  large-tier memory probe under the joint step at the tier's 131072
+  capacity (old single-objective path measured 20.2 GiB large vs 12.7 small
+  at this capacity; small joint is 28.4 GiB, so ~45 GiB expected; fallback
+  `--capacity 65536` if it OOMs). (b) S2 small gate run 3732775
+  (`STAGES=s2-torsion MAX_STEPS=1500`, `INIT_FROM` = the long run's
+  `best.pt`, `runs/rondo-joint-s2-small-20261012-gate`) with
+  `--dependency=afterok:3723816`, so it starts only if the long run passes
+  its handoff gate. (c) s2-torsion has never run under the joint path (no
+  `s2-torsion` run directory exists), so a CPU dry run of the exact S2
+  launcher path, `.jobs/dryrun-s2-x86.sbatch` (job 3732773, 10 steps,
+  capacity 4096, init from the 3723815 gate `best.pt`), runs now; a bug it
+  finds can be fixed before (b) starts, since the chained job reads the code
+  at start.
+  **Dry run 3732773 passes** (8 min 50 s, n233, exit 0): torsion-scan
+  census 80 bond-stretch + 2780 GAFF2-untyped of 83951 scans excluded, split
+  77115 / 4054 scans; six objectives (`torsion` → `propers.k`); smoke 3
+  steps, baseline eval torsion 4.965 (propers at zero), step 10 torsion
+  4.961 with the five S1 metrics unchanged from the 3723815 checkpoint;
+  report builds, handoff passes. The S2 launcher path is exercised end to
+  end; the chained gate run (b) stands.
+  **Large gate 3732774 OOMs at 131072** (n538, 15 min): censuses, loader
+  plan, three smoke train steps all pass; the baseline eval dies in the
+  fourth of five bodies (`hessian_eq_improper`) allocating the proper
+  context input `(368896, 896)` with 90.5 GiB already allocated by PyTorch.
+  Cause, found and fixed: `Trainer._run_eval_phase` kept the previous
+  batch's `outputs` (loss with grad, predictions = the sub-batches holding
+  the whole autograd graph) in its loop variable through the next batch's
+  forward, so the eval peak was ~2× the train peak for any step that
+  evaluates with grad on (`del outputs` after the scalar collection;
+  `tests/test_molix/test_core/test_trainer_eval.py::
+  test_eval_phase_releases_a_batch_before_running_the_next`, weakref on the
+  returned loss, fails without the line; core tier 430 green). The launcher
+  now passes `CAPACITY` through to `--capacity`; resubmitted as 3735480 at
+  65536 (`runs/rondo-joint-s1-large-20261012-gate-c65536`, started 19:52 on
+  n128, within a minute of the fix landing — whether it imported the fixed
+  trainer is not provable from the log). Large's production capacity
+  (65536 or 131072) is decided from a measured peak under the fixed eval
+  loop, not from the broken run.
+  **3735480 (65536) OOMs too, at the same 90.5 GiB, in the first training
+  step** after the baseline eval passed, and the 131072 memory probe 3736461
+  (eval-loop fix in) in the baseline eval — the ceiling is a leak, not a
+  footprint. Root cause: the eval bodies write their predictions
+  (`forces_pred`, `partial_hessian`, every table column) onto the sub-batch
+  **attached** to the whole eval forward graph, and the validation batches
+  are resident (`ResidentValidation`), so every val batch's eval graph stayed
+  alive through the next val batch and through training. Fixed in
+  `DefaultEvalStep.on_eval_batch`: with grad on, the loss and every attached
+  column of the batch / predictions are replaced by their detached selves
+  once the loss is computed (`molix.core.steps.eval.release`; tests in
+  `test_eval.py::TestEvalReleasesTheGraph`, the multitask and step-protocol
+  tests that asserted "keeps the graph" inverted / removed).
+  **Performance restructure (user "搞一下性能优化", 2026-10-12 evening):**
+  the S1 step ran `model.tables` (encoder + every head) **six** times per
+  step — once per objective on its own host-cloned copy of the one hessian
+  batch (hessian_k, hessian_geom, hessian_eq, hessian_eq_improper), a fifth
+  under no_grad for the nonbonded force, and once on the mbis batch, where
+  `output="energy"` then priced LJ + Coulomb + every bonded term on 4.4 M
+  pair rows for a loss that reads `atoms.charge` only. Now
+  (`molix.core.steps.joint`): `JointObjective(source=)` — objectives on one
+  source share the sub-batch and **one** `tables` prediction, one traced
+  region per source returning the per-objective losses, each objective
+  keeping its own trainable views; `Derivative.forward(frame,
+  **energy_kwargs)` hands the tables to the energy; `output="tables"` for
+  the charge objective (no energy); the nonbonded force uses the shared
+  tables detached. Encoder passes per S1 step: 6 → 2; host copies per
+  step: 5 → 2; the mbis pair potentials gone. Lab: `objectives()` passes
+  `source=`, `JointDataModule({source: module})`, `OBJECTIVES["mbis"]
+  ["output"] = "tables"`, `param_report(tables_from="hessian",
+  charges_from="mbis")`. Tests: molix fast 1428, whole fast tier 3469, slow
+  joint explain 6 (a four-objective source region is 1 graph / 0 breaks),
+  Rondo compile 5. `.jobs/head_grad_probe.py` predates the per-source bodies
+  (note at its top; its D2 numbers stand). CPU dry run 3738119 on the exact
+  S1 launcher path, then the GPU A/B against 3723815 (2.03 step/s, 28.4 GiB).
+  **Dry run 3738119 passes** (12.5 min, n221, exit 0): baseline eval on the
+  untrained field bit-for-bit the pre-restructure dry run's (hessian_k
+  0.4832, geom 2046.6, hessian_eq 1.123, improper 0.0316, mbis 0.0902), 10
+  steps, report, handoff. GPU A/B submitted (small, S1, 1500 steps,
+  `runs/rondo-joint-s1-small-20261012-perf-gate`); user: "先确保可以正确训练小
+  模型" — the gate must pass and the 1500-step metrics must match 3723815
+  before the large tier is retried.
+  **Long run 3723816 (3 h 10 min, n65): trains cleanly, fails the handoff
+  gate.** Patience stop at 26 400 steps, best eval 24.09 at 24 400 (five lr
+  cuts: 11600 / 14800 / 20800 / 24000 / 25800), eval monotone 28.3 (4000) →
+  24.1; hessian_k 0.4329, hessian_eq 0.218, mbis 0.00233, charge MAE 0.034,
+  2.60 steps/s, 28.4 GiB. A23 confirmed: C2 θ0 180.0° (p10 179.8°), angle K
+  25.2 (p10 16.7 / p90 27.5) — down from 42 at 1500 steps but no collapse
+  (3707870: 1.1), and 21–43 kcal/mol/rad² is the physical range of a linear
+  bend. Other centres: N3 116.9 vs 117.9, N2 112.3 vs 115.3, O2 109.5 vs
+  112.3, S2 95.6 vs 91.9. **Failure**: feature RMS improper 5.92 (window
+  0.3–3; the other streams 1.0–1.2); improper |k| p10 0.022 = the 1/64 floor,
+  p50 = p90 = 3.13. Mechanism: the straight-through window (A22) holds the
+  value at the floor but passes the whole gradient, so rows the strain
+  objective legitimately wants at zero (pyramidal centres) pull on the
+  improper stream's LayerNorm gain forever — unclamped (3707870) that push
+  is self-limiting (k → 6e-16, stream 1.29). Fix **A24**: the windows
+  saturate (ByteFF's tanh, `w·tanh(x/w)` per side, slope one at the
+  reference) — `ExpAround` / `LinearAround` in `molpot.heads.classical`;
+  heads tests rewritten (247 green), Rondo compile 5 green. The chained S2
+  gate 3732775 was cancelled by Slurm (dependency never satisfied). Next
+  long run = perf restructure + A24, after the A/B.
+  **A/B 3741657 passes** (small, S1, 1500 steps, n548): every metric
+  within noise of 3723815 — eval 34.78 (34.55), hessian_k 0.4343 (0.4339),
+  geom 34.0 (33.8), hessian_eq 0.339 (0.340), eq_improper 0.0020 (0.0019),
+  mbis 0.0078 (0.0079), train 23.1 (23.0); handoff passes. **2.75 steps/s
+  (2.03, +35 %) and peak GPU memory 7.79 GiB (28.4, ×3.6 less).** Small
+  trains correctly on the restructured step. Submitted next (user "提，两条
+  都提" + "最后再长跑"): A24 small gate → A24 small long run (afterok) → S2
+  small gate (afterok, init from the long run's best.pt), and the large gate
+  at the tier's 131072 capacity (perf + A24; it is the large memory
+  calibration).
+  **A24 small gate 3742959 passes** (25 min, n65): eval 34.23, hessian_k
+  0.4336, geom 33.4, hessian_eq 0.340, eq_improper 0.0022, mbis 0.0080,
+  charge MAE 0.061; C2 θ0 180.0 (p10 180.0) / K 45.7; improper |k| p10
+  0.030 / p50 4.58 / p90 8.42, improper feature RMS 1.14; 2.71 steps/s,
+  7.80 GiB. The A24 long run 3742960 is released (its improper feature RMS
+  at 20 k+ steps is the A24 evidence).
+  **Large gate 3742962 at 131072 passes** (26.5 min, n502; the first
+  large-tier run that fits): **28.75 GiB peak, 2.17 steps/s** (small 7.8
+  GiB / 2.71); eval 19.94 at 1500 steps (small: 34.2 at 1500, 24.1 after
+  26 400), hessian_k 0.4305, geom 19.3, hessian_eq 0.227, mbis 0.0025,
+  charge MAE 0.035; C2 180.0 / K 28.1, N3 117.4 vs 117.9, P4 101.7 vs
+  107.5, S2 94.5 vs 91.9; feature RMS 1.00–1.05. This is the item-5
+  calibration for large (capacity 131072, HBM 28.75 of 95 GiB, 2.17
+  steps/s, resident val fits). Submitted the S1 large long run
+  (`runs/rondo-joint-s1-large-20261012-a24-long`, no MAX_STEPS, 4.5 h
+  wall) per the gate → long → report pattern.
+  **S1 large long run 3743201 passes** (2 h 09, n95, 17 800 steps, patience
+  stop, best 15 800): eval **10.85** (small A23 long 24.09), hessian_k 0.428,
+  geom 10.34, hessian_eq 0.161, eq_improper 0.0016, mbis 0.00062, charge MAE
+  0.017 e; lr cut twice (1.5e-4 at ~13 600, 7.5e-5 at ~17 200). θ0: C2 180.0
+  (p10 178.7) vs 179.0, C4 107.6 vs 109.6, N2 111.6 vs 115.3, O2 108.0 vs
+  112.3, the rest within 2°; angle K C2 16.9 (p10 7.1); bond K H1-C4 358 /
+  C3-C3 351 / C4-C4 201 / C3-O1 728; improper |k| 0.022 (floor) / 3.90 /
+  9.70, **improper feature RMS 1.11 at 17 800 steps** (A23 small: 5.92);
+  2.65 steps/s, 28.75 GiB. `hessian_k` is the one loss neither tier moves
+  (0.428 large / 0.433 small from 2 000 steps on) — open, see spec appendix.
+  Submitted the **S2 large gate** (1500 steps, cap 131072, init from this
+  run's `best.pt`, `runs/rondo-joint-s2-large-20261012-a24-gate`) chained
+  `afterok` the S2 small gate 3742961 — the user's "两条都过了，再从 S1
+  large 的 best.pt 走 S2 large → S3 large"; Slurm cancels it if the small
+  S2 gate fails.
+  **A24 small long run 3742960 passes — A24 confirmed** (3 h 01, n139,
+  37 800 steps, patience stop, best 35 800): eval **22.09** (A23 long run
+  3723816: 24.09 at 26 400 and a failed gate), **improper feature RMS 1.33
+  at 37 800 steps** (A23: 5.92), improper |k| 0.022 (floor) / 3.96 / 8.70,
+  C2 θ0 180.0 with p10 = p90 = 180.0, C2 K 24.6; hessian_k 0.430, geom
+  21.5, hessian_eq 0.211, eq_improper 0.0017, mbis 0.0018, charge MAE
+  0.030 e; lr cut four times (20 400 / 24 600 / 33 400 / 37 200); 3.82
+  steps/s, 7.80 GiB. Its tables match the large run's to a few percent.
+  The chained S2 small gate 3742961 started on n139 (2026-10-13 ~00:00,
+  first S2 GPU run); the S2 large gate 3747335 waits on it.
+  **S2 small gate 3742961 passes** (33 min, n139; the first S2 GPU run,
+  init from 3742960's best.pt): eval 27.80 → 26.21, torsion 5.72 → 4.39
+  (still falling), proper Σn²|k_n| 2.66 / 6.90 / 11.25, proper stream RMS
+  1.14; S1 objectives hold (hessian_k 0.432, geom 21.2, mbis 0.0018, charge
+  MAE 0.030, C2 180.0 / K 22.0; N3 θ0 116.7 → 113.2). **Watch**: improper
+  |k| p50 3.96 → 0.42 (p90 8.70 → 5.19) in 1500 steps while eq_improper
+  halved — fresh Adam at 3e-4 (S1 ended at 1.9e-5) lets the improper-strain
+  objective beat the partial Hessian; read the S2 long run before judging.
+  1.41 steps/s, 9.58 GiB. The S2 large gate 3747335 started on n470
+  (2026-10-13 ~00:00); submitted the **S2 large long run 3748659**
+  (`runs/rondo-joint-s2-large-20261012-a24-long`, init from the S1 large
+  best.pt, no step cap) chained `afterok` the gate — gate → long → report.
+  **S2 large gate 3747335 passes** (36 min, n470, init from 3743201's
+  best.pt): torsion 5.27 → 3.57, best eval 14.83 at 1000 but 16.09 at 1500
+  (hessian_k 0.428 → 0.450, geom 10.26 → 11.85, hessian_eq 0.165 → 0.224:
+  the S1 objectives regress under the fresh Adam at 3e-4); charge MAE
+  0.018; N3 θ0 117.0 → 113.1 (same 113 as the small S2 gate — systematic
+  once torsion joins), C2 180.0 / K 17.3; improper |k| 0.022 / 5.28 /
+  10.07 (up, where small went down tenfold); proper Σn²|k_n| 2.94 / 8.77 /
+  13.84; **1.28 steps/s, 39.69 GiB**. The S2 large long run 3748659
+  started on n88 (2026-10-13 01:34). If the S1 tables do not re-settle as
+  the plateau scheduler cuts lr, the fix is the S2 start: a lower initial
+  rate (1e-4) or carrying the S1 Adam state.
+  **S3 preflight (2026-10-13 01:40–02:00)**: S3 (`s3-relax`) had never been
+  dry-run, so `.jobs/dryrun-s3-x86.sbatch` (S2 template, `--stages
+  s3-relax`) was added. 3748999 at the dry-run capacity 4096 failed in
+  `MoleculePadder.from_counts`: a hessian-relax **row is a whole
+  relaxation trajectory** (frozen extent 16d9296f: median 60 frames / 1 891
+  atoms per row, p90 100 / 3 234, max 302 frames / 12 180 atoms, pairs p50
+  58 k, max 508 k at 10 Å) — same shape class as a torsion-scan row, so the
+  CPU dry run needs `CAPACITY=16384` (GPU 131072 holds ~60 rows a batch).
+  3750954 at 16384 passed the padder and failed closed on the init
+  checkpoint (large S2 gate best.pt handed to the small dry-run model);
+  3750992 re-run from the S2 small gate's best.pt. Checked three relax rows
+  through `THEMolHessianRelax().load("shard-000", cache=False)` (the
+  lab's own path; there is no mrec LMDB for hessian/mbis/torsion — only the
+  relax shard has one): every atom carries `gaff2_sigma/epsilon`,
+  `formal_charge`, `ring_connectivity`, `min_ring_size`; bonds carry
+  `bond_type`/`in_ring`; meta has `energy` and `step_index` per frame. So
+  the 0-of-89 161 GAFF2-untyped census is a population difference, not a
+  missing column (the census raises on a missing column).
+  **S3 dry run 3750992 passes** (10 min, n224, CPU, capacity 16384, small,
+  init from the S2 small gate): the full S3 path — seven objectives incl.
+  `relax` (`relax_profile_force` → every bonded table + `atoms.sigma/
+  epsilon`), four padders, compile, smoke, baseline eval (relax 3.81,
+  torsion 4.39, S1 objectives at their S2 values), 10 steps, best.pt,
+  param_report, handoff passes. 0.23 steps/s on 16 CPU cores. Chained the
+  **S3 large gate 3751063** (1500 steps, cap 131072, init from the S2 large
+  long run's best.pt) `afterok` 3748659 and the **S3 large long run
+  3751064** `afterok` the gate — the user's S2 large → S3 large chain. The
+  S2 long run's verdict lands ~40 min before the S3 long run can start;
+  if the stage-start lr must change, `scontrol hold 3751064` while it is
+  still pending.
+  **S2 large long run 3748659 DIVERGED** (46 min, n88; patience stop at
+  2800, best 14.32 at 800): eval 14.3 → 24.6 at 2800 (hessian_k 0.428 →
+  0.696, geom 10.3 → 19.5, hessian_eq 0.165 → 0.353; torsion 5.27 → 4.08),
+  train losses flat (12.3–12.9; train geom 8.2 → 9.6), pre-clip grad norm
+  420–600 vs 125–280 in S1 — under clip 10 the torsion gradient owns the
+  step. The handoff "passes" only because it reads the step-800 best.pt.
+  Diagnosis: the torsion profile loss grows proper amplitudes (Σn²|k|
+  p50 9.0 / p90 14.6 and rising) that no S1 objective can push back on
+  (hessian_k trains stiffnesses, geom/eq train r0/θ0, propers.k detached
+  in all three), and those amplitudes put forces and curvature on the
+  hessian-set minima; the kneed train loss hides the outliers the plain
+  eval counts. ByteFF stage 2 bounds exactly this with `mask_by_circstd`
+  (train torsion k only where the dihedral rotates across the scan),
+  `max_config`/`set_grad_max` (per-table gradient cap) and an L1/L2 aux
+  loss on ProperTorsion_k — none implemented here. **Held 3751063 (S3
+  gate) and 3751064 (S3 long)** (`scontrol hold`; release with `scontrol
+  release`). CPU report on the step-2800 last.pt (3751903; 3751893 died
+  on the stale `tables_from="hessian_k"` in `.jobs/report_from_ckpt.py`,
+  fixed to the source key) **confirms it**: proper Σn²|k| 3.8/9.0/14.6 →
+  17.8/34.2/56.0, improper |k| p50 4.72 → 0.022 (all on the floor), θ0
+  N3 112.8 → 105.3 (gate fails), O2 → 103.5, P4 → 103.0; bond K/r0
+  unchanged, feature RMS 1.0–1.17.
+  **A25 landed (2026-10-13 03:00, not committed)**: the paper (§2.4, Table
+  1) names an L1 norm on the proper amplitudes and stage rates 1e-4 /
+  2e-5 — `molix.core.losses.NormPrior` (+ `TestNormPrior`, 6 tests; loss +
+  joint suites 154 green), lab `OBJECTIVES["torsion_l1"]` (`"tables"`
+  body on the torsion-scan batch, `propers.k`, weight `TORSION_L1_WEIGHT` =
+  1.0) in S2 and S3, `LR_TORSION` = 1e-4, `LR_RELAX` = 2e-5. The circular-std
+  mask and per-table gradient cap (code-only in ByteFF) are not adopted
+  yet. **S2 CPU dry run on A25 passes** (3752027, 10.5 min, n226, small,
+  cap 4096, init from the S1 small long run): seven objectives incl.
+  `torsion_l1` (0 at step 0 — the propers start at zero — 1.3e-5 after 10
+  steps), smoke, baseline eval, best.pt, param_report, handoff passes.
+  **2026-10-13 09:40 the user authorised autonomous iteration** ("自动迭代，
+  直到能达到生产机训练为止"): gate → judge → long → next stage, fixing and
+  resubmitting on failure, param_report to the user after every run.
+  Dropped a duplicate `TORSION_L1_WEIGHT` definition in `configs.py` (the
+  original stayed when the constant moved above `OBJECTIVES`; same value).
+  Submitted the **S2 large gate on A25, 3765199** (1500 steps, cap 131072,
+  lr 1e-4 from the stage, init from 3743201's best.pt, name
+  `rondo-joint-s2-large-20261013-a25-gate`) and the **S2 large long run
+  3765202** (`--hold`, `afterok` 3765199; released only if the gate passes
+  the A25 criteria: Σn²|k| p50 near 9, improper |k| p50 > 1, torsion eval
+  still falling, S1 objectives' eval not rising). The held S3 jobs
+  3751063/3751064 (init from the diverged S2 best.pt) stay held; they need
+  `scancel` from the user and a re-chain from the A25 S2 best.pt.
+  **S2 large gate on A25 passes its criteria (3765199, 38 min, n129,
+  12:10)**: eval 16.12 → 14.16 monotone (A24 gate: 14.83 best, 16.09 at
+  1500), torsion 5.27 → 3.63 (same fit as A24's 3.57) at Σn²|k| p10/p50/p90
+  **0.87 / 2.31 / 7.85** (A24 gate 8.77 p50; diverged run 34.2), improper
+  |k| p50 **2.71** (floor 0.022 only at p10), S1 objectives flat/falling
+  (hessian_k 0.4276, geom 9.81, hessian_eq 0.170, improper strain
+  0.00135, mbis 0.00062), θ0 N3 111.7 (−6.2° vs measured; watch), N2 −4.0,
+  O2 −4.2, C2 180.0 / K 18.6, charge MAE 0.017, feature RMS 1.00–1.11,
+  pre-clip grad norm 34 (3e-4 run: 420–600), 1.28 steps/s, 39.69 GiB.
+  Released the S2 long run 3765202; queued the **S3 large gate 3768159**
+  (`--hold`, afterok 3765202, 1500 steps, cap 131072, init from the S2
+  long's best.pt) and the **S3 large long run 3768163** (`--hold`, afterok
+  3768159); each is released only after its predecessor passes judgement.
+  **S2 large long run on A25 passes (3765202, 60 min, n38, 13:21)**: best
+  14.13 at 2600, patience stop at 4600 after one lr cut (5e-5 at 3800);
+  eval plateau 14.1–14.4 from 1400 on (A24 at 3e-4 went 14.3 → 24.6), one
+  transient spike at 3800 (16.04, L1 term 0.16 → 0.66) reversed by 4000.
+  torsion 3.44; S1 objectives hold (hessian_k 0.428, geom 9.94,
+  hessian_eq 0.180, improper strain 0.0013, mbis 0.00061). Report on best:
+  Σn²|k| 0.93/2.44/10.2, improper |k| p50 2.36 (declining 3.90 → 2.71 →
+  2.36), θ0 N3 111.3 (−6.7°, drifting; window ends 107.9), N2 −4.0, O2
+  −4.1, C2 180.0/K 19.8, charge MAE 0.017, feature RMS 1.00–1.11, 1.96
+  steps/s, 39.69 GiB. Released the **S3 large gate 3768159** on this
+  best.pt (first GPU S3 on A25; judge: relax loss falls, S1/S2 evals hold,
+  LJ log ratio median ≤ 0.3, impropers do not collapse, memory at 131072
+  with four padders); the S3 long run 3768163 stays held until then.
+  **S3 large gate on A25 fails judgement (3768159, 75 min, n36, 14:47) — K
+  collapse**: handoff passes mechanically (K medians still inside
+  [0.3×, 3×] of 450) but hessian_k rises monotonically 0.428 → 0.469 and the
+  bond K fall 30–70 % in 1500 steps (H1-C4 358 → 249, C3-C3 349 → 154,
+  C3-O1 731 → 230), angle K −20…−35 %, improper |k| p50 2.36 → 1.88;
+  hessian_geom 9.94 → 4.28 and hessian_eq 0.180 → 0.109 only because every
+  force at the QM minimum scales with K. relax 2.88 → 2.25, torsion 3.31,
+  LJ log ratio ε −0.18 median, pre-clip grad norm 100–180 (S2: 34),
+  0.46 steps/s, **57.36 GiB** (first S3 memory number at 131072). ByteFF's
+  stage-3 energy/force loss trains every bonded table but under a per-table
+  gradient cap with no public values; fix A26 (configs.py, uncommitted):
+  `OBJECTIVES["relax"]["trainable"]` = bonds.r0, angles.theta0, propers.k,
+  atoms.sigma, atoms.epsilon — the curvatures stay the partial Hessian's.
+  Resubmitted from the S2 long's best.pt: **S3 gate 3776940** (A26, 1500
+  steps) and **S3 long 3776941** (`--hold`, afterok 3776940). Judge the gate
+  on: hessian_k stays at 0.428, bond K within ±10 % of the S2 long's table,
+  relax still falling (A25 gate reached 2.25 with K free), N3 θ0 not worse,
+  LJ ε log ratio median ≤ 0.3. 3768163 stays held (stale) for the
+  operator's scancel, with 3751063/3751064.
+  **Throughput question raised by the operator (10-13 afternoon)**: S3 steps
+  at 2.24 s against S2's 0.57 s (wall per step incl. evals; evals are ~12 s
+  per 200 steps, no recompiles in .err) and 57 vs 40 GiB. Two driver-side
+  suspects: `clear_runtime_cache()` wipes the prepared-row cache at every
+  stage start (every job cold; relax rows are whole trajectories) and
+  `loader_plan`'s 16 workers are divided among the sources (S3: 4 per
+  source). The log table had no data-wait column — added
+  `compute_step_per_second` and `data_wait_s` (curriculum.py Log keys).
+  **A26 gate 3776940 held** until the step time is explained; bounded
+  profiler `profile_joint.py` + `profile_joint.sbatch` (train dir) submitted
+  as **3782146** (1-proc cold/warm per source with collate stage split,
+  per-source production loaders, lockstep, GPU per-source bodies + whole
+  step + peak memory + kernel table, slowest source at 16 workers).
+  Stale: 3781360 failed (inherited SIZE check), 3782141 held (truncated
+  sbatch) — both for the operator's scancel.
+  **Profiler 3782146 (n463, 27 min) — the step is data-bound, the cache is
+  per job**: the whole S3 step on a resident nested batch is **0.380 s** (per
+  source fwd/bwd: hessian 0.044/0.057, mbis 0.032/0.029, torsion 0.035/0.042,
+  relax 0.037/0.055 s; peak 54.8 GiB, mm/addmm 60 % of CUDA time), against
+  2.24 s/step delivered. One process, cold → warm batch: hessian 169/51/36 →
+  1.0 s, mbis 160/100/75 → 0.5–0.8 s, torsion 28/20/18 → 0.1 s, relax
+  15.5/14/11.6 → 0.05–0.1 s; 4 workers: the first cold batch 10–44 s, warm
+  ~0. Rows per 131072-atom batch: hessian/mbis ~4 300, torsion ~170 scans,
+  relax ~59 trajectories (median 71 frames) → one pass over relax is ~1 390
+  steps, torsion ~450, mbis ~83, hessian 14: the S3 gate never warmed, and
+  S2's 0.57 s/step was the 450-step cold phase averaged over 4 600 steps.
+  Root: molhub's runtime cache root is `/scratch/local/molcache/<jobid>` (per
+  job), `clear_runtime_cache()` was moot. **Fix (lab, uncommitted)**:
+  `warm_prepared_cache.py` + `.sbatch` (CPU partition, x86 env built from the
+  same molrs/molpy revisions) drains every source's train+val loader once and
+  snapshots each `<digest>.prpm` to
+  `workspaces/lab-new/prepared-cache/` with a manifest; `term_curriculum.py`
+  now calls `restore_prepared_cache()` once per job (copytree onto the
+  runtime root; fails closed without a snapshot, `PREPARED_SNAPSHOT=none`
+  runs cold) and `report_prepared()` prints warm/cold per source after
+  `stage()`. Warm-up job **3785149** submitted (24 workers, 256 GB, 3 h). Not
+  changed: `loader_plan._MAX_WORKERS=16` (memory would allow 30; warm
+  batches at 4 workers/source ≈ 0.25 s < 0.38 s GPU, so not the bound once
+  warm). Expected S3 step ≈ 0.4–0.45 s (5× faster), S2 similar.
+  **Warm-up 3785149 (n282, 21 min) filled the 214 GB scratch**: the stored
+  row carried the 10 Å cutoff graph and relation for every conformer (~36 B
+  a pair): mbis 22 GB, torsion 99 GB (1.2 MB a scan), relax 88 GB at 31 % of
+  its rows (3.3 MB a trajectory; ~285 GB complete), hessian 4.5 GB. The
+  batch-level rebuild is vectorised (`NeighborList._execute_batched` 0.17–
+  0.2 s + `PairRelation` 0.14 s on a 131072-atom synthetic batch, one
+  thread), so the graph is not worth storing. **Changed (molnex src,
+  uncommitted)**: the collate skips exactly the tasks the rows were captured
+  with (`PreparedRows.tasks` → `_CollateFn(captured=)`, keyed on `task_id`;
+  `DataModule._make_collate_fn(dataset)`), the `per_row` class flag on
+  `NeighborList` / `PairRelation` is gone; tests updated + 2 added (108
+  pass). **Lab**: `class_i_fit._with_prepared` stores rows with no per-row
+  task, field `class-i.prepared.v4.<kind>` (no cutoff in the id);
+  `loader_plan._MAX_WORKERS` 16 → 24 (155 GiB under the memory model). The
+  v3 snapshot (214 GB on nobackup) was deleted. Submitted: cold CPU dry run
+  of the S3 path on v4 (**3786080**, `.jobs/dryrun-s3-x86.sbatch`, cap 4096,
+  10 steps, `PREPARED_SNAPSHOT=none`) and the v4 warm-up (**3786081**).
+  Then: check sizes (expect ~3× smaller, ≲130 GB), release the A26 gate
+  3776940 (its driver restores the snapshot and logs warm/cold, data_wait).
+  **Both pass (18:10)**: cold CPU dry run 3786166 (small, cap 16384 — 4096
+  cannot hold a 12 180-atom relax trajectory row; init S1 small fix3-long
+  best.pt, the S2 large one is the wrong tier) runs stage → smoke →
+  baseline → 10 steps → eval → param_report on prepared v4 with the cutoff
+  graph rebuilt per batch; it stops at the handoff on an untrained improper
+  stream (rms 5.89), which is the dry run's documented outcome. v4 warm-up
+  3786081 (n290, 11 min): **74.3 GiB** — hessian 2.2, mbis 5.9, torsion
+  16.8, relax 49.5 (all 86 239 rows) — against 214+ GB for v3; snapshot +
+  manifest under `workspaces/lab-new/prepared-cache/`. **A26 S3 gate 3776940
+  released** on it (first run with the restored cache, 6 workers/source,
+  data_wait/compute columns in the log).
+  **Architecture / engineering cleanup (operator: 「把代码清理出来，确保架构
+  符合要求、工程上干净」, 10-13 evening; three independent review passes
+  over molix, molpot+molrep, molzoo+scripts+lab; all uncommitted).** Gates
+  before and after: test mirror, ruff, ruff-format (this chain's files), ty
+  0 errors; fast tier 3480 → 3481 passed, slow compile 11 passed (Rondo
+  forward/energy/partial_hessian and every joint body still 1 graph /
+  0 breaks). molix: prediction keys live in `molix.schema`
+  (`ENERGY_PRED_KEY`, `FORCES_PRED_KEY`, `NONBONDED_FORCES_KEY`,
+  `HESSIAN_KEY`); `molix.frame.beside_labels` is the one place a model's
+  write is moved beside its label (Rondo.forward and both joint bodies use
+  it; the joint `"forward"` op lands the force at `forces_pred` through
+  `Derivative(outputs=)`); `JointObjective(trainable=())` is refused;
+  `JointTrainStep.source_losses` is the public per-source primitive
+  (`forward_loss` loops over it); the collate skips exactly the tasks the
+  prepared rows were captured with (`PreparedRows.tasks` → `_CollateFn
+  (captured=)`), `per_row` flags gone; `PreparedRows.store`,
+  `PreparedMmap.rows_present()`, `DataModule.release()`; `collate.rebase_kind`
+  / `OFFSET_TARGETS` public (no private cross-module imports);
+  `collator.Prepare` protocol; subset views read through public
+  `indices`/`source`/`dataset`; one package-wide import-boundary test
+  (`tests/test_molix/test_init.py`); legacy loss tests moved to their mirror
+  paths; history narration in docstrings replaced by design statements.
+  molpot/molrep: `molpot.Potentials` / `molpot.potentials.Potentials` is the
+  style collection (`StylePotentials` gone), the top-level bonded names are
+  the molrs-style classes (the tabulated path's `bonds.harmonic` etc. by
+  module path only), the lazy `__getattr__` container shims are direct
+  imports, `BondedPotential.values` reads `bonds.bond_types` (the collate's
+  spelling — was `type`, never hit by a collated batch), `Potentials.energies`
+  / the new `ImproperPeriodic` / `_style_params` helper / `fourier_basis`
+  export gone, `CvffHead.sign` buffer owns the cvff form, heads declare
+  `references`; tests: registry duplicate-claim, pair `shifts`/`pair_diff`
+  geometry, bond type column. molzoo: Rondo has no `OUTPUT_COLUMNS` /
+  `_index` / `table_names` (the bonded potentials own their index,
+  `table_columns()` is what the heads produce), hybridization once per
+  `tables()` with the linear-centre proper mask applied there, one energy
+  loop, `forcefield: molpy ForceField`. scripts: `cyclic_impropers` /
+  `IMPROPER_ROWS_PER_CENTRE` live in `molix.data.valence_columns` (the
+  three-rows contract is molix's), `ClassIPrepare.bond` refuses a frame
+  without bonds (no position-based inference), the prepared-row walkers use
+  public `source`/`indices`/`path` (+ `HessianTargets.source`,
+  `prepared_kind`), dead code out (`profile_force_*`, `TASK_CODE_ENERGY`,
+  `label_sample(group=)`, `get_max_*`, `class_i_data_module(slack=,
+  *_counts=)`, the census-key shim, `CALIBRATION`/`TORSION_ATOMS_PER_ROW`/
+  unread `PROD_DAY` keys, `ForceFieldDeclaration.save/load`). lab: one
+  curriculum loop `curriculum.run(size, stages=, split=, after_stage=)`
+  shared by `curriculum.py` (LMDB split) and `term_curriculum.py` (censused
+  HDF5 split + `handoff_gate`), `stage_datamodule()` split out of `stage()`
+  (the warm-up builds no model), argparse CLIs, census files renamed to
+  `<shard>.bond-stretch.json` (shim gone), `profile_joint.py` import fixed,
+  the 16 pre-joint scripts and their 11 sbatch files moved to
+  `train/attic/` (none of them imported). Spec (both copies): §2.1
+  total_charge integer-valued, §2.2 prediction keys, A14/A22 note A24,
+  R2 notes A26, §7.2 test name, scheduler sentence out of the appendix.
+  **Not done, on purpose**: tabulated-path classes keep their names in their
+  modules (unit 03); `PeriodicHead.periodicity` stays a persistent buffer
+  (the S2 checkpoint carries it); `publish_terms` still re-evaluates a
+  combined loss's terms for reporting (no-op on the joint step);
+  `param_report` composes the encoder twice; `fit` finds the checkpoint dir
+  by hook walk; `ForceFieldDeclaration` belongs upstream as
+  `ForceField.to_dict`; the other lab tools' lint. **Validation of the
+  refactored path**: cold CPU dry run of S3 on the new drivers 3788296
+  (small, cap 16384, 10 steps): **bit-identical to the pre-refactor dry run
+  3786166** — baseline eval 47.5274, step-10 eval 47.3202, every per-objective
+  value equal, same report, same documented stop at the improper-stream
+  handoff; 11 min, 3 workers/source on the 16-CPU node. **A26 gate 3776940
+  released on the cleaned tree** (restores the v4 snapshot).
+  **A26 gate 3776940 passes (n419, 43 min, 20:32)**: 0.66 s/step wall incl.
+  evals (3768159: 2.24), delivered 1.67 steps/s vs accelerator 3.2 — data
+  wait 428 s of 993 s, so the loader still takes ~45 % of the step at 6
+  workers/source (next lever: `_MAX_WORKERS` 24 → 30 fits the memory model);
+  55.7 GiB; all four sources warm (74 GB restored in 32 s). Judgement:
+  hessian_k 0.4277 flat, bond/angle K unchanged against S2, improper |k|
+  2.36 → 2.52, hessian_geom 9.94 → 8.96, hessian_eq 0.180 → 0.166, relax
+  2.88 → 2.76 (slow; the A25 descent to 2.25 was K softening), torsion 3.35,
+  Σn²|k| p50 2.89 (p90 8.0; watch the L1 term 0.12–0.31), N3 θ0 112.5 (up
+  from 111.3), LJ ε log ratio median −0.18. **S3 long run 3776941 released**
+  (no step cap; patience 10 evals / 4 h clock). Judge it on: relax still
+  falling, hessian_k flat, Σn²|k| not growing past ~4, N3 θ0 not falling,
+  ε median ≤ 0.3; then the S3 long's best.pt is the first production
+  candidate (GAFF2 baseline still owed).
+- [x] Item 5 calibration (large tier, nested batches, 131072): measured by
+  3742962 above — 28.75 GiB, 2.17 steps/s, three sources resident. Small:
+  7.80 GiB, 2.71 steps/s (3742959). Medium: not run (not needed yet).
+- [ ] Item 5 calibration on GH200: nested batches (three sources resident at
+  once), capacity / HBM / step rate / scratch for the prepared caches — not run.
+- [ ] S1 small bounded run (1500 steps) → handoff gate (`param_report.py`:
+  k within [0.3×, 3×] of k_ref, θ0 within 10° of measured per centre incl. C2,
+  r0 ∈ [0.8, 2.6], feature RMS, σ/ε log-ratio ≤ 0.3) → S1 large → S2 → S3.
+- [ ] Open: the lab's other probes (`calibrate.py`, `overfit_gate.py`,
+  `prod_day.py`, `smoke.py`, `stage*_smoke.py`, `theta0_probe.py`,
+  `hessian_breakdown.py`) still name the deleted API; `molhub.dataset.molrec`
+  does not import under molpy 0.17 (`mrec.read_trajectory` gone) — the HDF5
+  path the driver uses is unaffected.
+
 ## 0. Submission identity
 
 - [x] The run is still classified as calibration/validation; no production
@@ -216,6 +1095,13 @@ coordinates.
   term sane (bonds 451 kcal/mol absolute but only 27.9 of within-profile spread,
   LJ ~1e-6). It improves to step ~400 and then walks away. So this is an optimizer
   leaving a good solution, not a bad objective or bad data.
+  The step that leaves is Adam on each head's final `Linear.weight`: the steady
+  update is `lr` per coordinate, the weight is dotted with the hidden vector, and
+  the physical parameter (`r0`, a torsion amplitude, `sigma`) therefore moves by
+  `lr * ||h||_1` per step. Global grad clipping scales `m` and `v` together, so
+  it does not change that step. `hessian-relax` now sets `scale_head_output`:
+  those weights take `lr / in_features`; biases and the encoder keep `lr`. The
+  gate has not been re-run on the grouped optimizer.
 - [x] **Protection, since the good state exists and would not be saved.** The
   instability is intra-epoch — best at step ~400 against a ~1300-step production
   epoch — so an epoch-boundary eval takes its first reading after the blow-up and

@@ -1,16 +1,27 @@
-"""Configuration-driven backbone shared by the MACE foundation models.
+"""Feature body shared by the MACE products.
 
-:class:`MACEEncoder` registers the module graph of one MACE variant — which
-one is decided entirely by the five ``Literal`` switches on
-:class:`~molzoo.mace.spec.MACESpec`. Submodule names are byte-identical to the
-flat ``MACEMatpes`` / ``MACEOMol`` models, so an official checkpoint keeps
-loading without a key rewrite and the energy/force variant classes can simply
-inherit this backbone (upstream's ``ScaleShiftMACE(MACE)`` shape).
+:class:`MACEEncoder` registers embeddings, the interaction stack and the
+product basis. It does not register an energy
+readout, a reference energy, a scale-shift, a pair repulsion or an embedding
+readout — those are heads, and the product that subclasses this body
+registers them on itself. Submodule names stay unprefixed, so an official
+checkpoint still loads onto the product (upstream's ``ScaleShiftMACE(MACE)``
+shape, without a nested ``body.`` prefix).
 
-The class exposes primitives, not a pipeline: ``validate_elements`` /
-``node_attrs`` / ``initial_node_features`` / ``angular_features`` /
-``radial_features`` / ``conditioning`` / ``layer_features``. Composing them
-into an energy — and differentiating it — is the caller's job.
+The irreps schedule is :meth:`~molzoo.mace.spec.MACESpec.body_schedule`. The
+class exposes primitives, not a pipeline: ``element_index`` / ``node_attrs`` /
+``initial_node_features`` / ``angular_features`` / ``radial_features`` /
+``conditioning`` / ``layer_features``. The element index is built once per
+call and handed down the stack; nothing below recovers it again. Composing them
+into an energy — and differentiating it — is the product's job
+(:class:`molzoo.mace.potential.MacePotential`); :meth:`MACEEncoder.forward`
+composes them once for the batch schema and writes ``atoms.node_features``,
+the contract every molzoo encoder shares.
+
+Element-table validation is the :class:`~molzoo.encoder.ElementTable` gate:
+the first eager call of :meth:`forward` (or of a product's ``energy``) spends
+it through ``_validate_once``; a traced call never validates, which is why one
+eager forward precedes any compile.
 
 Hot-path discipline: every branch is frozen into a plain attribute (or the
 presence of an optional submodule) by ``__init__``. The configuration object
@@ -30,57 +41,52 @@ Reference:
 from __future__ import annotations
 
 import cuequivariance as cue
-import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
+from tensordict import TensorDict
 
 from molix import config
-from molpot.heads.energy import AtomicReferenceEnergy
-from molpot.heads.rescale import GlobalRescale
-from molpot.potentials.repulsion import ZBLRepulsion
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
-from molrep.embedding.node import JointFeatureEmbedding, JointFeatureSpec
+from molrep.embedding.geometry import edge_lengths, edge_vectors
 from molrep.embedding.radial import AgnesiTransform, BesselRBF
-from molrep.interaction.mace.density import DensityInteraction, DensityResidualInteraction
-from molrep.interaction.product_basis import EquivariantProductBasis
-from molrep.interaction.residual import ResidualInteraction
-from molrep.readout.mace import LinearReadout, NonLinearBiasReadout, NonLinearReadout
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec, MACESpec
+from molrep.interaction.product import irreps_from_l_max, sh_irreps_from_l_max
+from molzoo.encoder import ElementTable
+from molzoo.mace.coupling import MaceO3
+from molzoo.mace.heads import JointFeatureEmbedding, JointFeatureSpec
+from molzoo.mace.layers import (
+    AgnosticInteraction,
+    AgnosticResidualInteraction,
+    DensityInteraction,
+    DensityResidualInteraction,
+    ElementIndex,
+    EquivariantProductBasis,
+    OneHotLinear,
+    ResidualInteraction,
+)
+from molzoo.mace.spec import MACESpec
 
 
-def _irreps(l_max: int, mul: int) -> str:
-    """``mul``-fold irreps up to ``l_max`` with natural parity ``(-1)^l``.
-
-    Args:
-        l_max: Highest angular-momentum order (inclusive).
-        mul: Channel multiplicity of every order.
-
-    Returns:
-        A cuEquivariance irreps string, e.g. ``"128x0e+128x1o+128x2e"``.
-    """
-    return "+".join(f"{mul}x{l}{'e' if l % 2 == 0 else 'o'}" for l in range(l_max + 1))
-
-
-class MACEEncoder(nn.Module):
-    """MACE foundation-model backbone, built from a validated configuration.
+class MACEEncoder(ElementTable, nn.Module):
+    """Feature body: embeddings, interactions and the product basis.
 
     Args:
-        spec: A validated :class:`~molzoo.mace.spec.MACESpec` — in practice a
-            :class:`~molzoo.mace.spec.MACEMatpesSpec`,
-            :class:`~molzoo.mace.spec.MACEOMolSpec`, or
-            :class:`~molzoo.mace.spec.MACEPolarSpec`, which carry the
-            variant-only fields the corresponding stack needs.
-
-    Raises:
-        TypeError: If the ``interaction`` switch asks for a stack whose
-            variant-only fields the given spec does not carry.
+        spec: A validated :class:`~molzoo.mace.spec.MACESpec`. The interaction
+            kind and :meth:`~molzoo.mace.spec.MACESpec.body_schedule` select
+            the stack. Energy-head fields on the same object are ignored.
     """
 
-    def __init__(self, spec: MACESpec) -> None:
+    in_keys = [("atoms", "Z"), ("atoms", "pos"), ("pairs", "pair_index")]
+    out_keys = [("atoms", "node_features")]
+
+    def __init__(self, spec: MACESpec, *, dtype: torch.dtype | None = None) -> None:
         super().__init__()
-        ftype = config.ftype
-        #: Provenance only (05-checkpoint reads it); never touched on a hot path.
+        ftype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
+        #: The build dtype of every float parameter and buffer.
+        self.dtype = ftype
+        #: Provenance only. Never read on a hot path.
         self._spec = spec
 
         n_el = len(spec.atomic_numbers)
@@ -89,61 +95,46 @@ class MACEEncoder(nn.Module):
         num_interactions = spec.num_interactions
 
         # ---- frozen switches (plain attributes: no pydantic on the hot path) ----
+        schedule = spec.body_schedule()
         is_residual = spec.interaction == "residual"
+        residual_first = schedule.residual_first
         self.num_interactions = num_interactions
-        # MACE-MP/MatPES multiplies the polynomial envelope into the radial
-        # basis; OMOL keeps it separate and hands it to the interaction, which
-        # applies it inside the message. Same envelope, different fold point.
+        self.num_features = num_features
+        # A density stack multiplies the polynomial envelope into the radial
+        # basis. A residual stack keeps it separate and hands it to the
+        # interaction, which applies it inside the message.
         self.fold_cutoff_into_radial = not is_residual
         self.pass_cutoff_to_interaction = is_residual
 
         node_attrs_irreps = f"{n_el}x0e"
         feat0 = f"{num_features}x0e"
-        sh = _irreps(l_max, 1)
+        self.scalar_irreps = feat0
+        sh = sh_irreps_from_l_max(l_max)
         # Transient message irreps: node scalars ⊗ Y_l, e.g. "128x0e+…+128x3o".
-        target = _irreps(l_max, num_features)
-
-        # ---- per-layer irreps schedule (the one place the variants differ) ----
-        if not is_residual:
-            if not isinstance(spec, MACEMatpesSpec):
-                raise TypeError(
-                    'interaction="density" needs a MACEMatpesSpec '
-                    "(max_hidden_l / radial_mlp are not on the base spec)"
-                )
-            hidden = _irreps(spec.max_hidden_l, num_features)
-            edge_irr = [feat0] + [hidden] * (num_interactions - 1)
-            radial_mlp = list(spec.radial_mlp)
+        target = irreps_from_l_max(l_max, num_features)
+        hidden = irreps_from_l_max(schedule.hidden_l, num_features)
+        if is_residual:
+            edge_hidden = irreps_from_l_max(schedule.hidden_l, schedule.edge_channels)
+            edge_irr = [feat0] + [edge_hidden] * (num_interactions - 1)
         else:
-            if not isinstance(spec, MACEOMolSpec | MACEPolarSpec):
-                raise TypeError(
-                    'interaction="residual" needs a MACEOMolSpec or MACEPolarSpec '
-                    "(edge_channels is not on the base spec)"
-                )
-            # Polar keeps ``max_hidden_l`` (dump ``512x0e+512x1o`` at l_max=3).
-            # OMOL drops the top order: hidden = l_max - 1.
-            hidden_l = spec.max_hidden_l if isinstance(spec, MACEPolarSpec) else l_max - 1
-            hidden = _irreps(hidden_l, num_features)
-            edge_irr = [feat0] + [_irreps(hidden_l, spec.edge_channels)] * (num_interactions - 1)
-            if isinstance(spec, MACEPolarSpec):
-                radial_mlp = list(spec.radial_mlp)
-            else:
-                radial_mlp = [spec.edge_channels] * 3
+            edge_irr = [feat0] + [hidden] * (num_interactions - 1)
         node_in = [feat0] + [hidden] * (num_interactions - 1)
-        keep_last = isinstance(spec, MACEPolarSpec) and spec.keep_last_layer_irreps
+        # Upstream MACE narrows only the *last of several* layers to scalars:
+        # a single-interaction model keeps its hidden irreps.
         hidden_sched = (
             [hidden] * num_interactions
-            if keep_last
+            if schedule.keep_last_layer_irreps or num_interactions == 1
             else [hidden] * (num_interactions - 1) + [feat0]
         )
+        self.layer_irreps = tuple(hidden_sched)
+        radial_mlp = list(schedule.radial_mlp)
+        product_elements = 1 if schedule.shared_product else n_el
 
         # ---- embeddings ----
-        self.node_embedding = cuet.Linear(
-            cue.Irreps("O3", node_attrs_irreps),
-            cue.Irreps("O3", feat0),
-            layout=cue.ir_mul,
-            dtype=ftype,
+        self.node_embedding = OneHotLinear(
+            cue.Irreps("O3", node_attrs_irreps), cue.Irreps("O3", feat0), dtype=ftype
         )
-        self.spherical_harmonics = SphericalHarmonics(l_max=l_max)
+        self.spherical_harmonics = SphericalHarmonics(l_max=l_max, dtype=ftype)
         # normalize=False + eps=0 + trainable reproduces MACE's BesselBasis exactly.
         self.bessel = BesselRBF(
             r_cut=spec.r_max,
@@ -151,24 +142,17 @@ class MACEEncoder(nn.Module):
             normalize=False,
             eps=0.0,
             trainable=True,
+            dtype=ftype,
         )
         self.distance_transform: AgnesiTransform | None = (
-            AgnesiTransform() if spec.distance_transform == "agnesi" else None
+            AgnesiTransform(dtype=ftype) if spec.distance_transform == "agnesi" else None
         )
-        self.cutoff_fn = PolynomialCutoff(r_cut=spec.r_max, exponent=spec.num_polynomial_cutoff)
-        self.pair_repulsion: ZBLRepulsion | None = (
-            ZBLRepulsion(exponent=spec.num_polynomial_cutoff)
-            if spec.pair_repulsion == "zbl"
-            else None
+        self.cutoff_fn = PolynomialCutoff(
+            r_cut=spec.r_max, exponent=spec.num_polynomial_cutoff, dtype=ftype
         )
         self.joint_embedding: JointFeatureEmbedding | None = None
-        self.embedding_readout: cuet.Linear | None = None
         if spec.conditioning == "charge_spin":
-            if not isinstance(spec, MACEOMolSpec):
-                raise TypeError(
-                    'conditioning="charge_spin" needs a MACEOMolSpec '
-                    "(charge/spin class counts are not on the base spec)"
-                )
+            # The spec validator guarantees the four sizes on a conditioned spec.
             self.joint_embedding = JointFeatureEmbedding(
                 feature_specs=[
                     JointFeatureSpec(
@@ -177,7 +161,7 @@ class MACEEncoder(nn.Module):
                         emb_dim=num_features,
                         num_classes=spec.spin_classes,
                         per="graph",
-                        offset=spec.spin_offset,
+                        offset=spec.spin_offset or 0,
                     ),
                     JointFeatureSpec(
                         name="total_charge",
@@ -185,31 +169,17 @@ class MACEEncoder(nn.Module):
                         emb_dim=num_features,
                         num_classes=spec.charge_classes,
                         per="graph",
-                        offset=spec.charge_offset,
+                        offset=spec.charge_offset or 0,
                     ),
                 ],
                 out_dim=num_features,
-            )
-            self.embedding_readout = cuet.Linear(
-                cue.Irreps("O3", feat0),
-                cue.Irreps("O3", "1x0e"),
-                layout=cue.ir_mul,
                 dtype=ftype,
             )
-        self.atomic_energies = AtomicReferenceEnergy(
-            atomic_energies=spec.atomic_energies,
-            atomic_numbers=spec.atomic_numbers,
-        )
         self.register_buffer(
             "z_table", torch.tensor(spec.atomic_numbers, dtype=torch.long), persistent=True
         )
-        self.z_table: torch.Tensor
 
         # ---- interaction / product stack ----
-        # The density family carries per-element symmetric-contraction weights;
-        # the OMOL residual family shares one set across elements
-        # (``num_elements=1``).
-        product_elements = 1 if is_residual else n_el
         self.interactions = nn.ModuleList()
         self.products = nn.ModuleList()
         for i in range(num_interactions):
@@ -224,7 +194,26 @@ class MACEEncoder(nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=radial_mlp,
-                    use_fallback=spec.use_fallback,
+                    dtype=ftype,
+                )
+            elif spec.interaction == "agnostic":
+                # MACE-OFF / MACE-MP-0: normalised by the training set's
+                # average neighbour count instead of a learned density.
+                common = dict(
+                    node_attrs_irreps=node_attrs_irreps,
+                    node_feats_irreps=node_in[i],
+                    edge_attrs_irreps=sh,
+                    edge_feats_irreps=f"{spec.num_bessel}x0e",
+                    edge_irreps=edge_irr[i],
+                    target_irreps=target,
+                    radial_mlp=radial_mlp,
+                    avg_num_neighbors=spec.avg_num_neighbors,
+                    dtype=ftype,
+                )
+                interaction = (
+                    AgnosticInteraction(**common)
+                    if i == 0 and not residual_first
+                    else AgnosticResidualInteraction(hidden_irreps=hidden_sched[i], **common)
                 )
             elif i == 0:
                 # The first layer has no residual to carry, hence no skip input.
@@ -236,7 +225,7 @@ class MACEEncoder(nn.Module):
                     edge_irreps=edge_irr[i],
                     target_irreps=target,
                     radial_mlp=radial_mlp,
-                    use_fallback=spec.use_fallback,
+                    dtype=ftype,
                 )
             else:
                 interaction = DensityResidualInteraction(
@@ -248,86 +237,45 @@ class MACEEncoder(nn.Module):
                     target_irreps=target,
                     hidden_irreps=hidden_sched[i],
                     radial_mlp=radial_mlp,
-                    use_fallback=spec.use_fallback,
+                    dtype=ftype,
                 )
             self.interactions.append(interaction)
             self.products.append(
                 EquivariantProductBasis(
+                    # Checkpoint weights are coefficients in MACE's coupling basis.
+                    group=MaceO3,
                     node_feats_irreps=target,
                     target_irreps=hidden_sched[i],
                     correlation=spec.correlation,
                     num_elements=product_elements,
-                    use_sc=is_residual or i > 0,
-                    # Official Polar weights are the fused uniform_1d layout.
-                    # Naive SC is a different contraction and blows the energy
-                    # (~100x on PEO). Virial memory is the compiled AOT
-                    # backward, not this switch.
-                    use_fallback=spec.use_fallback,
+                    use_sc=is_residual or residual_first or i > 0,
+                    dtype=ftype,
                 )
             )
 
-        # ---- readout ----
-        self.readouts: nn.ModuleList | None = None
-        self.readout: NonLinearBiasReadout | None = None
-        if spec.readout == "per_layer":
-            last_cls = (
-                NonLinearBiasReadout
-                if isinstance(spec, MACEPolarSpec) and spec.last_readout_bias
-                else NonLinearReadout
-            )
-            self.readouts = nn.ModuleList(
-                [
-                    last_cls(irreps_in=hidden_sched[i], mlp_dim=spec.mlp_dim)
-                    if i == num_interactions - 1
-                    else LinearReadout(irreps_in=hidden_sched[i])
-                    for i in range(num_interactions)
-                ]
-            )
-        else:
-            self.readout = NonLinearBiasReadout(irreps_in=feat0, mlp_dim=spec.mlp_dim)
+    def element_index(self, Z: torch.Tensor) -> ElementIndex:
+        """The atoms' rows in the element table, in every form the stack reads.
 
-        self.scale_shift = GlobalRescale(scale=spec.scale, shift=spec.shift)
-
-    def validate_elements(self, Z: torch.Tensor) -> None:
-        """Raise if any atomic number in ``Z`` is outside the element table.
-
-        An element outside the table would be snapped onto a neighbouring row
-        by ``searchsorted`` and silently produce a wrong energy. The check
-        costs a host sync, so it is **not** meant for the per-step path: run it
-        once per (model, system) pair — ``Z`` is constant over a trajectory,
-        and a wrongly wired model/dataset pair fails on the first batch.
-
-        **Eager only.** The host sync it costs cannot happen inside a traced
-        region, so the flat ``energy_core`` seam does not call this at all and
-        a compiled or exported model never validates. The contract has exactly
-        two bearers, and one of them must run before any traced call:
-
-        1. :meth:`molzoo.mace.potential.MacePotential.energy`, on its first
-           **eager** call — the batch path gets this for free.
-        2. Whoever drives the flat seam directly (``torch.compile`` /
-           ``torch.export`` / ``molix.engine.export_for_lammps``), before
-           tracing. On the MD path that is the one eager forward that
-           precedes compiling the potential.
+        Built once per call; ``layer_features`` and the per-element maps below
+        it take the result instead of recovering the element from a one-hot.
 
         Args:
-            Z: Atomic numbers ``(N,)``.
+            Z: Atomic numbers ``(N,)``; must be inside the table (see
+                :meth:`~molzoo.encoder.ElementTable.validate_elements`).
 
-        Raises:
-            ValueError: Listing the atomic numbers outside the table.
+        Returns:
+            The :class:`~molzoo.mace.layers.ElementIndex` over the ``C``
+            table rows.
         """
-        unknown = torch.unique(Z[~torch.isin(Z, self.z_table)])
-        if unknown.numel():
-            raise ValueError(
-                f"atomic numbers {unknown.tolist()} are outside this model's "
-                f"{self.z_table.numel()}-element table"
-            )
+        index = torch.searchsorted(self.z_table, Z.reshape(-1))
+        return ElementIndex(index=index, index32=index.to(torch.int32))
 
     def node_attrs(self, Z: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         """One-hot node attributes over the element table.
 
         Args:
             Z: Atomic numbers ``(N,)``; must be inside the table (see
-                :meth:`validate_elements`).
+                :meth:`~molzoo.encoder.ElementTable.validate_elements`).
             dtype: Floating dtype of the returned one-hot.
 
         Returns:
@@ -336,23 +284,23 @@ class MACEEncoder(nn.Module):
         z_index = torch.searchsorted(self.z_table, Z.reshape(-1)).to(dtype=torch.long)
         return torch.nn.functional.one_hot(z_index, self.z_table.numel()).to(dtype)
 
-    def initial_node_features(self, node_attrs: torch.Tensor) -> torch.Tensor:
-        """Project the one-hot element attributes into the scalar node state.
+    def initial_node_features(self, elements: ElementIndex) -> torch.Tensor:
+        """The element embedding: the scalar node state before any interaction.
 
         Args:
-            node_attrs: One-hot element attributes ``(N, n_elements)``.
+            elements: The atoms' elements (:meth:`element_index`).
 
         Returns:
             Initial node features ``(N, num_features)``.
         """
-        return self.node_embedding(node_attrs)
+        return self.node_embedding(elements.index)
 
     def angular_features(self, vectors: torch.Tensor) -> torch.Tensor:
         """Real spherical harmonics ``Y_l(r̂)`` of the edge displacements.
 
         Args:
             vectors: Edge displacements ``(E, 3)`` in Å, e.g. from
-                :func:`molzoo.mace.geometry.edge_vectors`.
+                :func:`molrep.embedding.geometry.edge_vectors`.
 
         Returns:
             Edge attributes ``(E, (l_max + 1)²)``.
@@ -370,7 +318,7 @@ class MACEEncoder(nn.Module):
 
         Args:
             lengths: Edge lengths ``(E,)`` in Å, e.g. from
-                :func:`molzoo.mace.geometry.edge_lengths`.
+                :func:`molrep.embedding.geometry.edge_lengths`.
             Z: Atomic numbers ``(N,)`` — needed by the Agnesi transform, which
                 is element-pair dependent.
             edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target.
@@ -389,37 +337,61 @@ class MACEEncoder(nn.Module):
 
     def conditioning(
         self,
+        node_feats: torch.Tensor,
+        total_charge: torch.Tensor | None,
+        total_spin: torch.Tensor | None,
         batch: torch.Tensor,
-        *,
-        total_spin: torch.Tensor,
-        total_charge: torch.Tensor,
+        num_graphs: int,
     ) -> torch.Tensor:
-        """Per-atom charge / spin embedding, broadcast from per-graph scalars.
+        """Condition the initial node state on the per-graph total charge and spin.
+
+        One semantics for the encoder and every product: a conditioned spec
+        (``conditioning="charge_spin"``) adds the joint embedding, defaulting a
+        missing column to the neutral closed-shell singlet — charge ``0``, spin
+        ``1`` (the multiplicity ``2S+1``, not a count of unpaired electrons;
+        spin ``0`` would index an untrained embedding row); an unconditioned
+        spec rejects either column, since silently ignoring it would return a
+        plausible, wrong energy. The ``None`` tests are constant-folded by
+        dynamo, so the branch costs no graph break.
 
         Args:
+            node_feats: Initial node features ``(N, num_features)``.
+            total_charge: Per-graph total charge ``(B,)`` in units of ``e``,
+                or ``None``.
+            total_spin: Per-graph spin multiplicity ``(B,)``, or ``None``.
             batch: Graph index per atom ``(N,)``.
-            total_spin: Per-graph total spin ``(B,)``.
-            total_charge: Per-graph total charge ``(B,)`` in units of ``e``.
+            num_graphs: Number of graphs ``B``.
 
         Returns:
-            Conditioning features ``(N, num_features)`` to add to the initial
-            node features.
+            The node features ``(N, num_features)`` — conditioned, or
+            unchanged on an unconditioned spec.
 
         Raises:
-            ValueError: If this variant has no charge/spin conditioning.
+            ValueError: If this spec has no charge/spin conditioning and a
+                column was supplied.
         """
         if self.joint_embedding is None:
-            raise ValueError(
-                "this MACE variant carries no charge/spin conditioning "
-                '(conditioning="none"); build it from a MACEOMolSpec instead'
-            )
-        return self.joint_embedding(batch, total_spin=total_spin, total_charge=total_charge)
+            if total_charge is not None or total_spin is not None:
+                raise ValueError(
+                    "this MACE variant has no charge/spin conditioning "
+                    '(conditioning="none"): total_charge / total_spin would be '
+                    "ignored and the energy would be quietly wrong — build it "
+                    "from a MACEOMolSpec instead"
+                )
+            return node_feats
+        if total_charge is None:
+            total_charge = torch.zeros(num_graphs, dtype=torch.long, device=node_feats.device)
+        if total_spin is None:
+            total_spin = torch.ones(num_graphs, dtype=torch.long, device=node_feats.device)
+        return node_feats + self.joint_embedding(
+            batch, total_spin=total_spin, total_charge=total_charge
+        )
 
     def layer_features(
         self,
         *,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        elements: ElementIndex,
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
@@ -432,7 +404,7 @@ class MACEEncoder(nn.Module):
 
         Args:
             node_feats: Initial node features ``(N, num_features)``.
-            node_attrs: One-hot element attributes ``(N, n_elements)``.
+            elements: The atoms' elements (:meth:`element_index`).
             edge_attrs: Spherical harmonics ``(E, (l_max + 1)²)``.
             edge_feats: Radial basis features ``(E, num_bessel)``.
             edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target.
@@ -446,8 +418,63 @@ class MACEEncoder(nn.Module):
         per_layer: list[torch.Tensor] = []
         for i in range(self.num_interactions):
             node_feats, sc = self.interactions[i](
-                node_attrs, node_feats, edge_attrs, edge_feats, edge_index, envelope
+                elements, node_feats, edge_attrs, edge_feats, edge_index, envelope
             )
-            node_feats = self.products[i](node_feats, sc, node_attrs)
+            node_feats = self.products[i](node_feats, sc, elements)
             per_layer.append(node_feats)
         return per_layer
+
+    # -------------------------------------------------------------- encoder
+    def forward(self, td: TensorDict) -> TensorDict:
+        """Encode a batch, writing ``atoms.node_features`` in place.
+
+        The layer widths differ — every layer but the last carries the hidden
+        irreps, the last carries scalars — so the ``(N, num_interactions,
+        num_features)`` contract stacks each layer's invariant ``0e`` block,
+        which in cue's ``ir_mul`` layout is the first ``num_features`` columns
+        of that layer's output. The full mixed-l layer outputs stay reachable
+        through :meth:`layer_features`.
+
+        Args:
+            td: Post-collate batch with ``atoms.{Z,pos,batch}``,
+                ``pairs.pair_index`` and the ``graphs`` namespace at
+                ``batch_size=[B]``. ``pairs.pair_diff`` (the imaged
+                displacement) is used when present;
+                ``graphs.{total_charge,total_spin}`` follow
+                :meth:`conditioning` (defaulted on a conditioned spec,
+                rejected on an unconditioned one).
+
+        Returns:
+            The same ``td`` with ``atoms.node_features``
+            ``(N, num_interactions, num_features)`` added.
+        """
+        Z = td["atoms", "Z"]
+        self._validate_once(Z)
+        # Contiguous for AOTInductor stride specialisation (LAMMPS pair_style).
+        edge_index = td["pairs", "pair_index"].contiguous()
+        keys = td.keys(include_nested=True)
+        diff = td["pairs", "pair_diff"] if ("pairs", "pair_diff") in keys else None
+        vectors = edge_vectors(td["atoms", "pos"], edge_index, edge_diff=diff)
+        lengths = edge_lengths(vectors)
+
+        elements = self.element_index(Z)
+        node_feats = self.conditioning(
+            self.initial_node_features(elements),
+            td["graphs", "total_charge"] if ("graphs", "total_charge") in keys else None,
+            td["graphs", "total_spin"] if ("graphs", "total_spin") in keys else None,
+            td["atoms", "batch"],
+            td["graphs"].batch_size[0],
+        )
+        edge_feats, cutoff = self.radial_features(lengths, Z, edge_index)
+        per_layer = self.layer_features(
+            node_feats=node_feats,
+            elements=elements,
+            edge_attrs=self.angular_features(vectors),
+            edge_feats=edge_feats,
+            edge_index=edge_index,
+            cutoff=cutoff,
+        )
+        td["atoms", "node_features"] = torch.stack(
+            [h[:, : self.num_features] for h in per_layer], dim=1
+        )
+        return td

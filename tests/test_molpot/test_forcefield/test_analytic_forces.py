@@ -16,7 +16,10 @@ from tensordict import TensorDict
 
 from molix.schema import ENERGY_KEY, FORCES_KEY
 from molpot.forcefield import ForceField
-from molpot.potentials import AngleHarmonic, BondHarmonic, ImproperPeriodic, ProperTorsionPeriodic
+from molpot.potentials.angles import AngleHarmonic
+from molpot.potentials.bonds import BondHarmonic
+from molpot.potentials.dihedrals import ProperTorsionPeriodic
+from molpot.potentials.impropers import ImproperPeriodic
 from tests.conftest import place_edges
 
 DTYPE = torch.float64

@@ -26,6 +26,7 @@ class ScalarHead(nn.Module):
         d_model: int = 128,
         hidden_dim: int = 64,
         pooling: str = "mean",
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
@@ -37,7 +38,7 @@ class ScalarHead(nn.Module):
             raise ValueError(f"Unknown pooling: {pooling}. Use 'mean', 'sum', or 'max'")
 
         # Simple MLP: d_model -> hidden_dim -> 1
-        ftype = config.ftype
+        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden_dim, dtype=ftype),
             nn.SiLU(),

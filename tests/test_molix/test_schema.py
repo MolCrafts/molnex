@@ -78,13 +78,13 @@ def test_flat_alias_of_the_nested_per_atom_energy_key():
 
 
 def test_edge_distance_clamp_is_the_conservative_value():
-    """One shared small-``r`` regularisation for both flat-export paths.
+    """One shared small-``r`` regularisation for the flat deployment batch.
 
-    ``molix.engine.adapter`` clamped at 1e-6 and ``molix.engine.static`` at
-    1e-8 while claiming equivalence; spec ``lammps-iface-05-pbc`` standardises
-    on the more conservative 1e-6. The behavioural assertions live with each
-    path (``tests/test_molix/test_engine/``); the value is pinned here, where
-    the constant is declared.
+    Two earlier flat-export paths clamped at 1e-6 and 1e-8 while claiming
+    equivalence; spec ``lammps-iface-05-pbc`` standardised on the more
+    conservative 1e-6. The behavioural assertion lives with the adapter
+    (``tests/test_molix/test_deploy/``); the value is pinned here, where the
+    constant is declared.
     """
     from molix.schema import PAIR_DIST_CLAMP_MIN
 
@@ -101,12 +101,11 @@ def test_has_energy_and_has_forces_walk_the_nesting():
 def test_dead_edge_convention_is_one_function_of_the_cutoff():
     """The dead (padding) edge is ``[DEAD_PAIR_CUTOFF_FACTOR · r_cut, 0, 0]``, declared once.
 
-    ``molix.md.NeighborList`` (MD capacity padding), ``molix.data.MoleculePadder``
-    (training padding) and ``molix.engine.static.StaticForward`` (export
-    padding) all displace a dead edge by the same vector, so every cutoff
-    envelope evaluates to exactly zero on it and ``pair_dist`` is exactly the
-    length; the three used to spell it separately (the static path even filled
-    all three components). The value is pinned here, where it is declared.
+    ``molix.md.NeighborList`` (MD capacity padding) and
+    ``molix.data.MoleculePadder`` (training padding) displace a dead edge by
+    the same vector, so every cutoff envelope evaluates to exactly zero on it
+    and ``pair_dist`` is exactly the length. The value is pinned here, where
+    it is declared.
     """
     from molix.schema import dead_pair_length, dead_pair_shift
     from molix.units import DEAD_PAIR_CUTOFF_FACTOR

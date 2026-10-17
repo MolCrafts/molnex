@@ -22,8 +22,8 @@ import torch
 from _profile_workload import profile_training
 
 from molix.profiler import MockBatch
-from molrep.embedding.node import DiscreteEmbeddingSpec
-from molzoo.mace import MACE
+from molzoo.mace.encoder import MACEEncoder
+from molzoo.mace.spec import MACEMatpesSpec
 
 SIZES = {
     "small": {"n_atoms": 64, "n_pairs": 256, "n_graphs": 4},
@@ -32,17 +32,20 @@ SIZES = {
 }
 
 
-def build_model() -> MACE:
-    """A small MACE encoder (5 elements, 16 features, 2 interactions)."""
-    return MACE(
-        node_attr_specs=[DiscreteEmbeddingSpec(input_key="Z", num_classes=8, emb_dim=16)],
-        num_elements=8,
-        num_features=16,
-        r_max=5.0,
-        num_bessel=8,
-        l_max=1,
-        num_interactions=2,
-        correlation=2,
+def build_model() -> MACEEncoder:
+    """A small MACE encoder (7 elements, 16 features, 2 interactions)."""
+    return MACEEncoder(
+        MACEMatpesSpec(
+            atomic_numbers=list(range(1, 8)),
+            atomic_energies=[0.0] * 7,
+            r_max=5.0,
+            num_bessel=8,
+            l_max=1,
+            num_features=16,
+            max_hidden_l=1,
+            num_interactions=2,
+            correlation=2,
+        )
     )
 
 

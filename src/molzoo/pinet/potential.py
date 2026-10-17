@@ -1,114 +1,118 @@
-"""PiNet energy + force potential (encoder + monomorphic init-fixed op).
+"""PiNet2 energy model: the feature body plus PiNN's per-block energy readout.
 
-All branching is in ``__init__``: what :meth:`PiNetPotential.forward` derives
-beside the energy is the ``wrt`` given at construction, and ``forward`` is the
-one :class:`molix.autograd.Derivative` built over :meth:`PiNetPotential.energy`.
+:class:`PiNetPotential` is a :class:`~molix.autograd.Potential` over the
+:class:`~molzoo.pinet.encoder.PiNetEncoder` body and registers its heads at
+the module root (``out_layers``, ``atomic_energies``), so its ``state_dict``
+is flat. It mirrors PiNN's ``pot_model`` over ``PiNet2``:
+
+.. math::
+
+    E_g = s \\sum_{i \\in g} m_i\\, o_{\\mathrm{depth}, i}
+        + \\sum_{i \\in g} m_i\\, e_0(Z_i),
+    \\qquad o_t = W_t\\, \\mathrm{FF}_t(p^1_t) + o_{t-1}
+
+with ``s = 1 / e_scale`` and ``e_0`` PiNN's ``e_dress`` (spec
+``src/molzoo/specs/pinet2.md`` §5).
+
+Two public methods, the potential contract: :meth:`PiNetPotential.energy`
+reads the frame's columns and writes ``atoms.energy`` and ``graphs.energy``;
+``forward`` is the one :class:`molix.autograd.Derivative` over ``energy``,
+fixed by ``wrt=`` at construction.
+
+Reference:
+    Li et al. "PiNN: Equivariant Neural Network Suite for Modeling
+    Electrochemical Systems" J. Chem. Theory Comput. 21, 1382 (2025).
+    https://doi.org/10.1021/acs.jctc.4c01570
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
+import torch
 import torch.nn as nn
-from tensordict import TensorDict
+from tensordict import TensorDictBase
 
-from molix.autograd import Derivative
-from molpot.derivation import EnergyAggregation
-from molpot.derivation.protocol import write_energy
-from molrep.interaction.pinet import OutLayer
+from molix.autograd import Derivative, Potential
+from molix.F.scatter import scatter_sum_compile_safe
+from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
+from molpot.heads.energy import AtomicReferenceEnergy
+from molzoo.pinet.encoder import PiNetEncoder
+from molzoo.pinet.layers import OutLayer
+from molzoo.pinet.spec import PiNetSpec
 
-from .encoder import PiNet
 
+class PiNetPotential(Potential, PiNetEncoder):
+    """PiNet2 energy (+ derivatives fixed by ``wrt``), written into the frame.
 
-class PiNetPotential(nn.Module):
-    """PiNet energy (+ optional derivatives) with in-place batch writes.
+    ::
 
-    Configuration is fixed at construction; ``forward`` has no flags::
-
-        # energy only
-        model = PiNetPotential(...)
-        batch = model(batch)  # writes graphs.energy, atoms.energy
-
-        # energy + forces through the derivative op
-        model = PiNetPotential(..., wrt=("atoms.pos",))
-        batch = model(batch)  # + atoms.forces
-
-    ``create_graph`` follows the ambient grad mode, so a training step keeps
-    energy and forces attached to the parameters and an evaluation under
-    ``torch.no_grad()`` gets detached values. Compile the model as a whole with
-    ``molix.compile.Compiler(...)(model)``.
+        model = PiNetPotential(PiNetSpec(atomic_numbers=[1, 6, 8]), wrt=("atoms.pos",))
+        frame = model(frame)  # graphs.energy, atoms.energy, atoms.forces
 
     Args:
-        hidden_dim: Width of the per-layer output MLPs.
+        spec: The configuration; the head fields are ``out_nodes`` /
+            ``out_activation`` (the ``OutLayer`` readout), ``atomic_energies``
+            (PiNN ``e_dress``, table order, eV; ``None`` registers no reference
+            head) and ``scale`` (PiNN ``1 / e_scale``).
         wrt: TensorFrame keys :meth:`forward` differentiates the energy
-            against (:class:`molix.autograd.Derivative`); ``()`` is energy only.
-        encoder: A built :class:`~molzoo.pinet.encoder.PiNet`; exclusive
-            with ``pinet_kwargs``.
-        **pinet_kwargs: Forwarded to :class:`~molzoo.pinet.encoder.PiNet`.
+            against (``"atoms.pos"`` → forces, ``"graphs.strain"`` → virial);
+            ``()`` is energy only.
+        dtype: Floating dtype every parameter and buffer is built at; ``None``
+            is the (transitional) process-wide default.
     """
 
     def __init__(
         self,
+        spec: PiNetSpec = PiNetSpec(),
         *,
-        hidden_dim: int = 64,
         wrt: Sequence[str | Sequence[str]] = (),
-        encoder: PiNet | None = None,
-        **pinet_kwargs: object,
+        dtype: torch.dtype | None = None,
     ) -> None:
-        super().__init__()
-        if encoder is not None and pinet_kwargs:
-            raise ValueError("Pass either encoder=... or PiNet kwargs, not both.")
-        if encoder is not None:
-            self.encoder = encoder
-        else:
-            pinet_kwargs.setdefault("emit_property_features", False)
-            self.encoder = PiNet(**pinet_kwargs)
-
-        depth: int = int(getattr(self.encoder, "depth", 1))
-        feature_dim: int = int(getattr(self.encoder, "feature_dim", hidden_dim))
+        super().__init__(spec, dtype=dtype)
         self.out_layers = nn.ModuleList(
-            [
-                OutLayer(
-                    [hidden_dim],
-                    in_dim=feature_dim,
-                    out_units=1,
-                    activation="tanh",
-                )
-                for _ in range(depth)
-            ]
+            OutLayer(
+                spec.out_nodes,
+                in_dim=self.feature_dim,
+                activation=spec.out_activation,
+                dtype=self.dtype,
+            )
+            for _ in range(spec.depth)
         )
-        self.energy_aggregation = EnergyAggregation(pooling="sum")
-        #: The one derivative route: the op over :meth:`energy`, fixed at
-        #: construction (a bound method, so no submodule is registered).
+        self.atomic_energies = (
+            AtomicReferenceEnergy(
+                atomic_energies=spec.atomic_energies, atomic_numbers=spec.atomic_numbers
+            )
+            if spec.atomic_energies is not None
+            else None
+        )
+        self.scale = spec.scale
         self._derivative = Derivative(self.energy, wrt=wrt)
 
-    def forward(self, batch: TensorDict) -> TensorDict:
-        """Run the init-fixed op; mutate ``batch`` in place."""
-        return self._derivative(batch)
+    def energy(self, frame: TensorDictBase) -> TensorDictBase:
+        """Write ``atoms.energy`` ``(N,)`` and ``graphs.energy`` ``(B,)`` in eV, in place.
 
-    @property
-    def derivative(self) -> Derivative:
-        """The op :meth:`forward` runs: ``Derivative(self.energy, wrt=...)``, fixed in ``__init__``.
+        Reads ``atoms.pos``, ``atoms.Z``, ``pairs.pair_index`` and, when
+        present, the imaged ``pairs.pair_diff`` and the real-atom
+        ``atoms.mask`` (ghost atoms get 0). What
+        :class:`~molix.autograd.Derivative` differentiates; detaches nothing.
 
-        What a training step marks its leaves through
-        (:meth:`molix.autograd.Derivative.mark_leaves`).
+        Raises:
+            ValueError: On the first eager call, if an atomic number lies
+                outside the element table.
         """
-        return self._derivative
-
-    def energy(self, batch: TensorDict) -> TensorDict:
-        """The energy alone — ``graphs.energy`` ``(B,)`` and ``atoms.energy`` ``(N,)``, in place."""
-        batch = self.encoder(batch)
-
-        block_outputs = batch["atoms", "p1_block_outputs"]  # (N, depth, D)
-        output = block_outputs.new_zeros(block_outputs.shape[0], 1)
-        for i, out_layer in enumerate(self.out_layers):
-            output = out_layer(block_outputs[:, i, :], output)
-        atom_energy = output.squeeze(-1)
-
-        atom_batch = batch["atoms", "batch"]
-        if "mask" in batch["atoms"].keys():
-            atom_energy = atom_energy * batch["atoms", "mask"].to(atom_energy.dtype)
-        num_graphs = batch["graphs"].batch_size[0]
-        energy = self.energy_aggregation(atom_energy, atom_batch, num_graphs=num_graphs)
-        write_energy(batch, energy, atomic_energy=atom_energy)
-        return batch
+        layers, _, _ = self._batch_layers(frame)
+        positions = frame["atoms", "pos"]
+        output = positions.new_zeros(positions.shape[0], 1)
+        for out_layer, layer in zip(self.out_layers, layers):
+            output = out_layer(layer.block.p1, output)
+        per_atom = self.scale * output.squeeze(-1)
+        if self.atomic_energies is not None:
+            per_atom = per_atom + self.atomic_energies(frame["atoms", "Z"])
+        if ("atoms", "mask") in frame.keys(include_nested=True):
+            per_atom = per_atom * frame["atoms", "mask"].to(per_atom.dtype)
+        frame[ATOMIC_ENERGY_KEY] = per_atom
+        frame[ENERGY_KEY] = scatter_sum_compile_safe(
+            per_atom, frame["atoms", "batch"], frame["graphs"].batch_size[0]
+        )
+        return frame

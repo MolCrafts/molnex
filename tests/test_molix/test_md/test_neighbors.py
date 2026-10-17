@@ -660,7 +660,8 @@ class TestNeighborListMDMount:
     """A live list reaches the integrator only through ``MD.set_neighbors``."""
 
     def test_set_neighbors_arms_rebuild(self):
-        from molpy import ForceField
+        # MD needs a field with a nullary to_potentials (MDForceField).
+        from molpot.forcefield import ForceField
 
         nl, _ = _policy_list(skin=0.5)
         md = (
@@ -673,7 +674,8 @@ class TestNeighborListMDMount:
         assert md.integrator is not None
 
     def test_list_not_mounted_without_set_neighbors(self):
-        from molpy import ForceField
+        # MD needs a field with a nullary to_potentials (MDForceField).
+        from molpot.forcefield import ForceField
 
         nl, _ = _policy_list(skin=0.5)
         md = MD().set_forcefield(ForceField()).set_integrator(VelocityVerletIntegrator(0.01))

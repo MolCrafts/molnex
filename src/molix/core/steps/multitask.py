@@ -355,8 +355,18 @@ class MultiTaskEvalStep(DefaultEvalStep):
 
     @property
     def scalar_keys(self) -> tuple[tuple[str, str], ...]:
-        """State paths this step writes — ``("eval", "loss_<name>")`` per task."""
-        return tuple((self.namespace, f"loss_{spec.name}") for spec in self.router.tasks)
+        """``("eval", "loss")`` then ``("eval", "loss_<name>")`` per task.
+
+        ``("eval", "loss")`` is the inherited scalar ``on_eval_batch`` writes;
+        listed here so :meth:`~molix.core.trainer.Trainer._run_eval_phase`
+        averages it over the phase — a declared ``scalar_keys`` replaces the
+        trainer's default list, and without the entry ``eval/loss`` was the
+        last val batch's value, which is what checkpoint selection read.
+        """
+        return (
+            (self.namespace, "loss"),
+            *((self.namespace, f"loss_{spec.name}") for spec in self.router.tasks),
+        )
 
     def compute_loss(
         self,

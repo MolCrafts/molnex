@@ -16,9 +16,8 @@ Composition is likewise the caller's job — :meth:`ForceField.manifest
 <molpot.forcefield.ForceField.manifest>` fills what a force field knows and
 leaves :attr:`~ModelManifest.representation` and
 :attr:`~ModelManifest.provenance` unset; the caller merges in
-:meth:`Parameterizer.representation_record
-<molpot.forcefield.Parameterizer.representation_record>` and its own run
-identity with :func:`dataclasses.replace`. There is no façade that does it for
+the :class:`RepresentationRecord` of the model that predicted the tables and
+its own run identity with :func:`dataclasses.replace`. There is no façade that does it for
 them.
 
 Serialisation is a single recursive codec (:func:`_encode` / :func:`_decode`)
@@ -28,10 +27,9 @@ the exact inverse of :meth:`ModelManifest.to_dict`. The payload is therefore
 deterministic — the same model always serialises to the same bytes, which is
 what lets two runs be compared (and a manifest itself be hashed).
 
-:data:`MANIFEST_SCHEMA` versions this layout and is deliberately independent of
-``molix.engine.export.LAMMPS_META_SCHEMA``: the manifest describes the model,
-that constant describes the LAMMPS export contract, and they move for
-different reasons.
+:data:`MANIFEST_SCHEMA` versions this layout. The deployment metadata written
+by :class:`molix.deploy.DeployMetadata` is a different artifact with its own
+schema version. The two move for different reasons.
 
 Layering: this module sits *below* the ForceField package. It imports
 :mod:`molpot.contract` (including :class:`~molpot.contract.ParamSpec`),
@@ -86,7 +84,7 @@ __all__ = [
 
 #: Version of the :class:`ModelManifest` layout. Bumping it is a breaking
 #: change to every consumer that reads a manifest, not a refactor; it is
-#: versioned independently of ``molix.engine.export.LAMMPS_META_SCHEMA``.
+#: The LAMMPS pair-style JSON is a different artifact and is unversioned.
 #:
 #: ``2`` (2026-09-08) added
 #: :attr:`~molpot.ir.nonbonded.NonbondedMethodRecord.lj_mixing`, the
@@ -110,8 +108,8 @@ class RepresentationRecord:
 
     Attributes:
         family: Kind of representation — ``"graph-parameterizer"`` for a
-            :class:`~molpot.forcefield.Parameterizer` that predicts classical
-            parameter tables from the covalent graph.
+            model that predicts classical parameter tables from the covalent
+            graph (e.g. :class:`molzoo.rondo.Rondo`).
         encoder: Class name of the encoder, e.g. ``"PiNet"``.
         checkpoint_id: Identity of the weights the encoder was loaded from.
             ``None`` when they are not persisted (an untrained or in-memory
@@ -327,17 +325,20 @@ class NumericsRecord:
     energy_dtype: str | None = None
 
     @classmethod
-    def from_runtime(cls) -> NumericsRecord:
+    def from_runtime(cls, dtype: torch.dtype | None = None) -> NumericsRecord:
         """Read the precision this process is actually running at.
 
         The two sources are read here and nowhere else, so a manifest and the
         model it describes cannot disagree about precision:
         ``molix.config["ftype"]`` for the global parameter / batch dtype, and
         :func:`torch.get_float32_matmul_precision` for the fp32 matmul policy.
-        The policy is deliberately *not* read from the config mapping —
-        :meth:`molix.config.MolnexConfig.set_precision` skips that key when it
-        copies a preset and calls :func:`torch.set_float32_matmul_precision`
-        instead, so torch holds the only effective value.
+        The policy is not a molnex setting at all — molnex leaves it at
+        PyTorch's default unless the caller sets it — so torch holds the only
+        effective value.
+
+        Args:
+            dtype: The model's build dtype; ``None`` reads the (transitional)
+                process-wide default.
 
         Returns:
             The record. :attr:`energy_dtype` is ``None``: molnex accumulates
@@ -345,7 +346,7 @@ class NumericsRecord:
             would describe an accumulation nothing performs.
         """
         return cls(
-            dtype=str(config["ftype"]),
+            dtype=str(config["ftype"] if dtype is None else dtype),
             matmul_precision=torch.get_float32_matmul_precision(),
             energy_dtype=None,
         )
@@ -414,9 +415,8 @@ class ModelManifest:
         numerics: Precision the model runs at.
         representation: The representation that produced the parameters.
             ``None`` from :meth:`ForceField.manifest
-            <molpot.forcefield.ForceField.manifest>` — the caller composes it
-            in from :meth:`Parameterizer.representation_record
-            <molpot.forcefield.Parameterizer.representation_record>`.
+            <molpot.forcefield.ForceField.manifest>` — the caller composes in
+            the record of the model that predicted the tables.
         provenance: Reference data, software versions and run identity;
             ``None`` until the caller fills it.
 
@@ -424,8 +424,8 @@ class ModelManifest:
         Each object fills the part of the manifest it alone knows, and the
         caller joins them with :func:`dataclasses.replace` — ``ff`` is the
         :class:`~molpot.forcefield.ForceField` whose parameter tables are
-        filled, ``model`` the :class:`~molpot.forcefield.Parameterizer` that
-        filled them, and ``charge_model`` the
+        filled, ``record`` the
+        :class:`RepresentationRecord` of the model that predicted them, and ``charge_model`` the
         :class:`~molpot.charge.AtomicChargeModel` that solved for the partial
         charges ``atoms.charge`` (in ``e``)::
 
@@ -433,7 +433,7 @@ class ModelManifest:
 
             manifest = dataclasses.replace(
                 ff.manifest(profile="A0"),
-                representation=model.representation_record(),
+                representation=record,
                 electrostatics=charge_model.electrostatics_record(
                     permanent_scaling=ff.nonbonded_scaling
                 ),

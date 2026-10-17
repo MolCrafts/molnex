@@ -23,22 +23,24 @@ import torch
 from _profile_workload import profile_training
 
 from molix.profiler import MockBatch
-from molzoo.pinet import PiNet
+from molzoo.pinet import PiNetEncoder, PiNetSpec
 
 ATOM_TYPES = list(range(1, 8))  # cover MockBatch Z ∈ [1, 7]
 
 
-def build_pinet() -> PiNet:
+def build_pinet() -> PiNetEncoder:
     """A representative PiNet encoder (depth 3, 64-wide MLPs, rank 3)."""
-    return PiNet(
-        atom_types=ATOM_TYPES,
-        r_max=5.0,
-        n_basis=5,
-        pp_nodes=[64, 64],
-        pi_nodes=[64, 64],
-        ii_nodes=[64, 64],
-        depth=3,
-        rank=3,
+    return PiNetEncoder(
+        PiNetSpec(
+            atomic_numbers=ATOM_TYPES,
+            r_max=5.0,
+            n_basis=5,
+            pp_nodes=[64, 64],
+            pi_nodes=[64, 64],
+            ii_nodes=[64, 64],
+            depth=3,
+            rank=3,
+        )
     )
 
 

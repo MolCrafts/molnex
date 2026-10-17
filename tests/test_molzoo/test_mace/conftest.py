@@ -1,14 +1,8 @@
 """Shared fixtures for the ``molzoo.mace`` sub-package tests.
 
-Only MACE-family constants, geometries, models and specs live here. Batch
+Only MACE-family constants, geometries, specs and models live here. Batch
 construction goes through :func:`tests.conftest.make_graph_batch` — this
-package deliberately does not grow a second batch builder (the three private
-builders of the pre-cutover flat test files were folded into it by
-``mace-subpackage-restructure-06-wire``, and none may come back).
-
-The tiny configurations below are the ones the pre-cutover flat variant tests
-used, so ``MACEEncoder`` / ``MacePotential`` can be diffed against the keyword
-variants key-for-key.
+package deliberately does not grow a second batch builder.
 
 Everything a second module in this package needs is defined here exactly once:
 
@@ -16,12 +10,8 @@ Everything a second module in this package needs is defined here exactly once:
   ``periodic_cluster`` / ``omol_cluster`` / ``pair_batch`` fixtures — the
   fixed geometries (no RNG anywhere);
 * :func:`full_edge_index` — the ordered intra-graph pair list;
-* :func:`wake_zero_init_readout` — pins the OMOL readout to a private
-  generator, so state-transfer parity does not ride on the global RNG;
-* ``matpes_variant`` / ``omol_variant`` — the keyword-constructed foundation
-  models, used both as the subject of ``test_variants.py`` and as the
-  raw-tensor (``energy_forces``) oracle of ``test_potential.py`` /
-  ``test_encoder.py``.
+* the ``tiny_*_spec`` fixtures — one tiny spec per shipped family;
+* ``matpes_model`` / ``omol_model`` — the tiny energy + force products.
 """
 
 from __future__ import annotations
@@ -33,9 +23,14 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix import config
 from molzoo.mace.potential import MaceMatpes, MaceOmol
-from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACEPolarSpec
+from molzoo.mace.spec import (
+    MACELesSpec,
+    MACEMatpesSpec,
+    MACEOffSpec,
+    MACEOMolSpec,
+    MACEPolarSpec,
+)
 from tests.conftest import make_graph_batch
 
 #: Element table (z-table) shared by every model built in this package.
@@ -47,9 +42,7 @@ ATOMIC_NUMBERS: list[int] = [1, 6, 8]
 ATOMIC_ENERGIES: list[float] = [-13.6, -1029.0, -2041.0]
 
 #: Tiny MACE-MatPES hyper-parameters (l_max=1, 16 channels): fast on CPU and
-#: structurally identical to the shipped model. Passed verbatim to both
-#: ``MACEMatpesSpec`` and the keyword ``MaceMatpes`` constructor, which is what
-#: makes the ``state_dict`` parity assertion meaningful.
+#: structurally identical to the shipped model.
 TINY_MATPES_KWARGS: dict[str, Any] = {
     "r_max": 5.0,
     "num_bessel": 4,
@@ -61,13 +54,9 @@ TINY_MATPES_KWARGS: dict[str, Any] = {
     "correlation": 2,
     "mlp_dim": 8,
     "radial_mlp": [8],
-    "use_fallback": True,  # CPU tests: fused kernels need a GPU + ops wheel
 }
 
-#: Tiny MACE-OMOL hyper-parameters (l_max=1, 16 channels). ``use_fallback`` is
-#: absent: :class:`~molzoo.mace.potential.MaceOmol` takes no such keyword, so the
-#: spec must default/carry ``use_fallback=False`` for the two stacks to agree
-#: key-wise.
+#: Tiny MACE-OMOL hyper-parameters (l_max=1, 16 channels).
 TINY_OMOL_KWARGS: dict[str, Any] = {
     "r_max": 5.0,
     "num_bessel": 4,
@@ -78,6 +67,18 @@ TINY_OMOL_KWARGS: dict[str, Any] = {
     "correlation": 2,
     "mlp_dim": 8,
     "edge_channels": 8,
+}
+
+#: Tiny MACE-OFF hyper-parameters (l_max=1, 16 channels), shared with MACE-LES.
+TINY_OFF_KWARGS: dict[str, Any] = {
+    "avg_num_neighbors": 5.0,
+    "r_max": 5.0,
+    "num_bessel": 4,
+    "l_max": 1,
+    "num_features": 16,
+    "correlation": 2,
+    "mlp_dim": 8,
+    "radial_mlp": [8],
 }
 
 #: Tiny Polar backbone: ``l_max=3`` so a wrong ``hidden_l = l_max-1`` schedule
@@ -93,42 +94,7 @@ TINY_POLAR_KWARGS: dict[str, Any] = {
     "correlation": 2,
     "mlp_dim": 8,
     "edge_channels": 8,
-    "use_fallback": True,
 }
-
-
-def polar_kwargs(spec: MACEPolarSpec, **overrides: Any) -> dict[str, Any]:
-    """Flat constructor kwargs for :class:`~molzoo.mace.polar.MacePolar`."""
-    payload = {
-        "atomic_numbers": spec.atomic_numbers,
-        "atomic_energies": spec.atomic_energies,
-        "r_max": spec.r_max,
-        "num_bessel": spec.num_bessel,
-        "num_polynomial_cutoff": spec.num_polynomial_cutoff,
-        "l_max": spec.l_max,
-        "num_features": spec.num_features,
-        "max_hidden_l": spec.max_hidden_l,
-        "num_interactions": spec.num_interactions,
-        "correlation": spec.correlation,
-        "mlp_dim": spec.mlp_dim,
-        "edge_channels": spec.edge_channels,
-        "radial_mlp": spec.radial_mlp,
-        "scale": spec.scale,
-        "shift": spec.shift,
-        "num_recursion_steps": spec.num_recursion_steps,
-        "multipole_lmax": spec.multipole_lmax,
-        "multipole_sigma": spec.multipole_sigma,
-        "field_lmax": spec.field_lmax,
-        "field_widths": spec.field_widths,
-        "field_norms": spec.field_norms,
-        "add_local_electron_energy": spec.add_local_electron_energy,
-        "electrostatic_self_interaction": spec.electrostatic_self_interaction,
-        "field_self_interaction": spec.field_self_interaction,
-        "use_fallback": spec.use_fallback,
-    }
-    payload.update(overrides)
-    return payload
-
 
 #: A five-atom cluster at literal coordinates (Å) — no RNG anywhere.
 CLUSTER_POS: list[list[float]] = [
@@ -175,47 +141,14 @@ def full_edge_index(batch: Sequence[int]) -> torch.Tensor:
     return torch.tensor(pairs, dtype=torch.long)
 
 
-def raw_tensors(
-    batch: TensorDict,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """``(pos, Z, edge_index, atom_batch, num_graphs)`` off a post-collate batch.
-
-    The raw-tensor seams (``energy_core`` / ``energy_forces``) take these five
-    in this order; every case that crosses from the batch schema to a flat call
-    goes through here rather than unpacking by hand.
-
-    Args:
-        batch: Post-collate ``TensorDict`` with ``atoms`` / ``edges``.
-
-    Returns:
-        Positions ``(N, 3)`` Å, atomic numbers ``(N,)``, edge index ``(E, 2)``,
-        graph index per atom ``(N,)`` and the graph count ``B``.
-    """
-    return (
-        batch["atoms", "pos"],
-        batch["atoms", "Z"],
-        batch["pairs", "pair_index"],
-        batch["atoms", "batch"],
-        int(batch["atoms", "batch"].max()) + 1,
-    )
-
-
 def wake_zero_init_readout(model: torch.nn.Module) -> None:
     """Pin the OMOL readout to a private generator, off the global RNG.
 
-    ``molrep.readout.mace._ScalarO3Linear`` now draws its weight from ``N(0, 1)``
-    on the **global** RNG and zero-initialises only its bias, so a fresh OMOL
-    ``NonLinearBiasReadout`` is already non-trivial and the assertions here are
-    no longer at risk of being vacuous. (They were: the weight used to be
-    zero-initialised too, which made an untrained model's interaction energy
-    position-independent and every force identically zero, so parity, physics
-    and equivalence assertions all reduced to ``0 == 0``.)
-
-    The helper stays as belt-and-braces determinism for the state-transfer
-    parity tests: it fills both scalar linears from a private, fixed
-    ``torch.Generator``, so the values a test compares across two models depend
-    on that generator alone and not on how much global RNG each model happened
-    to consume before its readout was built. Checkpoint use is unaffected —
+    ``molzoo.mace.heads._ScalarO3Linear`` draws its weight on the global RNG
+    and zero-initialises its bias; filling both scalar linears from a fixed
+    private generator makes the OMOL model's interaction energy depend on
+    that generator alone, not on how much global RNG the construction
+    consumed before the readout was built. Checkpoint use is unaffected —
     official weights overwrite these entries.
 
     Args:
@@ -230,19 +163,8 @@ def wake_zero_init_readout(model: torch.nn.Module) -> None:
 
 
 @pytest.fixture(autouse=True)
-def fp64():
-    """Build every model in this package at fp64.
-
-    cuEquivariance freezes its working precision at construction, so a model
-    built under the default fp32 and then ``.double()``-d still contracts in
-    float32 — ~1e-8 eV of noise, which is fine for inference but swamps the
-    invariance assertions here. Foundation-weight use is fp64 anyway, so the
-    tests exercise that path.
-    """
-    previous = config["ftype"]
-    config.set_precision("fp64")
-    yield
-    config.set_precision("fp64" if previous == torch.float64 else "fp32")
+def _build_at_fp64(fp64):
+    """Every MACE test builds at fp64 (``tests.conftest.fp64``)."""
 
 
 @pytest.fixture
@@ -261,8 +183,28 @@ def tiny_omol_spec() -> MACEOMolSpec:
     return MACEOMolSpec(
         atomic_numbers=ATOMIC_NUMBERS,
         atomic_energies=ATOMIC_ENERGIES,
-        use_fallback=False,
         **TINY_OMOL_KWARGS,
+    )
+
+
+@pytest.fixture
+def tiny_off_spec() -> MACEOffSpec:
+    """Tiny :class:`molzoo.mace.spec.MACEOffSpec`."""
+    return MACEOffSpec(
+        atomic_numbers=ATOMIC_NUMBERS,
+        atomic_energies=ATOMIC_ENERGIES,
+        **TINY_OFF_KWARGS,
+    )
+
+
+@pytest.fixture
+def tiny_les_spec() -> MACELesSpec:
+    """Tiny :class:`molzoo.mace.spec.MACELesSpec` on the MACE-OFF body, residual first."""
+    return MACELesSpec(
+        atomic_numbers=ATOMIC_NUMBERS,
+        atomic_energies=ATOMIC_ENERGIES,
+        residual_first=True,
+        **TINY_OFF_KWARGS,
     )
 
 
@@ -289,7 +231,7 @@ def cluster() -> TensorDict:
 
 @pytest.fixture
 def periodic_cluster() -> TensorDict:
-    """The same cluster with a non-zero ``edges.shifts`` on the first two edges."""
+    """The same cluster with a non-zero image shift folded into ``pairs.pair_diff`` (two edges)."""
     edge_index = full_edge_index(SINGLE_GRAPH)
     shifts = torch.zeros(edge_index.shape[0], 3, dtype=torch.float64)
     shifts[0, 0] = PERIODIC_SHIFT
@@ -330,34 +272,19 @@ def omol_cluster() -> TensorDict:
 
 
 @pytest.fixture
-def matpes_variant() -> MaceMatpes:
-    """Tiny :class:`~molzoo.mace.potential.MaceMatpes` in the keyword shape.
-
-    ``atomic_energies`` is a **tensor**, as ``scripts/matpes_port/run_nve.py``
-    passes it (``torch.tensor(cfg["atomic_energies"], dtype=config.ftype)``),
-    even though :class:`~molzoo.mace.spec.MACEMatpesSpec` holds a list.
-    """
+def matpes_model(tiny_matpes_spec: MACEMatpesSpec) -> MaceMatpes:
+    """Tiny energy + force :class:`~molzoo.mace.potential.MaceMatpes`, seeded."""
     torch.manual_seed(0)
-    return MaceMatpes(
-        atomic_numbers=list(ATOMIC_NUMBERS),
-        atomic_energies=torch.tensor(ATOMIC_ENERGIES),
-        wrt=("atoms.pos",),
-        **TINY_MATPES_KWARGS,
-    ).eval()
+    return MaceMatpes(tiny_matpes_spec, wrt=("atoms.pos",)).eval()
 
 
 @pytest.fixture
-def omol_variant() -> MaceOmol:
-    """Tiny :class:`~molzoo.mace.potential.MaceOmol` with a woken readout.
+def omol_model(tiny_omol_spec: MACEOMolSpec) -> MaceOmol:
+    """Tiny energy + force :class:`~molzoo.mace.potential.MaceOmol` with a woken readout.
 
     See :func:`wake_zero_init_readout` for why the readout is filled.
     """
     torch.manual_seed(0)
-    model = MaceOmol(
-        atomic_numbers=list(ATOMIC_NUMBERS),
-        atomic_energies=torch.tensor(ATOMIC_ENERGIES),
-        wrt=("atoms.pos",),
-        **TINY_OMOL_KWARGS,
-    ).eval()
+    model = MaceOmol(tiny_omol_spec, wrt=("atoms.pos",)).eval()
     wake_zero_init_readout(model)
     return model

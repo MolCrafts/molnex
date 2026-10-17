@@ -293,7 +293,7 @@ def main() -> int:
             raise SystemExit(
                 f"on-device neighbour rebuild failed ({err}).\n"
                 "Build the molix op with CUDA kernels: "
-                "cmake -S src/molix/op -B src/molix/op/build -DMOLNEX_OP_ENABLE_CUDA=ON"
+                "cmake -S csrc -B build/csrc-$(uname -m) -DMOLNEX_OP_ENABLE_CUDA=ON"
             ) from err
         raise
 

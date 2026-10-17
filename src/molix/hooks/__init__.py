@@ -26,7 +26,12 @@ from molix.hooks.profiler import ProfilerHook
 from molix.hooks.progress import Log, ProgressBarHook
 from molix.hooks.scalar import MetricsHook, StepSpeedHook
 from molix.hooks.tensorboard import TensorBoardHook
-from molix.hooks.training import ActivationCheckpointingHook, GradClipHook, RequiredGradientHook
+from molix.hooks.training import (
+    ActivationCheckpointingHook,
+    GradClipHook,
+    LinearWarmupHook,
+    RequiredGradientHook,
+)
 
 __all__ = [
     "ActivationCheckpointingHook",
@@ -37,6 +42,7 @@ __all__ = [
     "GradClipHook",
     "GradientBalanceHook",
     "JournalHook",
+    "LinearWarmupHook",
     "Log",
     "MetricsHook",
     "MolRecMetricsHook",

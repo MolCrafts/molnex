@@ -1,7 +1,7 @@
 """Write LAMMPS data and settings via :mod:`molpy.io`.
 
 The Class-I :class:`~molpot.forcefield.ForceField` **is** a molpy
-``ForceField``. This type builds a :class:`~molpy.core.atomistic.Atomistic`
+``ForceField``. This type builds a :class:`molpy.Atomistic`
 frame, calls :meth:`~molpot.forcefield.ForceField.realize` to fill native
 types, then delegates files to molpy. Independent of ``pair_style molnex``.
 
@@ -49,10 +49,13 @@ registered by :meth:`~molpot.forcefield.ForceField.realize`, because molpy's
 LAMMPS include writer takes the harmonic improper form only and
 ``improper:periodic`` — the form :class:`~molpot.forcefield.OPLSAAForceField`
 declares — has no spelling to be registered under. A field whose impropers carry
-energy therefore exports a deck that omits them (ledger debt ``F25``). They are
-not typed either: :class:`~molpot.forcefield.TypeAssignment` carried an
-``improper_type`` / ``improper_labels`` pair that no file ever read, and it was
-deleted on 2026-09-08 rather than kept in step with a section nothing writes.
+energy on a system that has impropers is therefore **refused**
+(:class:`~molix.ff_export.exceptions.UnsupportedTermError` from
+:meth:`LammpsWriter.write_settings`); it used to export a deck that silently
+omitted them (ledger debt ``F25``). They are not typed either:
+:class:`~molpot.forcefield.TypeAssignment` carried an ``improper_type`` /
+``improper_labels`` pair that no file ever read, and it was deleted on
+2026-09-08 rather than kept in step with a section nothing writes.
 
 References:
     LAMMPS docs: pair_style lj/mdf, pair_style lj/cut/coul/long, pair_style
@@ -70,6 +73,7 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
+from molix.ff_export.exceptions import UnsupportedTermError
 from molix.ff_export.force_spec import ForceSpec
 from molix.ff_export.lammps_adapter import LammpsAdapter
 from molix.frame import TensorFrame, as_tensor_frame
@@ -141,7 +145,7 @@ class LammpsWriter:
             ValueError: ``graphs.cell`` holds more than one cell — one data file
                 describes one box (raised through :meth:`to_frame`).
         """
-        from molpy.io.writers import write_lammps_data
+        from molpy.io import write_lammps_data
 
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -192,10 +196,11 @@ class LammpsWriter:
                 ``pair_style``, no ``pair_coeff``, no ``special_bonds`` — so
                 that :meth:`write_pair_block` owns the whole nonbonded section
                 and the deck cannot end up with two disagreeing pair
-                definitions. Every ``pair:*`` style is dropped from the
-                realized clone (the caller's force field is untouched) because
-                molpy emits the ``pair_coeff`` lines from the styles that
-                remain even when asked to skip the ``pair_style`` line.
+                definitions. The realized clone carries no pair types
+                (``realize(pairs=False)``; the caller's force field is
+                untouched), because the molrs writer prints a ``pair_coeff``
+                line for every pair type it holds even when asked to skip the
+                ``pair_style`` line.
 
         Returns:
             The written path.
@@ -203,9 +208,13 @@ class LammpsWriter:
         Raises:
             ValueError: ``masses`` has a different length than ``atoms.pos``
                 (raised through :meth:`to_frame`).
+            UnsupportedTermError: ``forcefield`` gives an improper a non-zero
+                force constant and ``system`` has impropers — the deck would
+                omit their energy (ledger debt ``F25``).
         """
-        from molpy import PairStyle
-        from molpy.io.writers import write_lammps_forcefield
+        from molpy.io import write_lammps_forcefield
+
+        self._refuse_omitted_impropers(forcefield, system)
 
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -214,10 +223,9 @@ class LammpsWriter:
         # that registers molpy types from it. Condensing again here — to compare
         # with what was given, and again inside ``realize`` — made three passes
         # produce the answer this method was already holding.
-        ff = forcefield.clone().realize(system, masses=masses, types=types)
-        if skip_pair_style:
-            for name in list(ff.pair_styles()):
-                ff.remove_style(PairStyle, name)
+        ff = forcefield.clone().realize(
+            system, masses=masses, types=types, pairs=not skip_pair_style
+        )
         write_lammps_forcefield(
             dest,
             ff,
@@ -226,7 +234,44 @@ class LammpsWriter:
             skip_pair_style=skip_pair_style,
             skip_units=True,
         )
+        if skip_pair_style:
+            # molpy 0.17 still states ``special_bonds`` in a pair-less include;
+            # here that line belongs to the pair block (``write_pair_block``),
+            # and a deck that reads both would set it twice.
+            kept = [
+                line
+                for line in dest.read_text().splitlines()
+                if not line.startswith("special_bonds")
+            ]
+            dest.write_text("".join(f"{line}\n" for line in kept))
         return dest
+
+    @staticmethod
+    def _refuse_omitted_impropers(forcefield: ForceField, system: TensorDict) -> None:
+        """Raise when the deck would drop improper energy.
+
+        Impropers are neither registered by ``realize`` nor written to the data
+        file, so a field with a non-zero improper force constant on a system
+        with live improper rows has energy the deck cannot state.
+        """
+        params = forcefield.params("impropers")
+        if params is None or "k" not in params:
+            return
+        if not bool(torch.any(torch.as_tensor(params["k"]) != 0)):
+            return
+        if "impropers" not in system.keys():
+            return
+        block = system["impropers"]
+        rows = block.batch_size[0] if len(block.batch_size) else 0
+        if "mask" in block.keys():
+            rows = int(block["mask"].sum())
+        if rows == 0:
+            return
+        raise UnsupportedTermError(
+            "improper",
+            f"{rows} improper rows with non-zero force constants; the LAMMPS deck "
+            "writes no improper section (ledger F25), so their energy would be lost",
+        )
 
     def write_pair_block(
         self,
@@ -443,9 +488,10 @@ class LammpsWriter:
         the include :meth:`write_settings` realizes, because molpy's LAMMPS
         writer takes the harmonic improper form only and OPLS-AA's
         ``improper:periodic`` has no spelling to be registered under. A field
-        whose impropers carry energy exports a deck that silently omits that
-        term (ledger debt ``F25``); ``types`` carries no improper class map
-        either, since nothing on this side would read one.
+        whose impropers carry energy is refused by :meth:`write_settings`
+        rather than exported without them (ledger debt ``F25``); ``types``
+        carries no improper class map either, since nothing on this side would
+        read one.
 
         The **box** is the periodic/open switch of the whole export, so it is
         read from the system rather than assumed: ``system["graphs", "cell"]``
@@ -486,8 +532,7 @@ class LammpsWriter:
                 to write for a batch of several. Or ``masses`` has a different
                 length than ``atoms.pos``.
         """
-        from molpy import Box
-        from molpy.core.atomistic import Atomistic
+        from molpy import Atomistic, Box
 
         # One wrap, here, and every reader below addresses the view: this is the
         # sanctioned ``molix.ff_export`` -> ``molpot`` edge (module docstring),

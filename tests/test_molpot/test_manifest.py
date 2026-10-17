@@ -8,9 +8,8 @@ and provenance. It is a composition of small frozen records, never a god
 struct: this module tests those records and the aggregate's serialisation,
 nothing else. Who *fills* a manifest from a force field is
 ``ForceField.manifest`` and is tested in
-``tests/test_molpot/test_forcefield/test_container.py``; who supplies the
-representation is ``Parameterizer.representation_record`` and is tested in
-``test_forcefield/test_parameterizer.py``. Every manifest here is therefore
+``tests/test_molpot/test_forcefield/test_container.py``; the representation
+record is composed in by the caller. Every manifest here is therefore
 built inline from the records themselves, so this file stays a leaf test of a
 leaf module.
 
@@ -210,7 +209,7 @@ class TestModelManifest:
         coming from before the field existed rather than being retro-fitted
         into the current layout.
 
-        Versioned independently of ``molix.engine.export.LAMMPS_META_SCHEMA``.
+        The LAMMPS pair-style JSON is a different artifact and carries no schema version.
         """
         assert MANIFEST_SCHEMA == 2
 
@@ -376,12 +375,9 @@ class TestNumericsRecord:
         """The precision a model runs at has exactly two sources, both read here.
 
         ``molix.config["ftype"]`` is the global parameter / batch dtype.
-        ``matmul_precision`` is **not** a config key despite the name in the
-        S2 record table: ``MolnexConfig.set_precision`` skips it when copying
-        the preset and calls ``torch.set_float32_matmul_precision`` instead,
-        so the process-wide policy only ever lives in torch and
-        ``config["matmul_precision"]`` raises ``KeyError``. The effective
-        policy is what a manifest has to record.
+        ``matmul_precision`` is not a molnex setting: molnex leaves PyTorch's
+        default in place, so the process-wide policy only ever lives in torch.
+        The effective policy is what a manifest has to record.
         """
         record = NumericsRecord.from_runtime()
         assert record.dtype == str(config["ftype"])

@@ -360,11 +360,17 @@ class TestTrainerNewParams:
         assert trainer.lr_scheduler is not None
         assert trainer._checkpoint.lr_scheduler is trainer.lr_scheduler
 
-    def test_use_amp(self):
-        trainer = _make_trainer()
-        trainer.set_precision("fp16-mixed")
+    def test_float16_autocast_owns_the_grad_scaler(self):
+        trainer = _make_trainer(autocast=torch.float16)
         assert trainer.scaler is not None
         assert trainer._checkpoint.scaler is trainer.scaler
+
+    def test_bfloat16_autocast_needs_no_grad_scaler(self):
+        assert _make_trainer(autocast=torch.bfloat16).scaler is None
+
+    def test_autocast_takes_a_half_dtype_or_none(self):
+        with pytest.raises(ValueError, match="autocast"):
+            _make_trainer(autocast=torch.float64)
 
     def test_resolve_checkpoint_path_missing(self):
         result = Trainer._resolve_checkpoint_path("/nonexistent/path.pt")

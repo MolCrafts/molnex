@@ -324,3 +324,114 @@ def test_train_loop_runs_without_per_step_move_on_cpu():
     initial = [p.clone() for p in trainer.model.parameters()]
     trainer.train(dm, max_epochs=1)
     assert any(not torch.equal(i, c) for i, c in zip(initial, trainer.model.parameters()))
+
+
+def test_eval_phase_publishes_the_mean_over_val_batches():
+    """``eval/loss`` is the val-set mean, not the last batch's value.
+
+    Best-checkpoint selection and patience read it; publishing the last batch
+    made both decisions on one batch of nine.
+    """
+
+    class _Const(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            return batch["y"]
+
+    class _Val:
+        def val_dataloader(self):
+            for value in (1.0, 2.0, 9.0):
+                yield TensorDict({"y": torch.tensor([value])}, batch_size=[1])
+
+    trainer = Trainer(
+        model=_Const(),
+        loss_fn=lambda predictions, batch: predictions.sum(),
+        optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.01),
+    )
+    trainer._run_eval_phase(_Val())
+    assert float(trainer.state["eval"]["loss"]) == pytest.approx(4.0)
+
+
+def test_eval_phase_averages_each_named_term_of_a_combined_objective():
+    """A ``WeightedLoss`` with named terms is published per term, val-set mean."""
+    from molix.core.losses import WeightedLoss
+    from molix.core.steps import DefaultEvalStep
+
+    class _Const(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            return batch["y"]
+
+    class _Val:
+        def val_dataloader(self):
+            for value in (1.0, 3.0):
+                yield TensorDict({"y": torch.tensor([value])}, batch_size=[1])
+
+    objective = WeightedLoss(
+        [(1.0, lambda p, b: p.sum()), (2.0, lambda p, b: p.sum() ** 2)], names=("lin", "sq")
+    )
+    trainer = Trainer(
+        model=_Const(),
+        loss_fn=None,
+        optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.01),
+        eval_step=DefaultEvalStep(objective=objective),
+    )
+    trainer._run_eval_phase(_Val())
+    assert float(trainer.state["eval"]["loss_lin"]) == pytest.approx(2.0)
+    assert float(trainer.state["eval"]["loss_sq"]) == pytest.approx(5.0)
+    assert float(trainer.state["eval"]["loss"]) == pytest.approx((1 + 2 + 3 + 18) / 2)
+
+
+def test_eval_phase_releases_a_batch_before_running_the_next():
+    """The previous batch's outputs are dead when the next forward starts.
+
+    The step detaches what it returns, but the outputs are still a batch's
+    worth of predictions; held in the loop variable through the next forward
+    they were, with the graph then attached, double the eval peak (a large
+    tier that survived its smoke steps OOMed in its baseline eval).
+    """
+    import weakref
+
+    from molix.core.steps import DefaultEvalStep
+
+    class _Scaled(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = nn.Parameter(torch.ones(()))
+
+        def forward(self, batch):
+            return batch["y"] * self.w
+
+    class _Watching(DefaultEvalStep):
+        def __init__(self):
+            super().__init__(no_grad=False)
+            self.previous_loss = None
+            self.previous_alive_at_next_call: list[bool] = []
+
+        def on_eval_batch(self, trainer, state, batch):
+            if self.previous_loss is not None:
+                self.previous_alive_at_next_call.append(self.previous_loss() is not None)
+            outputs = super().on_eval_batch(trainer, state, batch)
+            self.previous_loss = weakref.ref(outputs["loss"])
+            return outputs
+
+    class _Val:
+        def val_dataloader(self):
+            for value in (1.0, 2.0, 3.0):
+                yield TensorDict({"y": torch.tensor([value])}, batch_size=[1])
+
+    step = _Watching()
+    trainer = Trainer(
+        model=_Scaled(),
+        loss_fn=lambda predictions, batch: predictions.sum(),
+        optimizer_factory=lambda p: torch.optim.SGD(p, lr=0.01),
+        eval_step=step,
+    )
+    trainer._run_eval_phase(_Val())
+    assert step.previous_alive_at_next_call == [False, False]

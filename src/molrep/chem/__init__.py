@@ -6,15 +6,22 @@ Public surface:
 """
 
 from molrep.chem.blocks import ChemGraphBlock
+from molrep.chem.bond_table import BondTable
 from molrep.chem.context import (
     AngleContext,
     BondContext,
     ImproperContext,
     ProperContext,
 )
-from molrep.chem.embed import AtomChemEmbedding, BondChemEmbedding
+from molrep.chem.embed import (
+    AtomChemEmbedding,
+    BondChemEmbedding,
+    DiscreteChannel,
+    DiscreteChannels,
+)
 from molrep.chem.encoder import ChemEncoder
 from molrep.chem.features import ChemEmbeddings
+from molrep.chem.hybridization import Hybridization
 from molrep.chem.typing_metrics import TypingRecoveryMetrics, TypingRecoveryReport
 from molrep.chem.typing_probe import AtomTypeReadout
 
@@ -24,9 +31,13 @@ __all__ = [
     "AtomTypeReadout",
     "BondChemEmbedding",
     "BondContext",
+    "BondTable",
     "ChemEmbeddings",
     "ChemEncoder",
     "ChemGraphBlock",
+    "DiscreteChannel",
+    "DiscreteChannels",
+    "Hybridization",
     "ImproperContext",
     "ProperContext",
     "TypingRecoveryMetrics",

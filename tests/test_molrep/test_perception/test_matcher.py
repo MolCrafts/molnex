@@ -41,10 +41,10 @@ class TestMolpySmartsMatcher:
         """Optional smoke: match carbon atoms in ethanol when molpy works."""
         try:
             import molpy as mp
-            from molpy import SmartsPattern  # noqa: F401
+            from molpy.perceive import SmartsPattern  # noqa: F401
 
             matcher = MolpySmartsMatcher()
-            mol = mp.io.read_smiles("CCO")
+            mol = mp.io.read_smiles_str("CCO")
         except Exception as exc:  # pragma: no cover - env-dependent
             pytest.skip(f"molpy SMARTS smoke unavailable: {exc}")
 

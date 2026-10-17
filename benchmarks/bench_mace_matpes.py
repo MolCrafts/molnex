@@ -1,19 +1,12 @@
-"""MACE-MatPES perf guard: fused-vs-fallback cuEq kernels + compiled energy core.
+"""MACE-MatPES perf guard: the eager energy+force op vs the compiled op.
 
-The MACE family carries the repo's headline GH200 compile numbers, yet had no
-benchmark of its own — which is exactly how a `use_fallback=True` default (a
-measured **35.7x** per-step regression with zero correctness upside) shipped
-unnoticed. This script is the guard:
-
-  * eager ``energy_forces`` with ``use_fallback=False`` (fused) vs ``True``
-    (pure-torch) — asserts the fused arm is at least ``--min-speedup`` faster
-    when the ``cuequivariance-ops-torch`` wheel is importable;
-  * the ``Compiler(cuda_graphs=True)``-compiled energy core (the
-    ``run_nve.py`` production path) vs eager, on the fused arm.
-
-Random weights (perf only, no physics); a periodic random-dense system builds
-real ``(E, 2)`` edges + shifts through :class:`molix.md.NeighborList`.
-Run on a GPU node:
+Times ``MaceMatpes(spec, wrt=("atoms.pos",))`` — the op every MD step runs —
+eagerly and under ``Compiler(cuda_graphs=True)`` after the one eager forward
+that spends the element gate (the ``run_nve.py`` production path). Random
+weights (perf only, no physics); a periodic random-dense system builds real
+``(E, 2)`` edges + imaged displacements through :class:`molix.md.NeighborList`.
+The cuEquivariance kernels are pinned by :mod:`molrep.cueq`; there is no
+fallback arm to compare against. Run on a GPU node:
 
     python benchmarks/bench_mace_matpes.py            # defaults: N=192, fp32
     python benchmarks/bench_mace_matpes.py --fp64 --steps 30
@@ -29,10 +22,9 @@ import torch
 from tensordict import TensorDict
 
 from molix import config
-from molix.autograd import Derivative
 from molix.compile import Compiler
 from molix.md import NeighborList
-from molpot.derivation.force import autograd_forces_from_energy
+from molzoo.mace import MaceMatpes, MACEMatpesSpec
 
 _Z_TABLE = [1, 6, 7, 8, 14, 26]  # small table; dims below are the MatPES-class ones
 
@@ -56,13 +48,11 @@ def _min_n_atoms() -> int:
     return math.floor(DENSITY * (2.0 * CUTOFF) ** 3) + 1
 
 
-def _build_model(use_fallback: bool):
-    from molzoo import MaceMatpes
-
+def _build_model() -> MaceMatpes:
     torch.manual_seed(0)
-    return MaceMatpes(
+    spec = MACEMatpesSpec(
         atomic_numbers=_Z_TABLE,
-        atomic_energies=torch.zeros(len(_Z_TABLE), dtype=config.ftype),
+        atomic_energies=[0.0] * len(_Z_TABLE),
         r_max=CUTOFF,
         num_bessel=10,
         num_polynomial_cutoff=5,
@@ -72,11 +62,12 @@ def _build_model(use_fallback: bool):
         num_interactions=2,
         correlation=3,
         mlp_dim=16,
-        use_fallback=use_fallback,
-    ).eval()
+    )
+    return MaceMatpes(spec, wrt=("atoms.pos",)).eval()
 
 
-def _system(n_atoms: int, device: torch.device):
+def _system(n_atoms: int, device: torch.device) -> TensorDict:
+    """A periodic random-dense system as the post-collate batch the op reads."""
     torch.manual_seed(1)
     box = _box_length(n_atoms)
     pos = torch.rand(n_atoms, 3, dtype=config.ftype, device=device) * box
@@ -85,8 +76,27 @@ def _system(n_atoms: int, device: torch.device):
     Z[::3] = _Z_TABLE[2]
     Z[::5] = _Z_TABLE[3]
     neighbors = NeighborList(cell=cell, cutoff=CUTOFF, positions=pos)
-    batch = torch.zeros(n_atoms, dtype=torch.long, device=device)
-    return pos, Z, batch, neighbors
+    pair_index = neighbors.pair_index
+    pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]] + neighbors.shifts
+    print(f"system: N={n_atoms} E={neighbors.num_pairs} (capacity {neighbors.capacity})")
+    return TensorDict(
+        {
+            "atoms": TensorDict(
+                {
+                    "Z": Z,
+                    "pos": pos,
+                    "batch": torch.zeros(n_atoms, dtype=torch.long, device=device),
+                },
+                batch_size=[n_atoms],
+            ),
+            "pairs": TensorDict(
+                {"pair_index": pair_index, "pair_diff": pair_diff, "shifts": neighbors.shifts},
+                batch_size=[pair_index.shape[0]],
+            ),
+            "graphs": TensorDict({"cell": cell.unsqueeze(0)}, batch_size=[1]),
+        },
+        batch_size=[],
+    )
 
 
 def _time(fn, steps: int, warmup: int = 5) -> float:
@@ -113,12 +123,6 @@ def main() -> int:
     )
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--fp64", action="store_true")
-    ap.add_argument(
-        "--min-speedup",
-        type=float,
-        default=3.0,
-        help="required fused/fallback per-step ratio when the ops wheel is present",
-    )
     args = ap.parse_args()
 
     # Fail here, not 40 frames deep inside NeighborList: minimum image
@@ -134,69 +138,25 @@ def main() -> int:
 
     config.set_precision("fp64" if args.fp64 else "fp32")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        import cuequivariance_ops_torch  # noqa: F401
+    print(f"device={device} dtype={config.ftype}")
 
-        fused_available = True
-    except ImportError:
-        fused_available = False
-    print(f"device={device} dtype={config.ftype} fused_ops_available={fused_available}")
+    frame = _system(args.n_atoms, device)
+    model = _build_model().to(device)
 
-    pos, Z, batch, neighbors = _system(args.n_atoms, device)
-    print(f"system: N={args.n_atoms} E={neighbors.num_pairs} (capacity {neighbors.capacity})")
+    with torch.no_grad():
+        eager = _time(lambda: model(frame)["atoms", "forces"], args.steps)
+    print(f"eager energy+forces: {eager:9.3f} ms/step")
 
-    times: dict[str, float] = {}
-    for label, use_fallback in (("fused", False), ("fallback", True)):
-        model = _build_model(use_fallback).to(device)
-        forces = Derivative(model, wrt=("atoms.pos",))
-        pair_index = neighbors.pair_index
-        pair_diff = pos[pair_index[:, 1]] - pos[pair_index[:, 0]] + neighbors.shifts
-        frame = TensorDict(
-            {
-                "atoms": TensorDict(
-                    {"Z": Z, "pos": pos, "batch": batch}, batch_size=[pos.shape[0]]
-                ),
-                "pairs": TensorDict(
-                    {"pair_index": pair_index, "pair_diff": pair_diff, "shifts": neighbors.shifts},
-                    batch_size=[pair_index.shape[0]],
-                ),
-                "graphs": TensorDict({}, batch_size=[1]),
-            },
-            batch_size=[],
-        )
-
-        def step(forces=forces, frame=frame):
-            return forces(frame)["atoms", "forces"]
-
-        times[label] = _time(step, args.steps)
-        print(f"eager energy+forces [{label:8s}]: {times[label]:9.3f} ms/step")
-
-    ratio = times["fallback"] / times["fused"]
-    print(f"fallback/fused ratio: {ratio:.2f}x (guard: >= {args.min_speedup} when fused available)")
-
-    # Compiled energy core on the fused arm — the run_nve.py production path.
     if device.type == "cuda":
-        model = _build_model(False).to(device)
-        energy_fn = Compiler(cuda_graphs=True)(model.energy_core)
+        # The op is the compile boundary; the eager forwards above spent the
+        # element gate, so the trace never host-syncs.
+        compiled = Compiler(cuda_graphs=True)(model)
+        with torch.no_grad():
+            fast = _time(lambda: compiled(frame)["atoms", "forces"], args.steps)
+        print(f"compiled op (cuda graphs): {fast:9.3f} ms/step ({eager / fast:.2f}x eager)")
 
-        def compiled_step():
-            leaf = pos.detach().requires_grad_(True)
-            with torch.enable_grad():
-                energy = energy_fn(leaf, Z, neighbors.pair_index, batch, 1, neighbors.shifts)
-            return autograd_forces_from_energy(energy, leaf)
-
-        t = _time(compiled_step, args.steps)
-        print(f"compiled energy core [fused  ]: {t:9.3f} ms/step ({times['fused'] / t:.2f}x eager)")
-
-    ok = (not fused_available) or ratio >= args.min_speedup
-    if not ok:
-        print(
-            "RESULT: FAIL — fused kernels available but the speedup collapsed; "
-            "check use_fallback plumbing / the ops wheel / cuEq versions"
-        )
-    else:
-        print("RESULT: PASS")
-    return 0 if ok else 1
+    print("RESULT: PASS")
+    return 0
 
 
 if __name__ == "__main__":

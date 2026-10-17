@@ -1,10 +1,9 @@
-"""The compile seam: what the traced half of a Rondo step is.
+"""The compile seam: forward, energy and partial Hessian each trace as one graph.
 
-A Class-I step splits in two. The host half fills the field, assembles the
-container and binds this batch's topology — molpy work, none of it physics,
-and worth 22 graph breaks if it is dragged inside a compiled region. The
-tensor half is the derivative over that container's energy, and it is the part
-that must trace clean (spec section 3.7).
+Rondo does no host work per batch: the pair relations arrive from the loader,
+the hybridization and the tables are tensor algebra on static shapes, and the
+force field's potentials are plain torch. Each primitive is different traced
+code — the force is one backward, the partial Hessian a double backward.
 """
 
 from __future__ import annotations
@@ -13,38 +12,65 @@ import pytest
 import torch
 
 from molix.compile import Compiler
-from molzoo.rondo import Rondo, RondoPotential, RondoSpec
+from molzoo.rondo import Rondo
+from tests.test_molzoo.test_rondo.conftest import SPEC, with_hessian_pairs
 
 
 class TestRondoCompile:
     @pytest.mark.slow
-    @pytest.mark.parametrize("trainable", [None, ("bonds",)])
-    def test_the_traced_half_is_one_graph(self, butane_batch, trainable):
-        """``energy`` — encoder, heads and the Class-I kernels — traces clean.
-
-        One eager call first: that is what assembles the container and binds
-        the topology, which the traced half requires and must not contain.
-
-        Both ``trainable`` settings, because they are different traced code:
-        naming a subset puts a per-namespace rebuild of the table dict inside
-        the compiled region, and that is the form the Hessian stage runs in.
-
-        On an empty ``break_sites`` with a non-zero count, re-run the target
-        under ``TORCH_LOGS=graph_breaks`` — upstream left the reasons empty for
-        real breaks on torch 2.15.0.dev while reporting them for a control
-        (2026-09-18), so the sites here are a convenience, not the diagnosis.
-        """
+    def test_forward_is_one_graph(self, forcefield, butane_batch):
+        """Positions are marked first, as the training step's eager prologue does."""
         torch.manual_seed(0)
-        model = RondoPotential(
-            Rondo(RondoSpec(hidden=8, n_blocks=1, n_torsion_terms=2, eem_max_atoms=32)),
-            trainable=trainable,
-        )
-        with torch.no_grad():
-            model(butane_batch.clone())
+        model = Rondo(forcefield, SPEC)
+        batch = butane_batch.clone()
+        model.derivative.mark_leaves(batch)
+        explanation = Compiler.explain(model, batch)
+        # Both fields: upstream defines graph_break_count = graph_count - 1, so
+        # a target that never traced reports -1, which reads as better than clean.
+        assert explanation.graph_count == 1, explanation.break_sites
+        assert explanation.graph_break_count == 0, explanation.break_sites
 
+    @pytest.mark.slow
+    def test_energy_is_one_graph(self, forcefield, butane_batch):
+        torch.manual_seed(0)
+        model = Rondo(forcefield, SPEC)
         explanation = Compiler.explain(model.energy, butane_batch.clone())
-        # Both fields, because upstream defines
-        # graph_break_count = graph_count - 1: a target that never traced at
-        # all reports -1, which would read as better than clean.
+        assert explanation.graph_count == 1, explanation.break_sites
+        assert explanation.graph_break_count == 0, explanation.break_sites
+
+    @pytest.mark.slow
+    def test_the_energy_of_named_styles_is_one_graph(self, forcefield, butane_batch):
+        """The style loop is a tuple of names fixed at the call: straight-line code."""
+        torch.manual_seed(0)
+        model = Rondo(forcefield, SPEC)
+
+        def bonded(frame):
+            return model.energy(frame, styles=("bond:harmonic", "angle:harmonic"))
+
+        explanation = Compiler.explain(bonded, butane_batch.clone())
+        assert explanation.graph_count == 1, explanation.break_sites
+        assert explanation.graph_break_count == 0, explanation.break_sites
+
+    @pytest.mark.slow
+    def test_partial_hessian_is_one_graph(self, forcefield, butane_batch):
+        torch.manual_seed(0)
+        model = Rondo(forcefield, SPEC)
+        batch = butane_batch.clone()
+        with_hessian_pairs(batch)
+        model.derivative.mark_leaves(batch)
+        explanation = Compiler.explain(model.partial_hessian, batch)
+        assert explanation.graph_count == 1, explanation.break_sites
+        assert explanation.graph_break_count == 0, explanation.break_sites
+
+    @pytest.mark.slow
+    def test_the_eval_forward_is_one_graph(self, forcefield, butane_batch):
+        """Eval runs with grad off at entry: ``autograd.grad`` frees the graph, so
+        no column may keep a ``grad_fn`` from it (GH200 3304497)."""
+        torch.manual_seed(0)
+        model = Rondo(forcefield, SPEC)
+        batch = butane_batch.clone()
+        with torch.no_grad():
+            model.derivative.mark_leaves(batch)
+            explanation = Compiler.explain(model, batch)
         assert explanation.graph_count == 1, explanation.break_sites
         assert explanation.graph_break_count == 0, explanation.break_sites

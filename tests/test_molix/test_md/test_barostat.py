@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from molix.autograd import Derivative, Potential
 from molix.md import BerendsenBarostat, MDState, VelocityVerletIntegrator
 from molix.md.barostat import (
     compressibility_bar_to_md,
@@ -13,10 +14,14 @@ from molix.md.barostat import (
 _DTYPE = torch.float64
 
 
-class _ZeroPots:
+class _ZeroPots(Potential):
     """The minimal energy the adapter's op composes: ``E = 0 · Σ pos``, zero forces."""
 
-    def __call__(self, system):
+    def __init__(self) -> None:
+        super().__init__()
+        self._derivative = Derivative(self.energy)
+
+    def energy(self, system):
         from tensordict import TensorDict
 
         pos = system["atoms", "pos"]

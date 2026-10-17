@@ -20,7 +20,7 @@ from tensordict import TensorDict
 from molix.neighbor import DenseNeighborList, NeighborList
 
 #: The two backends of ``torch.ops.molix.get_neighbor_pairs``.
-_KERNELS = Path(__file__).resolve().parents[2] / "src/molix/op/src/neighbors"
+_KERNELS = Path(__file__).resolve().parents[2] / "csrc/molix/src/neighbors"
 
 
 def _one_graph(pos: torch.Tensor, cell: torch.Tensor | None = None) -> TensorDict:

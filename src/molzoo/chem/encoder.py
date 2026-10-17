@@ -54,7 +54,8 @@ class ChemPerception(ChemEncoder):
             improper_dim=spec.improper_dim,
             num_elements=spec.num_elements,
             hidden_dim=spec.hidden_dim,
-            num_bond_types=spec.num_bond_types,
+            atom_channels=spec.atom_channels,
+            bond_channels=spec.bond_channels,
             n_blocks=spec.n_blocks,
             local_attention=spec.local_attention,
         )

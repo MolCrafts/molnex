@@ -1,7 +1,30 @@
 # MACE: precision and official checkpoints
 
-MatPES and Polar use the same precision/weight-loading boundary. cuEquivariance
-owns the equivariant kernels; no e3nn, ASE or mace-torch runtime is needed.
+MatPES, OMol, OFF, LES and Polar share one construction, one precision
+boundary and one weight-loading path. cuEquivariance owns the equivariant
+kernels; no ASE or mace-torch runtime is needed.
+
+## One spec, one product, two methods
+
+A product is constructed from its typed spec, and every default lives on the
+spec:
+
+```python
+from molzoo.mace import MACEMatpesSpec, MaceMatpes
+
+spec = MACEMatpesSpec(atomic_numbers=[1, 6, 8], atomic_energies=[-13.6, -1029.0, -2041.0])
+model = MaceMatpes(spec, wrt=("atoms.pos",))   # forward writes graphs.energy and atoms.forces
+```
+
+A product has two public methods. `energy(frame)` reads the post-collate
+batch (`atoms.{Z,pos,batch}`, `pairs.pair_index`, the imaged `pairs.pair_diff`,
+optional `atoms.mask`, `graphs.{total_charge,total_spin}`, `graphs.cell`) and
+writes `atoms.energy` and `graphs.energy`; `forward` is the
+`molix.autograd.Derivative` built from `wrt=` at construction and adds the
+derivatives (`atoms.forces`, `graphs.virial`). `Derivative(model.energy, wrt=...)`
+composed outside is the same op. MACE-LES and Polar carry a graph-level
+electrostatic term: their `graphs.energy` is the sum of `atoms.energy` plus
+that term.
 
 ## Choose precision before construction and compilation
 
@@ -10,33 +33,30 @@ import torch
 from molix import config
 from molzoo.mace import MaceMatpes
 
-# Strict fp32 model calculation; does not enable TF32 GEMMs.
-config.set_precision("fp32", matmul_precision="highest")
+# fp32 parameters; the matmul policy stays PyTorch's default (no TF32).
+config.set_precision("fp32")
 model = MaceMatpes.load(
     "matpes_r2scan_cueq_state.pt",
     config="matpes_r2scan_config.json",
     energy_dtype=torch.float64,
-    wrt=("atoms.pos",),          # forward writes graphs.energy and atoms.forces
+    input_dtype=torch.float32,   # fp64 MD state drives the fp32 model
+    wrt=("atoms.pos",),
 ).cuda().eval()
 model.requires_grad_(False)  # inference only; leave enabled for training
-model.configure_input_dtype(torch.float32)
 ```
 
-The caller may keep positions, velocities and cell in float64. The model
-boundary casts geometry differentiably; forces and virial still differentiate
-the original MD state. `energy_core` is the lower-level, already-cast kernel;
-use `forward` (the `molix.autograd.Derivative` built from `wrt=`) or the
-Molpot interface for the precision boundary. After one eager forward,
-`Compiler(...)(model)` compiles the whole op. Choose all precision settings
-first.
+The caller may keep positions, velocities and cell in float64. `energy` casts
+the geometry to `input_dtype` at its top, differentiably: forces and virial
+still differentiate the original MD state and come back at its dtype. After
+one eager forward, `Compiler(...)(model)` compiles the whole op. Choose all
+precision settings first.
 
 | Control | Meaning |
 | --- | --- |
 | `config.set_precision("fp64")` before loading | Construct parameters in fp64; `fp32` selects fp32 parameters |
-| `matmul_precision="highest"` | Strict fp32 matmul; `high` allows reduced internal precision |
-| `energy_dtype=torch.float64` (default) | Sum graph energies in fp64, preserving small interactions alongside large atomic baselines |
+| `energy_dtype=torch.float64` (default) | Accumulate per-atom and graph energies in fp64, preserving small interactions alongside large atomic baselines |
 | `energy_dtype=torch.float32` / `None` | Explicit fp32 / model-dtype accumulation |
-| `configure_input_dtype(torch.float32)` | fp32 model inputs with independently chosen MD-state dtype |
+| `input_dtype=torch.float32` | fp32 model inputs with an independently chosen MD-state dtype |
 
 fp64 accumulation does **not** turn an fp32 model into an fp64 model. Casting
 stored fp32 weights or coordinates to fp64 cannot recover lost digits. For a
@@ -46,20 +66,23 @@ GPU scatter reductions. Assess fixed-coordinate repeat spread and long NVE
 energy drift with declared tolerances; NPT thermostat/barostat runs cannot
 establish energy conservation.
 
-Both runners expose `--precision`, `--potential-precision`,
-`--energy-precision {model,fp32,fp64}` and `--matmul-precision {highest,high}`:
+Both runners expose `--precision {fp64,fp32}`, `--potential-precision` and
+`--energy-precision {model,fp32,fp64}`; the MatPES runner adds
+`--autocast-bf16`, `--compile` and `--trajectory-precision {state,fp32,fp64}`,
+the Polar runner `--config`, `--compile-core` and `--benchmark-repeats` /
+`--benchmark-warmup` / `--benchmark-output`. The fp32 matmul policy is not a
+flag; it stays PyTorch's default.
 
 ```sh
 # MatPES NVE reference; choose skin consistent with half the cell width.
 python scripts/matpes_port/run_nve.py --system system.pt \
   --weights-dir weights --out nve.pt --precision fp64 \
-  --potential-precision fp64 --energy-precision fp64 --matmul-precision highest
+  --potential-precision fp64 --energy-precision fp64
 
 # Polar bounded E/F/virial benchmark, fp64 state with strict fp32 model.
 python scripts/polar_port/run_npt.py --system peo_box.pt \
   --cueq-state polar_cueq_state.pt --config polar_config.json \
   --precision fp64 --potential-precision fp32 --energy-precision fp64 \
-  --matmul-precision highest --cueq-target-block-size 0 \
   --compile-core --benchmark-repeats 5
 ```
 
@@ -88,24 +111,32 @@ retain the original/converted hashes, converter versions and numerical parity
 record. That conversion environment may require upstream packages; inference
 and training in MolNex do not.
 
-For a verified local Polar dump with architecture metadata:
+`MaceXxx.load(path, config=None, *, wrt, energy_dtype, input_dtype)` is three
+steps every product spells the same way, and a caller may compose them
+itself: `MaceArchive().read(path, config)` returns the weights and a typed
+`MaceOfficialConfig`; the family's spec builds itself from that config with
+`from_official` (holding the family's rejection rules — a MatPES config does
+not build a MACE-OFF model); `CheckpointRemap(keys, skip=MACE_SKIP).load`
+renames the weights in. A pickled Polar dump whose weights sit in a separate
+converted state is the composed form:
 
 ```python
-from molzoo.mace import MacePolar
+from molzoo.checkpoint import CheckpointRemap
+from molzoo.mace import MACEPolarSpec, MacePolar
+from molzoo.mace.checkpoint import MACE_SKIP, polar_keys
+from molzoo.mace.utils import MaceArchive
 
-model = MacePolar.load(
-    "MACE-POLAR-1-M.model",
-    converted_weights="polar_cueq_state.pt",
-    trusted=True,
-    energy_dtype=torch.float64,
-)
+state, cfg = MaceArchive(converted_weights="polar_cueq_state.pt").read("MACE-POLAR-1-M.model")
+model = MacePolar(MACEPolarSpec.from_official(cfg), energy_dtype=torch.float64)
+CheckpointRemap(polar_keys, on_unexpected="return", skip=MACE_SKIP).load(model, state)
 ```
 
-Only converted weights are installed. Raw e3nn contraction weights are rejected:
+Only converted weights are installed. Unconverted (pre-cuEquivariance) contraction weights are rejected:
 concatenating them is not the required CG basis projection. Nothing in molnex
-converts an e3nn basis — run the version-pinned official converter out of tree.
-Pickle loading requires `trusted=True`; import stubs are not a security sandbox.
-Use tensor-only state plus JSON for deployment from untrusted sources.
+converts the upstream basis — run the version-pinned official converter out of tree.
+Pickled modules are read through the shared stub unpickler
+(`molzoo.checkpoint.OfficialArchive`); it is an import aid, not a sandbox —
+read only archives you trust.
 
 Loading preflights missing parameters, key collisions and layout mismatches
 before writing tensors. Only scalar ranks and cuEq Linear's singleton shared

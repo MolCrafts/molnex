@@ -1,43 +1,55 @@
 <!-- mol:note:topic:learnable-classical-ff -->
-# Learnable classical FF — ForceField path (2026-08-20)
+# Learnable classical FF (rules current as of 2026-10-06)
 
 ## Rule (binding)
 
-### OOP, single responsibility, no glue
+**Superseded rules.** The 2026-08-20 "ForceField path" — `Parameterizer` →
+filled `ForceField` → `ff.to_potentials()`, with `ForceFieldPredictions` as the
+model→task mapping — was retired by the operator ruling of 2026-09-29.
+`Parameterizer`, `ForceFieldPredictions`, `RondoForceField` and `RondoPotential`
+are deleted. Do not reintroduce them; the sections below that still name them
+are history.
 
-| Type | Owns |
-|------|------|
-| `ForceField` | **is** `molpy.ForceField`; styles + torch param tables; `def_*style`, `with_params`, **override** `to_potentials()`, `realize(system)`, `to_ir()` |
-| `OPLSAAForceField` | `ForceField` subclass; harmonic bond/angle, OPLS `k1..k4` dihedral, periodic improper, LJ + Coulomb; default `f14=0.5` |
-| `Potentials` | torch `BasePotential`; `calc_energy` / `calc_forces` / `forward` writes `graphs.energy` + `atoms.forces` |
-| `Parameterizer` | encoder + heads → **returns ForceField**; no energy API; no `project` |
-| `ForceFieldPredictions` | one hop model→per-task mapping (`energy` / `forces` / `hessian` / `q`) |
-| `LammpsWriter` | TensorDict → molpy `Frame`; `ff.clone().realize(system)` then `molpy.io` |
-| `molpy.io.write_smarts` | graph → local SMARTS (molrs `write_local_smarts`; io surface) |
-| `Condenser` | one type per SMARTS key; mean prototype; fail if the bucket is too wide |
+**Current shape (2026-10-11, plan `rondo-byteff-squishy-iverson`).**
+`molzoo.rondo.Rondo(forcefield, spec, wrt=("atoms.pos",))` is shaped like every
+other molzoo model: `forward = Derivative(energy, wrt)`. The force field **is**
+the Hamiltonian — a molpy `ForceField` (molrs IR, LAMMPS conventions: `K`
+without ½, degrees) declares the styles, cutoff, mixing, Coulomb constant and
+special bonds once; `molpot.potentials.collection.Potentials.from_forcefield(ff)`
+is the one factory (A3; `molpot.instantiate` is gone). Rondo adds `ChemEncoder`
+(ByteFF input channels: formal charge, total charge, ring connectivity,
+smallest ring; bond order, in-ring), `Hybridization`, and one head per open
+parameter (`molpot.heads.classical`: `BondHead`, `AngleHead`, `PeriodicHead`,
+`CvffHead`, `LJHead`; charges `molpot.charge.AtomicChargeModel`). Three
+primitives — `tables(frame)`, `energy(frame, tables=None, styles=None)`
+(`styles=` sums a named subset: ByteFF `calc_terms`, for the bonded strain at a
+minimum and the pair force alone), `partial_hessian(frame, tables=None)` — and
+nothing about training stages:
+no `outputs=`, `trainable=`, `energy_terms=`, `param_groups`, no objective
+views (user: "Rondo 和其他模型的 __init__ 不太一样啊"). Which loss trains which
+parameters is `molix.core.steps.JointObjective(trainable=)`: the step detaches
+the tables its loss does not name between `tables` and `energy`; the optimizer
+is `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
+(`JointTrainStep` / `JointDataModule`, one batch per source per step, weighted
+sum, one backward). Objectives on one source name it (`JointObjective(source=)`)
+and share its batch and **one** `tables` prediction per step — one traced
+region per source, each objective keeping its own subset; a loss on a predicted
+table itself (MBIS charges) uses `output="tables"` and prices no energy
+(2026-10-12). Spec: `src/molzoo/specs/rondo.md`.
 
-No `to_molpy()`. No `ForceField.class_i()` / `ForceField.opls()` classmethod façades.
-No second ForceField type for SMARTS (`SymbolicForceField` is hand-bind inspect only).
-No free-function helpers as public API. No `fill` / composer façade as the user path.
-No energy method on `Parameterizer` — energy is always on `Potentials`.
+Data contract the model needs (MolHub writes it for THEMol): `atoms.formal_charge`,
+`ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`;
+`bonds.bond_type`, `in_ring`; `impropers` as **three cyclic rows per centre**
+(ByteFF's k/3); `graphs.total_charge`.
 
-### User path
-
-```python
-from molpot import Parameterizer, OPLSAAForceField, ForceFieldPredictions
-
-ff = OPLSAAForceField()
-model = Parameterizer(encoder, template=ff, bond_head=..., ...)
-ff_t = model(batch)                          # filled OPLSAAForceField
-E = ff_t.to_potentials().calc_energy(batch)  # torch override
-pred = ForceFieldPredictions(model, keys=("energy", "forces"))
-ff_t.clone().realize(batch)                  # native types for molpy.io
-envs = [[(write_smarts(mol, b.itom), write_smarts(mol, b.jtom)) for b in mol.bonds]]
-result = Condenser().merge(
-    [ff_t.params("bonds")], interaction=InteractionClass.BOND, environments=envs,
-)
-# register types with molpy: style.def_type(..., **rec.prototype)
-```
+**Deleted 2026-10-11:** `molpot.composition.mm_heads`, `molpot.classical`
+(the EvenTorsion/HarmonicBond/... function modules — the molrs-style
+potentials in `molpot.potentials` replace them), `molpot.instantiate`,
+`Rondo.param_groups` / `REFERENCE_SHIFTS` / `OUTPUT_COLUMNS` whitelists
+(2026-10-13: also `Rondo._index` / `table_names` — the bonded potentials own
+their term index, `Rondo.table_columns()` is what the heads produce, and the
+label columns are kept by `molix.frame.beside_labels`).
+`LJParameterHead` stays only for `PotentialComposer` (Sonata).
 
 ### Topology belongs to the molecule, not the conformer (2026-09-17)
 

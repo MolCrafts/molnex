@@ -1,7 +1,7 @@
 # MolRep
 
 MolRep is the representation learning package in MolNex. Use it for molecular
-embeddings, radial and angular bases, equivariant interaction blocks, pooling,
+embeddings, radial and angular bases, equivariant interaction blocks,
 and readout primitives.
 
 ## Tutorials

@@ -140,12 +140,13 @@ _COVALENT_RADII: tuple[float, ...] = (
 )
 
 
-def covalent_radii(max_z: int = MAX_Z) -> torch.Tensor:
+def covalent_radii(max_z: int = MAX_Z, *, dtype: torch.dtype | None = None) -> torch.Tensor:
     """Build a dense ``Z``-indexed covalent-radius table.
 
     Args:
         max_z: Largest atomic number to include; the table has ``max_z + 1``
             rows so ``table[Z]`` is valid for ``Z`` in ``[0, max_z]``.
+        dtype: Floating dtype of the table (the owning module's).
 
     Returns:
         Covalent radii in Angstrom ``(max_z + 1,)``; index 0 holds a
@@ -156,4 +157,5 @@ def covalent_radii(max_z: int = MAX_Z) -> torch.Tensor:
     """
     if not 1 <= max_z <= MAX_Z:
         raise ValueError(f"max_z must be in [1, {MAX_Z}], got {max_z}")
-    return torch.tensor(_COVALENT_RADII[: max_z + 1], dtype=config.ftype)
+    dtype = config.ftype if dtype is None else dtype  # transitional: goes with molix.config (2c)
+    return torch.tensor(_COVALENT_RADII[: max_z + 1], dtype=dtype)

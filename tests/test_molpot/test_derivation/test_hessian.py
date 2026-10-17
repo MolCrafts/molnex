@@ -28,7 +28,7 @@ import pytest
 import torch
 
 from molpot.derivation.hessian import HessianDerivation
-from molpot.potentials import BondHarmonic
+from molpot.potentials.bonds import BondHarmonic
 from tests.test_molpot.test_derivation.conftest import KernelToyPotential, kernel_toy_batch
 
 #: Harmonic dimer force constant (energy/Å²) and equilibrium length (Å).

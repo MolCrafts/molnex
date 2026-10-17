@@ -24,8 +24,8 @@ from molix.autograd import Derivative
 from molix.compile import Compiler
 from molzoo.mace import MaceMatpes
 
-model = Derivative(MaceMatpes(...), wrt=("atoms.pos",))                 # E, F = -dE/dpos
-npt   = Derivative(pots,            wrt=("atoms.pos", "graphs.strain"))  # + W = dE/dε
+model = Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))                 # E, F = -dE/dpos
+npt   = Derivative(pots.energy,            wrt=("atoms.pos", "graphs.strain"))  # + W = dE/dε
 frame = model(frame)      # graphs.energy, atoms.forces[, graphs.virial] written on the frame
 model = Compiler(fullgraph=True)(model)                                  # the only compile spelling
 ```
@@ -91,7 +91,7 @@ input, which dynamo accepts — so a caller that wants the whole training step
 as one graph on stock torch marks the columns before the traced region:
 
 ```python
-op = Derivative(pot, wrt=("atoms.pos", "graphs.strain"))
+op = Derivative(pot.energy, wrt=("atoms.pos", "graphs.strain"))
 compiled = Compiler(fullgraph=True)(op)
 frame = compiled(op.mark_leaves(frame))      # 1 graph, 0 breaks, outputs attached
 ```
@@ -115,17 +115,17 @@ in `__init__`, so these are one code path:
 
 ```python
 pot = MaceMatpes(..., wrt=("atoms.pos",))       # pot(frame) writes E and F
-pot = Derivative(MaceMatpes(...), wrt=("atoms.pos",))   # the same op, composed outside
+pot = Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))   # the same op, composed outside
 pot = PiNetPotential(...)                        # wrt=() — energy only
 
 pots = ff.to_potentials(wrt=("atoms.pos",))      # the classical container, forces on
-npt = Derivative(ff.to_potentials(), wrt=("atoms.pos", "graphs.strain"))
+npt = Derivative(ff.to_potentials().energy, wrt=("atoms.pos", "graphs.strain"))
 ```
 
 `Potentials.calc_energy(frame)` is the total-energy tensor (`(B,)`, `()` for
 one molecule); `Potentials.energy(frame)` stores it at `graphs.energy`; there
 is no `calc_forces`, `calc_energy_forces` or `calc_energy_forces_virial`.
-`molix.md.MD` composes `Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))`
+`molix.md.MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))`
 once per run and applies `set_compiler`'s compiler to it after one eager
 evaluation (see the MD user guide).
 

@@ -17,17 +17,25 @@ from molix import config
 from molrep.chem.context import BondContext
 
 
-def _mlp(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
-    """Two-layer SiLU MLP baked to project float dtype."""
+def _mlp(in_dim: int, hidden_dim: int, out_dim: int, *, dtype: torch.dtype) -> nn.Sequential:
+    """Two-layer SiLU MLP at ``dtype``."""
     return nn.Sequential(
-        nn.Linear(in_dim, hidden_dim, dtype=config.ftype),
+        nn.Linear(in_dim, hidden_dim, dtype=dtype),
         nn.SiLU(),
-        nn.Linear(hidden_dim, out_dim, dtype=config.ftype),
+        nn.Linear(hidden_dim, out_dim, dtype=dtype),
     )
 
 
 class ChemGraphBlock(nn.Module):
     """One covalent-graph hop: update ``h_bond`` then residual-update ``h_atom``.
+
+    **Pre-norm.** The block reads ``LayerNorm(h_atom)`` and ``LayerNorm(h_bond)``,
+    never the raw streams. Without it the residual sum and the bond mix compound
+    over hops: a Rondo hessian stage (large tier, 8 hops, lr 1e-3) grew the
+    feature RMS from ~1 to 1e3-1e4, which pushed every head into its flat
+    region and left the model at a zero gradient it could not leave. With the
+    norm, each hop's update is bounded by its own weights, whatever the stream
+    has accumulated.
 
     Bond features stay endpoint-symmetric via a private :class:`BondContext`.
     Each undirected ``h_bond`` is scattered onto both endpoints. With
@@ -41,8 +49,6 @@ class ChemGraphBlock(nn.Module):
             ``atom_dim``. Also forwarded to the private :class:`BondContext`.
         local_attention: If ``True``, neighborhood softmax over covalent
             incident bonds. Default ``False`` (plain ``index_add_`` sum).
-        num_bond_types: Bond-type table size; ``0`` disables type
-            conditioning.
     """
 
     def __init__(
@@ -52,9 +58,12 @@ class ChemGraphBlock(nn.Module):
         bond_dim: int,
         hidden_dim: int | None = None,
         local_attention: bool = False,
-        num_bond_types: int = 0,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         if atom_dim <= 0 or bond_dim <= 0:
             raise ValueError("atom_dim and bond_dim must be positive")
         self.atom_dim = int(atom_dim)
@@ -65,11 +74,13 @@ class ChemGraphBlock(nn.Module):
             atom_dim=self.atom_dim,
             bond_dim=self.bond_dim,
             hidden_dim=hidden_dim,
-            num_bond_types=num_bond_types,
+            dtype=dtype,
         )
-        self.atom_mlp = _mlp(self.bond_dim, hid, self.atom_dim)
+        self.atom_norm = nn.LayerNorm(self.atom_dim, dtype=dtype)
+        self.bond_norm = nn.LayerNorm(self.bond_dim, dtype=dtype)
+        self.atom_mlp = _mlp(self.bond_dim, hid, self.atom_dim, dtype=dtype)
         if self.local_attention:
-            self.score = nn.Linear(self.bond_dim, 1, dtype=config.ftype)
+            self.score = nn.Linear(self.bond_dim, 1, dtype=dtype)
         else:
             self.score = None
 
@@ -79,7 +90,7 @@ class ChemGraphBlock(nn.Module):
         h_bond: torch.Tensor,
         atomi: torch.Tensor,
         atomj: torch.Tensor,
-        bond_type: torch.Tensor | None = None,
+        extra: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply one covalent hop.
@@ -89,7 +100,8 @@ class ChemGraphBlock(nn.Module):
             h_bond: Undirected bond features ``(E, bond_dim)``.
             atomi: Endpoint i indices ``(E,)``.
             atomj: Endpoint j indices ``(E,)``.
-            bond_type: Optional bond types ``(E,)``.
+            extra: Optional ``(E, bond_dim)`` channel sum of the extra bond
+                columns, re-injected at every hop.
             mask: Optional live-bond mask ``(E,)``. Dummy valence rows
                 (``MoleculePadder``) must not scatter onto ghost atoms.
 
@@ -98,11 +110,11 @@ class ChemGraphBlock(nn.Module):
             read positions.
         """
         h_bond = self.bond_context(
-            h_atom,
+            self.atom_norm(h_atom),
             atomi,
             atomj,
-            bond_type=bond_type,
-            h_bond=h_bond,
+            extra=extra,
+            h_bond=self.bond_norm(h_bond),
         )
         if mask is not None:
             h_bond = h_bond * mask.to(dtype=h_bond.dtype).unsqueeze(-1)

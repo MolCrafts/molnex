@@ -37,7 +37,7 @@ from itertools import permutations
 
 import torch
 
-__all__ = ["PartialHessianPairs", "TermHessian", "TERM_WIDTHS"]
+__all__ = ["PartialHessianPairs", "TermHessian", "TERM_WIDTHS", "slot_choices"]
 
 #: Atoms each Class-I bonded term couples, by batch namespace.
 TERM_WIDTHS: dict[str, int] = {
@@ -46,6 +46,20 @@ TERM_WIDTHS: dict[str, int] = {
     "propers": 4,
     "impropers": 4,
 }
+
+
+def slot_choices(namespace: str) -> tuple[tuple[int, int], ...]:
+    """Ordered ``(i, j)`` slots a term of *namespace* writes onto its block.
+
+    The same set for every molecule. A row with no terms of that kind still
+    carries the columns, empty, so a batch has one schema.
+    """
+    width = TERM_WIDTHS[namespace]
+    return tuple(
+        (i, j)
+        for i, j in permutations(range(width), 2)
+        if not (namespace == "propers" and abs(i - j) >= 3)
+    )
 
 
 class PartialHessianPairs:
@@ -80,11 +94,9 @@ class PartialHessianPairs:
                     f"{namespace} index must be ({width}, n_terms); got {tuple(index.shape)}"
                 )
             terms = index.T.tolist()
-            per_choice: dict[tuple[int, int], list[int]] = {}
-            for i, j in permutations(range(width), 2):
-                if namespace == "propers" and abs(i - j) >= 3:
-                    continue
-                per_choice[(i, j)] = []
+            per_choice: dict[tuple[int, int], list[int]] = {
+                choice: [] for choice in slot_choices(namespace)
+            }
             for atoms in terms:
                 for (i, j), record in per_choice.items():
                     key = (int(atoms[i]), int(atoms[j]))

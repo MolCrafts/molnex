@@ -1,504 +1,182 @@
 # Allegro Specification
 
-This page is the implementation contract for `molzoo.Allegro`. It is not a
-tutorial; use the MolZoo user guide for the theory narrative and worked
-examples. The purpose of this spec is to make the encoder's public behavior,
-mathematics, reference alignment, and validation obligations explicit.
+Implementation contract for `molzoo.allegro`: the MolNex port of the mainline
+Allegro energy model (`nequip` ≥ 0.7 framework) that loads official
+`.nequip.zip` packages.
 
 | Field | Value |
 |-------|-------|
 | Module | `molzoo.allegro` |
-| Entry point | `Allegro` (config `AllegroSpec`) |
-| Paper | Musaelian et al., *Learning Local Equivariant Representations for Large-Scale Atomistic Dynamics*, Nature Communications 14, 579 (2023) |
-| arXiv | https://arxiv.org/abs/2204.05249 |
-| DOI | https://doi.org/10.1038/s41467-023-36329-y |
-| Reference implementation | `mir-group/allegro::Allegro_Module` plus `mir-group/nequip` edge/MLP primitives |
-| Spec status | stable for the MolNex API; upstream commit pin still needs a fresh audit |
+| Entry points | `AllegroEncoder(spec)` (body), `AllegroPotential(spec, wrt=())` (energy model), `AllegroPotential.load(path)` |
+| Config | `AllegroSpec` (torch-free) |
+| Paper | Musaelian et al., *Learning Local Equivariant Representations for Large-Scale Atomistic Dynamics*, Nat. Commun. 14, 579 (2023) — https://arxiv.org/abs/2204.05249 |
+| Reference implementation | `nequip-allegro` 0.8.3 + `nequip` 0.19.1 (PyPI); `Allegro-OAM-L:0.1` built with allegro 0.7.1 (same mathematics) |
+| Spec status | partial — §2/§3/§5 transcribed from the reference; official parity measured (§7.4) |
 
 ## 1. Scope
 
-`molzoo.Allegro` is a strictly local equivariant encoder. It reads atom types
-and directed edge geometry, then writes scalar edge features. Its receptive
-field is exactly the neighbor-list cutoff `r_max`; increasing `num_layers`
-increases tensor-product depth, not the spatial radius.
-
-It does not own:
-
-- neighbor-list construction
-- graph energy prediction
-- pair-energy scale and shift
-- force or stress gradients
-- training loops or losses
-
-Those are owned by `molix` and `molpot`.
-
-The optional tensor-track output is still representation data, not a physical
-observable. It is used by downstream equivariant heads such as multipole
-readouts.
-
-## 2. Public Contract
-
-### 2.1 Required Inputs
-
-| Direction | TensorDict path | Shape | Dtype | Contract |
-|-----------|------------------|-------|-------|----------|
-| In | `("atoms", "Z")` | `(N,)` | `int64` | Atomic numbers used by the center and neighbor embedding tables. |
-| In | `("pairs", "pair_index")` | `(E, 2)` | `int64` | Directed edges; column 0 is source/center `i`, column 1 is neighbor `j`. |
-| In | `("pairs", "pair_diff")` | `(E, 3)` | float | Edge vector `pos[j] - pos[i]`. |
-| In | `("pairs", "pair_dist")` | `(E,)` | float | Edge distance `||edge_diff||`. |
-
-### 2.2 Outputs
-
-| Direction | TensorDict path | Shape | Written when | Contract |
-|-----------|------------------|-------|--------------|----------|
-| Out | `("pairs", "edge_features")` | `(E, F * (L + 1))` | always | DenseNet scalar stack `[f_0; f_1; ...; f_L]`. |
-| Out | `("pairs", "edge_tensor_features")` | `(E, tensor_track_irreps.dim)` | `expose_tensor_track=True` | Final equivariant tensor track in `ir_mul` layout. |
-
-Here `F = num_scalar_features` and `L = num_layers`. The encoder exposes
-`output_dim = F * (L + 1)` for readout construction.
-
-The module may add the output keys above. It must not overwrite input keys,
-write `("graphs", *)`, compute gradients, or attach losses.
-
-## 3. Forward Contract
-
-### 3.1 Notation
-
-| Symbol | Meaning | Code anchor |
-|--------|---------|-------------|
-| `N` | number of atoms | `td["atoms", "Z"].shape[0]` |
-| `E` | number of directed edges | `td["pairs", "pair_index"].shape[0]` |
-| `F` | scalar feature width | `num_scalar_features` |
-| `U` | tensor channel multiplicity | `num_tensor_features` |
-| `L` | Allegro layer count | `num_layers` |
-| `B` | number of Bessel radial functions | `num_bessel` |
-| `l_max` | maximum angular order | `l_max` |
-| `r_cut` | radial cutoff | `r_max` |
-| `d_type` | two-body type embedding width | `type_embed_dim` |
-| `n_sh` | number of spherical-harmonic irreps | `l_max + 1` |
-| `d_sh` | spherical-harmonic vector width | `sum_l (2l + 1)` |
-| `W` | environment-weight width | `n_sh * U` |
-| `N(i)` | directed neighbors of source atom `i` | `{k : (i, k) in edge_index}` |
-
-### 3.2 Radial and Type Embedding
-
-For each directed edge `(i, j)`, the radial basis is
-
-$$
-B_n(r_{ij}) =
-\operatorname{sinc}\!\left(\frac{n r_{ij}}{r_\mathrm{cut}}\right) n,
-\qquad n = 1,\ldots,B .
-$$
-
-The polynomial cutoff envelope is
-
-$$
-u(r) =
-1
-- \frac{(p+1)(p+2)}{2}\left(\frac{r}{r_\mathrm{cut}}\right)^p
-+ p(p+2)\left(\frac{r}{r_\mathrm{cut}}\right)^{p+1}
-- \frac{p(p+1)}{2}\left(\frac{r}{r_\mathrm{cut}}\right)^{p+2},
-$$
-
-for `r <= r_cut`, and zero outside. MolNex applies the cutoff once:
-
-$$
-\tilde{\mathbf{B}}(r_{ij}) =
-\mathbf{B}(r_{ij}) u(r_{ij}) .
-$$
-
-The ordered center-neighbor type embedding is
-
-$$
-\mathbf{t}_{ij} =
-\left[
-e_\mathrm{center}(Z_i);
-e_\mathrm{neighbor}(Z_j)
-\right]
-\in \mathbb{R}^{d_\mathrm{type}} .
-$$
-
-The complete two-body scalar embedding is the Hadamard product
-
-$$
-\mathbf{h}_{ij} =
-\mathbf{t}_{ij}
-\odot
-W_\mathrm{basis}\tilde{\mathbf{B}}(r_{ij})
-\in \mathbb{R}^{d_\mathrm{type}} .
-$$
-
-There is no extra scalar MLP between `ProductTypeEmbedding` and the Allegro
-layer loop. `h_ij` feeds both the initial tensor-track projection and the
-first scalar/environment projection.
-
-| Quantity | Shape | Code anchor |
-|----------|-------|-------------|
-| `B(r)` | `(E, B)` | `Allegro.forward`, Bessel block |
-| `u(r)` | `(E,)` | `PolynomialCutoff` |
-| `type_embed` | `(E, d_type)` | `center_embed`, `neighbor_embed` |
-| `h_ij` | `(E, d_type)` | `twobody_scalar_embed` |
-
-### 3.3 Initial Tensor Track
-
-Single-channel spherical harmonics are computed from the edge vector:
-
-$$
-\mathbf{Y}_{ij} = Y(\hat{\mathbf{r}}_{ij}) \in \mathbb{R}^{d_\mathrm{sh}} .
-$$
-
-The initial tensor-track weights are predicted directly from `h_ij`:
-
-$$
-\mathbf{w}^{(0)}_{ij}
-=
-W_{\mathrm{env},0}\mathbf{h}_{ij}
-\in \mathbb{R}^{W}.
-$$
-
-`MakeWeightedChannels` broadcasts these weights over the spherical-harmonic
-basis:
-
-$$
-V^{(0)}_{ij,(l,m,c)}
-=
-Y^l_m(\hat{\mathbf{r}}_{ij})
-w^{(0),(l,c)}_{ij},
-\qquad c=1,\ldots,U .
-$$
-
-The tensor track uses `ir_mul` layout: for each irrep, the `m` axis is outer
-and channel is inner-fast.
-
-| Quantity | Shape | Code anchor |
-|----------|-------|-------------|
-| `Y(r_hat)` | `(E, d_sh)` | `spherical_harmonics` |
-| `w^(0)` | `(E, W)` | `env_embed_linear` |
-| `V^(0)` | `(E, d_sh * U)` | `_make_weighted_channels` |
-
-### 3.4 First Scalar and Environment Weights
-
-The first projection emits the initial scalar feature slice and the
-environment weights for layer 1 in one bias-free linear map:
-
-$$
-\left[
-\mathbf{f}^{(0)}_{ij};
-\mathbf{w}^{(1)}_{ij}
-\right]
-=
-W_\mathrm{first}\mathbf{h}_{ij},
-\qquad
-\mathbf{f}^{(0)}_{ij}\in\mathbb{R}^{F},
-\quad
-\mathbf{w}^{(1)}_{ij}\in\mathbb{R}^{W}.
-$$
-
-The accumulated scalar list starts as
-
-$$
-\mathrm{accumulated}_{ij} =
-\left[\mathbf{f}^{(0)}_{ij}\right].
-$$
-
-| Quantity | Shape | Code anchor |
-|----------|-------|-------------|
-| `f^(0)` | `(E, F)` | `first_layer_env_embed_projection[..., :F]` |
-| `w^(1)` | `(E, W)` | `first_layer_env_embed_projection[..., F:]` |
-
-### 3.5 Allegro Layer Update
-
-For layer `ell = 1, ..., L`, current per-edge environment weights generate a
-weighted spherical-harmonic edge embedding:
-
-$$
-\mathbf{E}^{(\ell)}_{ij}
-=
-\operatorname{MakeWeightedChannels}
-\left(
-Y(\hat{\mathbf{r}}_{ij}),
-\mathbf{w}^{(\ell)}_{ij}
-\right)
-\in \mathbb{R}^{d_\mathrm{sh}U}.
-$$
-
-The source environment is a normalized sum over directed edges out of `i`:
-
-$$
-\bar{\mathbf{E}}^{(\ell)}_i
-=
-\frac{1}{\sqrt{\overline{|N|}}}
-\sum_{k\in N(i)}
-\mathbf{E}^{(\ell)}_{ik}.
-$$
-
-The tensor track is updated by one per-channel Clebsch-Gordan tensor product:
-
-$$
-V^{(\ell)}_{ij}
-=
-\operatorname{TP}_\ell
-\left(
-V^{(\ell-1)}_{ij},
-\bar{\mathbf{E}}^{(\ell)}_i
-\right).
-$$
-
-The descriptor is the Allegro `u,iu,ju,ku+ijk` contraction. It directly targets
-the layer's pruned output irreps. There is no post-TP equivariant linear layer.
-
-Valid Clebsch-Gordan paths satisfy
-
-$$
-|l_1 - l_2| \le l_3 \le l_1 + l_2,
-\qquad
-p_3 = p_1 p_2 .
-$$
-
-The invariant feedback slice is the scalar block of the tensor product:
-
-$$
-\mathbf{I}^{(\ell)}_{ij}
-=
-\operatorname{scalar}
-\left(
-V^{(\ell)}_{ij}
-\right)
-\in \mathbb{R}^{U}.
-$$
-
-The latent MLP consumes the DenseNet scalar history plus the new invariants:
-
-$$
-\left[
-\mathbf{f}^{(\ell)}_{ij};
-\mathbf{w}^{(\ell+1)}_{ij}
-\right]
-=
-\operatorname{MLP}^{(\ell)}
-\left(
-\left[
-\mathbf{f}^{(0)}_{ij};
-\ldots;
-\mathbf{f}^{(\ell-1)}_{ij};
-\mathbf{I}^{(\ell)}_{ij}
-\right]
-\right),
-$$
-
-for `ell < L`. On the last layer, the MLP emits only
-`\mathbf{f}^{(L)}_{ij}` because no next environment weights are needed.
-
-| Quantity | Shape | Code anchor |
-|----------|-------|-------------|
-| `E_ij^(ell)` | `(E, d_sh * U)` | `_make_weighted_channels(tensor_basis, env_w, ...)` |
-| `Ebar_i^(ell)` | `(N, d_sh * U)` | `scatter_add_` followed by `avg_num_neighbors_inv_sqrt` |
-| `V^(ell)` | `(E, dim(ir_out_ell))` | `EquivariantPolynomialTP` |
-| `I^(ell)` | `(E, U)` | first scalar block of `new_tensor` |
-| `f^(ell)` | `(E, F)` | `latents[layer][..., :F]` |
-| `w^(ell+1)` | `(E, W)` | `latents[layer][..., F:]`, omitted on last layer |
-
-### 3.6 Final Outputs
-
-The scalar encoder output is
-
-$$
-\mathrm{edge\_features}_{ij}
-=
-\left[
-\mathbf{f}^{(0)}_{ij};
-\mathbf{f}^{(1)}_{ij};
-\ldots;
-\mathbf{f}^{(L)}_{ij}
-\right]
-\in
-\mathbb{R}^{F(L+1)}.
-$$
-
-When `expose_tensor_track=False`, the last layer is pruned to scalar output
-irreps because no downstream equivariant tensor output is requested. When
-`expose_tensor_track=True`, the final layer keeps the tensor irreps and writes
-that final tensor track to `("pairs", "edge_tensor_features")` without changing
-`edge_features`.
-
-| Quantity | Shape | Code anchor |
-|----------|-------|-------------|
-| `edge_features` | `(E, F * (L + 1))` | `torch.cat(accumulated, dim=-1)` |
-| `output_dim` | `F * (L + 1)` | `self.output_dim` |
-| `edge_tensor_features` | `(E, tensor_track_irreps.dim)` | `expose_tensor_track=True` branch |
-
-### 3.7 Properties
-
-| Transformation | Property |
-|----------------|----------|
-| Translation `r_i -> r_i + t` | invariant, because only edge vectors and distances are used. |
-| Rotation/reflection `r_i -> R r_i`, `R in O(3)` | scalar output is invariant; internal tensor track is equivariant. |
-| Atom relabeling | equivariant with edge endpoints; graph-level readouts must aggregate consistently. |
-| Cutoff limit | `edge_features -> 0` and first distance derivative vanishes at `r_cut` for polynomial exponent `p >= 2`. |
-
-## 4. Configuration Contract
-
-| `AllegroSpec` field | Meaning | Default | Constraint / note |
-|---------------------|---------|---------|-------------------|
-| `num_elements` | atomic-number embedding table size | required | `> 0` |
-| `num_scalar_features` | scalar width `F` | `64` | `> 0` |
-| `num_tensor_features` | tensor channel multiplicity `U` | `16` | `> 0` |
-| `r_max` | radial cutoff `r_cut` | required | `> 0` |
-| `num_bessel` | radial basis count `B` | `8` | `> 0` |
-| `l_max` | maximum angular order | `2` | `>= 0` |
-| `num_layers` | Allegro depth `L` | `2` | `> 0` |
-| `poly_p` | polynomial cutoff exponent | `6` | `>= 1` |
-| `type_embed_dim` | width of `h_ij` | `64` | must be even; split center/neighbor |
-| `latent_mlp_depth` | hidden depth in each layer latent MLP | `2` | `>= 0` |
-| `latent_mlp_width` | hidden width in each layer latent MLP | `128` | `> 0` |
-| `latent_activation` | latent MLP nonlinearity | `nn.SiLU` | `None` means deep linear |
-| `avg_num_neighbors` | dataset-level average neighbor count | required | compute once from training data |
-| `expose_tensor_track` | additionally write final equivariant tensor track | `False` | required by equivariant downstream heads |
-
-## 5. Reference Crosswalk
-
-| Concept | Reference implementation | MolNex anchor | Status |
-|---------|--------------------------|---------------|--------|
-| Bessel edge length encoding | `nequip` Bessel edge encoding | `Allegro.forward`, radial block | matched |
-| Polynomial cutoff | `nequip` polynomial cutoff | `molrep.embedding.cutoff.PolynomialCutoff` | matched |
-| Product type embedding | Allegro `ProductTypeEmbedding` | `center_embed`, `neighbor_embed`, `basis_linear` | matched |
-| No extra scalar MLP after product type embedding | `TwoBodyBesselScalarEmbed` output feeds Allegro loop | `twobody_scalar_embed` feeds both first projections directly | matched |
-| Spherical harmonics | `SphericalHarmonicEdgeAttrs` | `molrep.embedding.angular.SphericalHarmonics` | matched |
-| Weighted channels | `MakeWeightedChannels(weight_individual_irreps=True)` | `_make_weighted_channels` | matched |
-| Initial tensor track | `TwoBodySphericalHarmonicTensorEmbed` | `env_embed_linear` plus `_make_weighted_channels` | matched |
-| First layer projection | `first_layer_env_embed_projection` | `first_layer_env_embed_projection` | matched |
-| Source environment aggregation | Allegro layer scatter to center atom | `scatter_add_` over `src` | matched |
-| Average neighbor normalization | `avg_num_neighbors_norm` | `avg_num_neighbors_inv_sqrt` | matched |
-| Irrep pruning | Allegro two-pass pruning | `_build_layer_irreps` | matched |
-| Per-channel tensor product | Allegro `Contracter` / `u,iu,ju,ku+ijk` | `_allegro_uuu_descriptor`, `EquivariantPolynomialTP` | matched |
-| No post-TP equivariant linear | Contracter directly targets `irreps_out` | no `tp_linears`; `new_tensor = tp(...)` | matched |
-| Scalar feedback | first scalar block of tensor output | `scalars = new_tensor[..., :n_scalar]` | matched |
-| DenseNet scalar accumulation | accumulated scalar list | `torch.cat(accumulated, dim=-1)` | matched |
-| Pair-energy readout | bundled in reference Allegro/NequIP stack | factored to `molpot.heads.EdgeEnergyHead` | adapted (A1) |
-| Per-species energy scale/shift | NequIP post-processing | owned outside `molzoo` | adapted (A1) |
-| Optional tensor-track exposure | reference optional tensor forwarding | `expose_tensor_track=True` writes TensorDict key | adapted (A2) |
-
-## 6. MolNex Adaptations
-
-| ID | Adaptation | Reason | Risk | Validation |
-|----|------------|--------|------|------------|
-| A1 | Pair-energy readout, energy aggregation, and per-species scale/shift are outside `molzoo`. | MolZoo encoders emit representations; MolPot owns physical readouts. | low | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants`, `tests/test_molzoo/test_allegro.py::TestOverfitSingleBatch`, `tests/test_molpot/test_heads/test_edge_energy.py` |
-| A2 | Optional tensor-track exposure uses `("pairs", "edge_tensor_features")` instead of a reference return flag. | MolNex modules communicate through TensorDict keys. Scalar output remains unchanged. | low | `tests/test_molpot/test_heads/test_multipole_symmetry.py`, `tests/test_molpot/test_heads/test_multipole_energy_kernels.py` |
+`AllegroEncoder` is the strictly local equivariant body: atom types and
+directed pair geometry in, per-pair scalar features (and optionally the last
+tensor track) out. Its receptive field is exactly `r_max`.
+
+`AllegroPotential` (a `molix.autograd.Potential`) subclasses the body and adds
+upstream's energy heads (edge readout MLP, edgewise reduce, per-type
+scale/shift, optional ZBL) with the potential contract: `energy(frame)` writes
+`atoms.energy` / `graphs.energy`, `forward = Derivative(energy, wrt)`, and
+`load(path)` for `.nequip.zip` packages.
+
+Not owned: neighbour-list construction (`molix.neighbor.NeighborList`), force
+and virial derivation (`molix.autograd.Derivative`), training.
+
+## 2. Paper↔Code Mapping
+
+| Upstream module | Role | MolNex |
+|---|---|---|
+| `EdgeLengthNormalizer` | `x = r / r_max` | `x = lengths * _rmax_recip` (float64 buffer) |
+| `BesselEdgeLengthEncoding` | `sinc(x w) w · u_p(x)` | `molrep.embedding.radial.SincBesselRBF` × `PolynomialCutoff(r_max, p)` |
+| `ProductTypeEmbedding` | `[E_c(t_i) ‖ E_n(t_j)] ⊙ W b` | `molzoo.allegro.layers.ProductTypeEmbedding` |
+| `ScalarMLP` (`scalar_embed_mlp`) | two-body MLP `D → F` | `ScalarMLPFunction` |
+| `SphericalHarmonics` (upstream, component, normalised) | `Y(r̂)` | `molrep.embedding.angular.SphericalHarmonics` (identical basis, l ≤ 3 verified) |
+| `MakeWeightedChannels` | `V_0 = w ⊙ Y` | `molzoo.allegro.layers.WeightedChannels` |
+| `Allegro_Module` layers | scatter, `Contracter`, latent DenseNet | `AllegroEncoder.layer_features`, `molzoo.allegro.layers.Contracter` |
+| `ScalarMLP` (`edge_readout`) | `F(L+1) → 1` | `ScalarMLPFunction` |
+| `EdgewiseReduce` | `Σ_j e_ij / √⟨N⟩ / √2` onto the centre | `AllegroPotential.energy` |
+| `PerTypeScaleShift` | `s_t e + b_t` in float64 | `molpot.heads.rescale.PerSpeciesScaleShift(dtype=float64)` |
+| `ZBL` | LAMMPS `pair_zbl`, `½` per directed pair | `molpot.potentials.repulsion.UniversalZBL` |
+| `ForceStressOutput` | `F = −∂E/∂r`, `W = −∂E/∂ε` | `molix.autograd.Derivative` (`graphs.virial = +∂E/∂ε`, opposite sign) |
+
+## 3. Reference Alignment
+
+### 3.1 Reference implementation
+
+- `allegro/model/allegro_models.py:33-283` (`AllegroModel`, `FullAllegroModel`)
+- `allegro/nn/_allegro.py:16-323`, `allegro/nn/_strided/_contract.py`,
+  `allegro/nn/_strided/_cueq_contracter.py`, `allegro/nn/_strided/_channels.py`
+- `allegro/nn/_edgeembed.py`, `allegro/nn/scalarembed.py`, `allegro/nn/tensorembed.py`,
+  `allegro/nn/edgewise.py`
+- `nequip/nn/embedding/_edge.py`, `nequip/nn/mlp.py`, `nequip/nn/atomwise.py`,
+  `nequip/nn/pair_potential.py`
+
+### 3.2 Convention mapping
+
+- Upstream `edge_index[0]` (centre) is MolNex `pair_index[:, 0]` (source); the
+  full list carries both directions, and periodic self-images `(i, i, S ≠ 0)`
+  are ordinary pairs.
+- `vec = pos[edge_index[1]] - pos[edge_index[0]] + S @ cell` is
+  `molrep.embedding.geometry.edge_vectors` (imaged value from `pairs.pair_diff`).
+- Atom types are indices into `atomic_numbers` (upstream `type_names` order,
+  not necessarily sorted; Allegro-OAM-L skips Po–Ra).
+- Tensor features are carried in cuEquivariance `ir_mul` layout `(E, D·u)`;
+  upstream's strided `(E, u, D)` is transposed only inside its own CUDA path.
+- cuEquivariance `O3` Clebsch–Gordan coefficients equal upstream's stored
+  `wigner_3j · √(2 l_out + 1)` exactly (factor 1.000000000000 on every path).
+
+## 4. Adaptation Ledger
+
+- **Element table.** `atomic_numbers` (any order, unique) maps `Z → type`
+  through a dense lookup; an atomic number outside the table is rejected once,
+  eagerly (`validate_elements`).
+- **Tensor-track exposure (MolNex-only).** `expose_tensor_track=True` keeps
+  the last layer's tensor irreps (forward-pruned, no scalar-only collapse) and
+  writes `pairs.edge_tensor_features` for equivariant heads
+  (`molpot.heads.PermMultipoleHead`, `Sonata`). Such a model has more weights
+  than upstream's and cannot load an official package.
+- **Unsupported upstream options** (rejected by `load` with the option named):
+  `per_edge_type_cutoff`, per-type `avg_num_neighbors`,
+  `forward_normalize=False`, deep-linear MLPs, `tp_path_channel_coupling=False`,
+  `weight_individual_irreps=False`, a non-integer cutoff exponent, a radial
+  embedding other than `TwoBodyBesselScalarEmbed`.
+- **Layout adapters in `load`.** Upstream stores per-type scales/shifts as
+  `(T, 1)` (MolNex `(T,)`) and a single-path `Contracter` weight as `(u,)`
+  (MolNex `(u, 1)`); the reshapes are explicit, per key. `tps.*.w3j` and
+  `edge_norm._rmax_recip` are rebuilt, not loaded.
+- **Precision.** Bessel weights, `1/r_max`, scales/shifts and the ZBL prefactor
+  are float64 as upstream; per-atom energies leave the scale/shift in float64.
+
+## 5. Mathematical Contract
+
+Per directed pair `(i → j)`, `r = ‖r_ij‖`, `x = r / r_max`, types `t_i, t_j`:
+
+1. `b_n = sinc(x w_n) w_n · u_p(x)`, `n = 1..N_b`, `w_n` initialised to `n`
+   (`sinc(z) = sin(πz)/(πz)`), `u_p` the polynomial envelope.
+2. `h⁰ = [E_c(t_i) ‖ E_n(t_j)] ⊙ (W_b b)` of width `D`
+   (`D = radial_chemical_embed_dim`, default `F`).
+3. `h = MLP_s(h⁰)` of width `F` (SiLU, bias-free, nequip init).
+4. `Y = Y(r̂_ij)` up to `l_max` (component normalisation);
+   `V_0 = WeightedChannels(Y, L_env(h))`, `u` channels per irrep,
+   weights laid out `[u, R]` (channel-major).
+5. `[s_0 ‖ w_0] = L_proj(h)` (`F` scalars, `u·R` environment weights).
+6. Layer `ℓ = 0..L-1`:
+   `Ω_i = (1/√⟨N⟩) Σ_k WeightedChannels(Y_ik, w_ℓ,ik)` (scatter to the centre),
+   `V_{ℓ+1} = Contracter_ℓ(V_ℓ, Ω_{i(pair)})` with path-channel weights
+   `W_ℓ ∈ ℝ^{u × P_ℓ}`, paths enumerated `(out, in1, in2)`;
+   `[s_{ℓ+1} ‖ w_{ℓ+1}] = MLP_ℓ([s_0 … s_ℓ ‖ V_{ℓ+1}^{0e}])`.
+   Tensor irreps: forward pruning from the allowed set (`l ≤ l_max`, both
+   parities when `parity`), last layer scalars only, then backward pruning.
+7. `e_ij = MLP_r([s_0 … s_L])`, `E_i = s_{t_i} (Σ_j e_ij / √⟨N⟩ / √2) + b_{t_i}`
+   (+ `Σ_j ½ k_e Z_i Z_j / r · φ(Z, r) · u_p(x)` with ZBL).
+8. `E_g = Σ_{i∈g} m_i E_i` (`m` the real-atom mask).
+
+Encoder `forward` writes `pairs.edge_features` `(E, F·(L+1))` and, with
+`expose_tensor_track`, `pairs.edge_tensor_features` `(E, D_out·u)` `ir_mul`.
+
+## 6. Config Mapping
+
+`AllegroSpec` fields use upstream names: `atomic_numbers` [`type_names`],
+`r_max`, `num_bessels`, `bessel_trainable`, `polynomial_cutoff_p`,
+`radial_chemical_embed_dim`, `scalar_embed_mlp_hidden_layers_{depth,width}`,
+`scalar_embed_mlp_nonlinearity`, `l_max`, `parity`, `num_layers`,
+`num_scalar_features`, `num_tensor_features`,
+`allegro_mlp_hidden_layers_{depth,width}`, `allegro_mlp_nonlinearity`,
+`readout_mlp_hidden_layers_{depth,width}`, `readout_mlp_nonlinearity`,
+`avg_num_neighbors`, `per_type_energy_scales`, `per_type_energy_shifts`,
+`per_type_energy_{scales,shifts}_trainable`, `zbl`; MolNex-only:
+`expose_tensor_track`, `tp_method`. Defaults are upstream's
+(`l_max` 2 aside, which upstream requires).
 
 ## 7. Validation Contract
 
 ### 7.1 Research Reproduction
 
-This spec does not currently claim paper-level reproduction of QM9, 3BPA, or
-revMD17 metrics. Add those rows only when the repository contains the matching
-dataset recipe, training configuration, and run log.
+No paper benchmark is reproduced in-tree. Official parity (below) is the
+reproduction claim.
 
 ### 7.2 Symmetry and Shape Tests
 
-| Claim | Test path | Tolerance |
-|-------|-----------|-----------|
-| translation invariance | `tests/test_molzoo/test_symmetry.py::TestTranslationInvariance` | relative <= `1e-5` |
-| rotation invariance/equivariance | `tests/test_molzoo/test_symmetry.py::TestRotationEquivariance` | relative <= `1e-4` |
-| permutation equivariance | `tests/test_molzoo/test_symmetry.py::TestPermutationEquivariance` | relative <= `1e-5` |
-| energy translation invariance | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants::test_translation_invariance` | relative <= `1e-4` |
-| energy rotation invariance | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants::test_rotation_invariance` | relative <= `1e-4` |
-| energy permutation invariance | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants::test_permutation_invariance` | relative <= `1e-4` |
-| cutoff vanishing | `tests/test_molzoo/test_allegro.py::TestEnergyInvariants::test_cutoff_vanishing` | relative <= `1e-5` |
-| output width `F * (L + 1)` | `tests/test_molzoo/test_allegro.py::TestAllegroEncoder::test_output_dim_is_densenet_stack` | exact |
-| edge feature write | `tests/test_molzoo/test_allegro.py::TestAllegroEncoder::test_forward_writes_edge_features` | exact |
-| single-batch overfit | `tests/test_molzoo/test_allegro.py::TestOverfitSingleBatch` | loss < `1e-3` |
-| tensor-track consumer path | `tests/test_molpot/test_heads/test_multipole_symmetry.py` | test-specific |
+`tests/test_molzoo/test_allegro/`: element table, irreps schedule against
+upstream's path counts, translation / rotation / permutation invariance,
+cutoff vanishing, forces against finite differences, padded-batch masking,
+`slow` compile (inference `forward` → 1 graph / 0 breaks).
 
-### 7.3 Engineering Benchmark
+### 7.3 Official Parity
 
-Driver:
-
-```bash
-python benchmarks/molzoo/bm_allegro.py --device cuda
-```
-
-Reference local measurement, taken on 2026-04-26 with Tesla T4, `bs=32`,
-average atom count `18`, `L=3`, `l_max=2`, `F=128`, `U=32`, and
-`num_bessel=8`:
-
-| Quantity | Measured |
-|----------|----------|
-| forward time / batch | `5.70 +/- 0.01 ms` |
-| forward+backward time / batch | `13.53 +/- 1.08 ms` |
-| forward peak memory | `97.4 MiB` |
-| forward+backward peak memory | `199.6 MiB` |
+`test_checkpoint.py` (skipped without `MOLNEX_ALLEGRO_WEIGHTS_DIR`): load the
+official package, evaluate the golden structures (open molecule, triclinic cell
+with self-images), compare energy / forces / virial with upstream goldens
+(fp64: 1e-8 eV/atom, 1e-7 eV/Å).
 
 ### 7.4 Run Log
 
-| run_id | date | commit | dirty | dataset | config | steps | train_mae | val_mae | fwd_ms | bwd_ms | compiled | note |
-|--------|------|--------|-------|---------|--------|-------|-----------|---------|--------|--------|----------|------|
-| 1 | 2026-04-26 | local | 1 | synthetic-qm9-shape | `L=3 l_max=2 F=128 U=32 T4` | n/a | n/a | n/a | 5.70 | 13.53 | 0 | engineering bench after strict reference-alignment cleanup |
+| run_id | date | command | note |
+|---|---|---|---|
 
 ## 8. System Boundary
 
-| Concern | Owner | Contract |
-|---------|-------|----------|
-| edge construction | `molix.data.NeighborList` | creates full directed edges with `symmetry=True`; `edge_diff = pos[dst] - pos[src]` |
-| scalar encoder | `molzoo.Allegro` | reads §2.1 and writes `("pairs", "edge_features")` |
-| optional tensor encoder output | `molzoo.Allegro` | writes `("pairs", "edge_tensor_features")` only when `expose_tensor_track=True` |
-| pair-energy readout | `molpot.heads.EdgeEnergyHead` | consumes scalar edge features |
-| equivariant multipole readout | `molpot.heads.PermMultipoleHead` and related heads | may consume tensor edge features |
-| graph energy aggregation | `molpot` | writes graph-level energies |
-| force and stress gradients | `molpot` | owns autograd over coordinates or strain |
-| training loop | `molix.core.Trainer` | owns state, hooks, optimization, and losses |
-
-Hard rules:
-
-- `molzoo.Allegro` must not write graph-level physical outputs.
-- `molzoo.Allegro` must not call `torch.autograd.grad`.
-- `molzoo.Allegro` must not overwrite its input TensorDict keys.
-- `edge_features` must keep shape `(E, F * (L + 1))` regardless of
-  `expose_tensor_track`.
+`molrep` supplies the generic pieces (`SincBesselRBF`, `ScalarMLPFunction`,
+`PolynomialCutoff`, `SphericalHarmonics`, edge geometry). `molpot` owns
+`PerSpeciesScaleShift` and `UniversalZBL`. `molzoo.allegro` owns the spec, the
+Allegro layers (`ProductTypeEmbedding`, `WeightedChannels`, `Contracter`), the
+body, the energy model, the package reader and the key table. `molzoo.checkpoint`
+owns the shared stub unpickler and `CheckpointRemap`.
 
 ## 9. Version Pinning
 
-| Item | Value |
-|------|-------|
-| Paper | Musaelian et al. 2023, arXiv:2204.05249 |
-| Reference repository | `mir-group/allegro` and `mir-group/nequip` |
-| Reference commit | not recorded in the current repo; next upstream audit must pin exact commits |
-| PyTorch | `>=2.6` |
-| cuequivariance / cuequivariance-torch | as pinned by project dependencies |
-| MolNex implementation anchor | `src/molzoo/allegro.py` |
-| Public docs mirror | `docs/molzoo/specs/allegro.md` must remain identical to this file |
+`nequip` 0.19.1, `nequip-allegro` 0.8.3 (PyPI; out-of-tree oracle venv, never a
+molnex dependency). Official model: `Allegro-OAM-L:0.1`
+(Zenodo record 16980200).
 
 ## 10. Drift Policy
 
-Update this spec when any of the following change:
-
-- any input or output key
-- `output_dim`
-- the formulas in §3
-- the reference alignment in §5
-- the MolNex adaptation list in §6
-- validation paths or tolerances in §7
-- ownership boundaries in §8
-- dependency or upstream reference pins in §9
-
-For public documentation, do not use fragile code line numbers as the primary
-contract. Prefer stable anchors such as class names, method names, TensorDict
-keys, and test paths. If exact line numbers are included during an audit, verify
-them in the same change.
-
-The source spec and public docs copy must stay identical:
-
-```bash
-diff -u src/molzoo/specs/allegro.md docs/molzoo/specs/allegro.md
-```
-
-## Appendix A. Maintenance Log
-
-- 2026-04-25: initial canonical 10-section spec.
-- 2026-04-26: aligned implementation with the Allegro reference layer loop,
-  DenseNet scalar accumulation, ProductTypeEmbedding wiring, and strict average
-  neighbor normalization.
-- 2026-04-26: removed stale fallback behavior in `EdgeEnergyHead`; readout now
-  consumes the flat DenseNet scalar stack.
-- 2026-04-27: rewrote the spec as a readable public contract, removed stale
-  two-body-MLP and post-TP-linear descriptions, and documented optional
-  tensor-track exposure.
+Any change to the Allegro mathematics, key table, edge convention or output
+keys updates this spec first; a new upstream release is re-checked against the
+goldens before the pin moves.

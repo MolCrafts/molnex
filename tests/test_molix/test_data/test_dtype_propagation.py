@@ -1,16 +1,14 @@
-"""Precision contract — ``config.set_precision`` must reach the dataloader.
+"""Precision contract — the ``DataModule``'s ``dtype`` must reach every emitted batch.
 
-Regression net for the 2026-05-18 fp64 production-failure incident.
-``config.set_precision("fp64")`` previously only updated model construction;
-:class:`molix.data.datamodule._CollateFn` ignored ``config["ftype"]`` and
-emitted fp32 batches, which crashed the first training step under fp64.
+Regression net for the 2026-05-18 fp64 production-failure incident: the
+model was built at fp64 while the dataloader kept emitting fp32 batches, and
+the first training step died on a dtype-mismatched matmul. There is no global
+precision any more; the contract pinned here is that
 
-These tests pin the contract that:
-
-- ``_CollateFn`` captures ``config["ftype"]`` at
-  construction time;
+- :class:`molix.data.datamodule._CollateFn` carries the ``dtype`` it was
+  built with (``DataModule(dtype=…)``), pickled into every worker with it;
 - compute floating leaves (``atoms.pos``, ``pair_diff``, …) follow that
-  ``ftype`` via :func:`molix.core.steps.cast_compute_floats`;
+  ``dtype`` via :func:`molix.core.steps.cast_compute_floats`;
 - graph totals at ``ENERGY_KEY`` / ``E0_KEY`` skip the dtype axis on a
   TensorDict (full NestedKey match, never the leaf name ``"energy"``);
 - Frame-route collate *emits* those totals as float64; store-route collate
@@ -31,7 +29,6 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.config import config
 from molix.core.steps import cast_compute_floats
 from molix.data import FrameCollator
 from molix.data.collate import MoleculeCollator
@@ -45,13 +42,6 @@ from tests.test_molix.conftest import frames_dataset, unit_a, unit_b
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_precision():
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
-
-
 def _make_samples(n: int = 6) -> list:
     """fp32 source frames — what a dataset hands the collate."""
     return [
@@ -60,10 +50,13 @@ def _make_samples(n: int = 6) -> list:
     ]
 
 
-def _build_dm(tmp_path: Path, *, batch_size: int = 2) -> DataModule:
+def _build_dm(
+    tmp_path: Path, *, batch_size: int = 2, dtype: torch.dtype = torch.float32
+) -> DataModule:
     return DataModule(
         frames_dataset([unit_a()]),
         frames_dataset([unit_b()]),
+        dtype=dtype,
         batch_size=batch_size,
         num_workers=0,
         pin_memory=False,
@@ -166,29 +159,20 @@ class TestCastComputeFloats:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: set_precision flows through to the emitted batch
+# End-to-end: DataModule(dtype=…) flows through to the emitted batch
 # ---------------------------------------------------------------------------
 
 
-_FTYPE_PER_MODE = {
-    "fp32": torch.float32,
-    "fp64": torch.float64,
-    "fp16-mixed": torch.float32,  # AMP keeps batches in fp32, autocast inside fwd
-    "bf16-mixed": torch.float32,
-}
-
-
-class TestPrecisionFlowsToBatch:
-    @pytest.mark.parametrize("mode,expected", list(_FTYPE_PER_MODE.items()))
-    def test_collate_emits_correct_dtype(self, tmp_path: Path, mode: str, expected: torch.dtype):
-        config.set_precision(mode)
-        dm = _build_dm(tmp_path)  # _CollateFn captures ftype here
+class TestDtypeFlowsToBatch:
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_collate_emits_the_datamodule_dtype(self, tmp_path: Path, dtype: torch.dtype):
+        dm = _build_dm(tmp_path, dtype=dtype)
         batch = next(iter(dm.train_dataloader()))
-        assert batch["atoms", "pos"].dtype is expected
-        assert batch["pairs", "pair_diff"].dtype is expected
-        assert batch["pairs", "pair_dist"].dtype is expected
+        assert batch["atoms", "pos"].dtype is dtype
+        assert batch["pairs", "pair_diff"].dtype is dtype
+        assert batch["pairs", "pair_dist"].dtype is dtype
         # A graph total is a label, not a compute leaf: the Frame route emits it
-        # at binary64 and cast_compute_floats must leave it there whatever ``ftype`` is.
+        # at binary64 and cast_compute_floats must leave it there whatever ``dtype`` is.
         assert batch["graphs", "energy"].dtype is torch.float64
         # Integers untouched
         assert batch["atoms", "Z"].dtype is torch.long
@@ -196,38 +180,38 @@ class TestPrecisionFlowsToBatch:
         assert batch["atoms", "batch"].dtype is torch.long
         assert batch["graphs", "num_atoms"].dtype is torch.long
 
-    def test_collate_captures_ftype_at_construction(self, tmp_path: Path):
-        """Spawned workers re-import molix.config and reset ftype to fp32;
-        the captured value must survive that re-import. We can't directly
-        test multi-process spawn here without overhead, but we can verify
-        the captured attribute is the source of truth (not a live read)."""
-        config.set_precision("fp64")
-        dm = _build_dm(tmp_path)
-        collate = dm._make_collate_fn()
-        assert collate.ftype is torch.float64
-        # Flip global; collate's captured value should NOT follow.
-        config.set_precision("fp32")
-        assert collate.ftype is torch.float64
-        # And the captured value is what gets applied:
-        samples = _make_samples(2)
-        out = collate(samples)
+    def test_the_collate_callable_carries_the_dtype(self, tmp_path: Path):
+        """``dtype`` is an attribute of the pickled callable — what a spawned worker applies."""
+        collate = _build_dm(tmp_path, dtype=torch.float64)._make_collate_fn()
+        assert collate.dtype is torch.float64
+        out = collate(_make_samples(2))
         assert out["atoms", "pos"].dtype is torch.float64
 
-    @pytest.mark.parametrize("mode,ftype", list(_FTYPE_PER_MODE.items()))
-    def test_frame_route_collate_keeps_graph_energy_float64(self, mode: str, ftype: torch.dtype):
-        config.set_precision(mode)
+    def test_a_collator_at_another_dtype_is_refused(self, tmp_path: Path):
+        """One dtype, passed once: a collate_fn naming a different one is a contradiction."""
+        with pytest.raises(ValueError, match="one dtype"):
+            DataModule(
+                frames_dataset([unit_a()]),
+                frames_dataset([unit_b()]),
+                collate_fn=FrameCollator(collator=MoleculeCollator(dtype=torch.float64)),
+                dtype=torch.float32,
+                num_workers=0,
+                pin_memory=False,
+            )
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_frame_route_collate_keeps_graph_energy_float64(self, dtype: torch.dtype):
         e_raw_ev = -74800.123456789
-        out = _CollateFn(FrameCollator(collator=MoleculeCollator()), ())(
+        out = _CollateFn(FrameCollator(collator=MoleculeCollator()), (), dtype=dtype)(
             [frame(Z=[36], pos=[[0.0, 0.0, 0.0]], energy=e_raw_ev)]
         )
-        assert out["atoms", "pos"].dtype is ftype
+        assert out["atoms", "pos"].dtype is dtype
         assert out["graphs", "energy"].dtype is torch.float64
         assert out["graphs", "energy"].item() == e_raw_ev
 
     def test_autocast_does_not_change_frame_route_energy_dtype(self):
         """Protected Frame-route leaves never enter collate/move as float32."""
-        config.set_precision("fp32")
-        batch = _CollateFn(FrameCollator(collator=MoleculeCollator()), ())(
+        batch = _CollateFn(FrameCollator(collator=MoleculeCollator()), (), dtype=torch.float32)(
             [frame(Z=[36], pos=[[0.0, 0.0, 0.0]], energy=-74800.123456789)]
         )
         assert batch["graphs", "energy"].dtype is torch.float64

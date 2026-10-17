@@ -1,7 +1,17 @@
-"""PiNet property heads (dipole, polarizability) composed with a generic encoder.
+"""PiNet2 property products: the feature body plus a ``molpot`` response head.
 
-These wrap ``molpot.heads``; they live next to the encoder only for import
-stability. Planned migration: ``molpot.heads.pinet_*``.
+:class:`PiNetDipole` (``molpot.heads.DipoleHead``) and
+:class:`PiNetPolarizability` (``molpot.heads.ChargeResponseHead``) subclass
+:class:`~molzoo.pinet.encoder.PiNetEncoder` exactly as
+:class:`~molzoo.pinet.potential.PiNetPotential` does, so each is one flat
+module. They pool the per-block tracks of
+:meth:`~molzoo.pinet.encoder.PiNetEncoder.layer_features` over the layer axis
+(``layer_reduction``) and write every head output as a batch column.
+
+Reference:
+    Li et al. "PiNN: Equivariant Neural Network Suite for Modeling
+    Electrochemical Systems" J. Chem. Theory Comput. 21, 1382 (2025).
+    https://doi.org/10.1021/acs.jctc.4c01570
 """
 
 from __future__ import annotations
@@ -9,77 +19,57 @@ from __future__ import annotations
 from typing import Literal
 
 import torch
-import torch.nn as nn
 from tensordict import TensorDict
 
 from molpot.heads import ChargeResponseHead, DipoleHead
-
-from .geometry import edge_bond_diff
-
-
-def _stamp(
-    batch: TensorDict,
-    values: dict[str, torch.Tensor],
-    columns: dict[str, str | None],
-) -> TensorDict:
-    """Write each head tensor onto the batch and return it.
-
-    ``columns`` maps a head key to ``atoms`` / ``pairs`` / ``graphs``. ``None``
-    is a 0-dim tensor, which the root (batch size ``[]``) can hold.
-    """
-    for key, value in values.items():
-        namespace = columns[key]
-        if namespace is None:
-            batch[key] = value
-        else:
-            batch[namespace, key] = value
-    return batch
+from molzoo.pinet.encoder import PiNetEncoder
+from molzoo.pinet.spec import PiNetSpec
 
 
-def pool_layer(features: torch.Tensor, reduction: str) -> torch.Tensor:
-    """Pool the layer axis of ``(N, layers, ...)`` features."""
-    if reduction == "mean":
-        return features.mean(dim=1)
-    if reduction == "sum":
-        return features.sum(dim=1)
-    if reduction == "last":
-        return features[:, -1]
-    raise ValueError(f"Unknown reduction {reduction!r}.")
+class _PiNetProperty(PiNetEncoder):
+    """Shared body of the property products: layer pooling and column writes."""
 
+    #: Head key → namespace (``None`` = the batch root, for 0-dim values).
+    _COLUMNS: dict[str, str | None] = {}
 
-class PiNetDipole(nn.Module):
-    """PiNet encoder paired with :class:`molpot.heads.DipoleHead`."""
-
-    def __init__(
-        self,
-        *,
-        encoder: nn.Module,
-        hidden_dim: int = 64,
-        variant: str = "ac_ad",
-        layer_reduction: Literal["mean", "sum", "last"] = "mean",
-        vector_dipole: bool = True,
-        charge_neutrality: bool = True,
-        regularization: bool = True,
-    ) -> None:
-        super().__init__()
-        self.encoder = encoder
+    def __init__(self, spec: PiNetSpec, layer_reduction: Literal["mean", "sum", "last"]) -> None:
+        if layer_reduction not in ("mean", "sum", "last"):
+            raise ValueError(f"layer_reduction must be mean, sum or last; got {layer_reduction!r}")
+        super().__init__(spec)
         self.layer_reduction = layer_reduction
-        input_dim: int = getattr(encoder, "output_dim", 16)
-        edge_dim: int = getattr(encoder, "edge_output_dim", input_dim)
-        self.head = DipoleHead(
-            node_scalar_dim=input_dim,
-            node_vector_dim=input_dim,
-            edge_scalar_dim=edge_dim,
-            edge_vector_dim=input_dim,
-            hidden_dim=hidden_dim,
-            variant=variant,
-            vector_dipole=vector_dipole,
-            charge_neutrality=charge_neutrality,
-            regularization=regularization,
-        )
 
-    #: Head key → namespace. ``None`` is the 0-dim bond-charge penalty.
-    _COLUMNS: dict[str, str | None] = {
+    def _pool(self, tracks: list[torch.Tensor]) -> torch.Tensor:
+        """Reduce a per-block list ``[(R, ...)] * depth`` over the layer axis."""
+        if self.layer_reduction == "last":
+            return tracks[-1]
+        stacked = torch.stack(tracks, dim=1)
+        return stacked.mean(dim=1) if self.layer_reduction == "mean" else stacked.sum(dim=1)
+
+    def _write(self, batch: TensorDict, values: dict[str, torch.Tensor]) -> TensorDict:
+        for key, value in values.items():
+            namespace = self._COLUMNS[key]
+            if namespace is None:
+                batch[key] = value
+            else:
+                batch[namespace, key] = value
+        return batch
+
+
+class PiNetDipole(_PiNetProperty):
+    """PiNet2 features → :class:`molpot.heads.DipoleHead`.
+
+    Args:
+        spec: The encoder configuration (its head fields are ignored).
+        hidden_dim: Head MLP width.
+        variant: Dipole decomposition (``DipoleHead`` variants, e.g. ``"ac_ad"``).
+        layer_reduction: How the per-block tracks are pooled.
+        vector_dipole: Predict the dipole vector (else its norm).
+        charge_neutrality: Project atomic charges onto ``graphs.total_charge``
+            (``0`` when the batch has none).
+        regularization: Report the bond-charge L2 penalty.
+    """
+
+    _COLUMNS = {
         "charge_sum_pre_proj": "graphs",
         "charge_sum_post_proj": "graphs",
         "atomic_charges": "atoms",
@@ -92,88 +82,88 @@ class PiNetDipole(nn.Module):
         "dipole": "graphs",
     }
 
-    def forward(self, batch: TensorDict) -> TensorDict:
-        batch = self.encoder(batch)
-
-        atom_batch = batch["atoms", "batch"]
-        num_graphs = batch["graphs"].batch_size[0]
-        node_scalars = pool_layer(batch["atoms", "node_features"], self.layer_reduction)
-        node_vectors = None
-        if "p3_features" in batch["atoms"].keys():
-            node_vectors = pool_layer(batch["atoms", "p3_features"], self.layer_reduction)
-        edge_scalars = None
-        edge_index = None
-        edge_diff = None
-        if self.head.uses_bc and "i1_features" in batch["pairs"].keys():
-            edge_scalars = pool_layer(batch["pairs", "i1_features"], self.layer_reduction)
-            edge_index = batch["pairs", "pair_index"]
-            pos = batch["atoms", "pos"]
-            edge_diff = edge_bond_diff(batch["pairs"], pos, edge_index)
-        edge_vectors = None
-        if self.head.uses_bc and "i3_features" in batch["pairs"].keys():
-            edge_vectors = pool_layer(batch["pairs", "i3_features"], self.layer_reduction)
-        oxidation = None
-        if self.head.uses_os and "oxidation" in batch["atoms"].keys():
-            oxidation = batch["atoms", "oxidation"]
-        total_charge = None
-        if self.head.uses_ac and self.head.charge_neutrality:
-            try:
-                total_charge = batch["graphs", "total_charge"]
-            except KeyError:
-                pass
-        return _stamp(
-            batch,
-            self.head(
-                pos=batch["atoms", "pos"],
-                atom_batch=atom_batch,
-                num_graphs=num_graphs,
-                node_scalars=node_scalars,
-                node_vectors=node_vectors,
-                edge_scalars=edge_scalars,
-                edge_vectors=edge_vectors,
-                pair_index=edge_index,
-                pair_diff=edge_diff,
-                oxidation=oxidation,
-                total_charge=total_charge,
-            ),
-            self._COLUMNS,
-        )
-
-
-class PiNetPolarizability(nn.Module):
-    """PiNet encoder paired with :class:`molpot.heads.ChargeResponseHead`."""
-
     def __init__(
         self,
+        spec: PiNetSpec = PiNetSpec(),
         *,
-        encoder: nn.Module,
-        atom_types: list[int] | None = None,
-        variant: str = "localchi",
-        iso: bool = False,
         hidden_dim: int = 64,
+        variant: str = "ac_ad",
         layer_reduction: Literal["mean", "sum", "last"] = "mean",
-        epsilon: float = 0.01,
-        sigma: dict[int, float] | None = None,
+        vector_dipole: bool = True,
+        charge_neutrality: bool = True,
+        regularization: bool = True,
     ) -> None:
-        super().__init__()
-        self.encoder = encoder
-        self.layer_reduction = layer_reduction
-        input_dim: int = getattr(encoder, "output_dim", 16)
-        edge_dim: int = getattr(encoder, "edge_output_dim", input_dim)
-        self.head = ChargeResponseHead(
-            node_scalar_dim=input_dim,
-            edge_scalar_dim=edge_dim,
-            edge_vector_dim=input_dim,
-            atom_types=atom_types,
-            variant=variant,
-            iso=iso,
+        super().__init__(spec, layer_reduction)
+        c = self.feature_dim
+        self.head = DipoleHead(
+            node_scalar_dim=c,
+            node_vector_dim=c,
+            edge_scalar_dim=c * self.n_props,
+            edge_vector_dim=c,
             hidden_dim=hidden_dim,
-            epsilon=epsilon,
-            sigma=sigma,
+            variant=variant,
+            vector_dipole=vector_dipole,
+            charge_neutrality=charge_neutrality,
+            regularization=regularization,
         )
 
-    #: Head key → namespace. Response matrices are per graph.
-    _COLUMNS: dict[str, str | None] = {
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write the dipole and its decomposition into ``batch`` in place."""
+        layers, edge_index, vectors = self._batch_layers(batch)
+        head = self.head
+        uses_bonds = head.uses_bc
+        keys = batch.keys(include_nested=True)
+        return self._write(
+            batch,
+            head(
+                pos=batch["atoms", "pos"],
+                atom_batch=batch["atoms", "batch"],
+                num_graphs=batch["graphs"].batch_size[0],
+                node_scalars=self._pool([layer.p1 for layer in layers]),
+                node_vectors=self._pool([layer.p3 for layer in layers]) if self.has_p3 else None,
+                edge_scalars=self._pool([layer.block.i1 for layer in layers])
+                if uses_bonds
+                else None,
+                edge_vectors=(
+                    self._pool([layer.block.i3 for layer in layers])
+                    if uses_bonds and self.has_p3
+                    else None
+                ),
+                pair_index=edge_index if uses_bonds else None,
+                pair_diff=vectors if uses_bonds else None,
+                oxidation=(
+                    batch["atoms", "oxidation"]
+                    if head.uses_os and ("atoms", "oxidation") in keys
+                    else None
+                ),
+                total_charge=(
+                    batch["graphs", "total_charge"]
+                    if head.uses_ac
+                    and head.charge_neutrality
+                    and ("graphs", "total_charge") in keys
+                    else None
+                ),
+            ),
+        )
+
+
+class PiNetPolarizability(_PiNetProperty):
+    """PiNet2 features → :class:`molpot.heads.ChargeResponseHead`.
+
+    The head's element table is the encoder's ``atomic_numbers``.
+
+    Args:
+        spec: The encoder configuration (its head fields are ignored).
+        variant: Response model (``"localchi"``, ``"local"``, ``"etainv"``,
+            ``"eem"``, ``"acks2"``; ``"_iso"`` suffix for isotropic).
+        iso: Isotropic polarizability.
+        hidden_dim: Head MLP width.
+        layer_reduction: How the per-block tracks are pooled.
+        epsilon: Head regulariser.
+        sigma: Per-element Gaussian charge widths.
+    """
+
+    _COLUMNS = {
         "alpha": "graphs",
         "chi": "graphs",
         "atom_mask": "graphs",
@@ -186,31 +176,47 @@ class PiNetPolarizability(nn.Module):
         "alpha_iso": "graphs",
     }
 
-    def forward(self, batch: TensorDict) -> TensorDict:
-        batch = self.encoder(batch)
+    def __init__(
+        self,
+        spec: PiNetSpec = PiNetSpec(),
+        *,
+        variant: str = "localchi",
+        iso: bool = False,
+        hidden_dim: int = 64,
+        layer_reduction: Literal["mean", "sum", "last"] = "mean",
+        epsilon: float = 0.01,
+        sigma: dict[int, float] | None = None,
+    ) -> None:
+        super().__init__(spec, layer_reduction)
+        c = self.feature_dim
+        self.head = ChargeResponseHead(
+            node_scalar_dim=c,
+            edge_scalar_dim=c * self.n_props,
+            edge_vector_dim=c,
+            atom_types=self._spec.atomic_numbers,
+            variant=variant,
+            iso=iso,
+            hidden_dim=hidden_dim,
+            epsilon=epsilon,
+            sigma=sigma,
+        )
 
-        atom_batch = batch["atoms", "batch"]
-        num_graphs = batch["graphs"].batch_size[0]
-        node_scalars = pool_layer(batch["atoms", "node_features"], self.layer_reduction)
-        edge_scalars = pool_layer(batch["pairs", "i1_features"], self.layer_reduction)
-        edge_vectors = None
-        if "i3_features" in batch["pairs"].keys():
-            edge_vectors = pool_layer(batch["pairs", "i3_features"], self.layer_reduction)
-        pos = batch["atoms", "pos"]
-        edge_index = batch["pairs", "pair_index"]
-        edge_diff = edge_bond_diff(batch["pairs"], pos, edge_index)
-        return _stamp(
+    def forward(self, batch: TensorDict) -> TensorDict:
+        """Write the polarizability and the response terms into ``batch`` in place."""
+        layers, edge_index, vectors = self._batch_layers(batch)
+        return self._write(
             batch,
             self.head(
-                pos=pos,
+                pos=batch["atoms", "pos"],
                 Z=batch["atoms", "Z"],
-                atom_batch=atom_batch,
-                num_graphs=num_graphs,
+                atom_batch=batch["atoms", "batch"],
+                num_graphs=batch["graphs"].batch_size[0],
                 pair_index=edge_index,
-                pair_diff=edge_diff,
-                node_scalars=node_scalars,
-                edge_scalars=edge_scalars,
-                edge_vectors=edge_vectors,
+                pair_diff=vectors,
+                node_scalars=self._pool([layer.p1 for layer in layers]),
+                edge_scalars=self._pool([layer.block.i1 for layer in layers]),
+                edge_vectors=(
+                    self._pool([layer.block.i3 for layer in layers]) if self.has_p3 else None
+                ),
             ),
-            self._COLUMNS,
         )

@@ -1,22 +1,12 @@
 """Tests for Step protocol and default implementations."""
 
-import pytest
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.config import config
 from molix.core.state import TrainState
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
-
-
-@pytest.fixture(autouse=True)
-def _reset_precision():
-    """Ensure each test starts from fp32 since precision is global state."""
-    config.set_precision("fp32")
-    yield
-    config.set_precision("fp32")
 
 
 # Simple test model following canonical MolNex contract: forward(batch)
@@ -131,26 +121,6 @@ def test_default_eval_step_no_grad_opt_in():
     assert not outputs["predictions"].requires_grad
 
 
-def test_default_eval_step_keeps_graph_by_default():
-    """The default ``DefaultEvalStep`` keeps the graph alive so force models
-    (F = -dE/dx) get valid eval forces."""
-    model = SimpleModel()
-
-    trainer = Trainer(
-        model=model,
-        loss_fn=simple_loss_fn,
-        optimizer_factory=simple_optimizer_factory,
-    )
-
-    state = TrainState()
-    batch = _make_batch()
-
-    outputs = trainer.eval_step.on_eval_batch(trainer, state, batch)
-
-    # default no_grad=False → graph is live (loss is differentiable)
-    assert outputs["loss"].requires_grad
-
-
 def test_trainer_delegates_to_train_step():
     """Verify Trainer delegates training computation to train_step."""
 
@@ -257,8 +227,8 @@ def test_default_train_step_with_amp_bfloat16():
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
         train_step=DefaultTrainStep(),
+        autocast=torch.bfloat16,
     )
-    trainer.set_precision("bf16-mixed")
 
     state = TrainState()
     batch = _make_batch()
@@ -302,8 +272,8 @@ def test_default_eval_step_with_amp_bfloat16():
         loss_fn=simple_loss_fn,
         optimizer_factory=simple_optimizer_factory,
         eval_step=DefaultEvalStep(no_grad=True),
+        autocast=torch.bfloat16,
     )
-    trainer.set_precision("bf16-mixed")
 
     state = TrainState()
     batch = _make_batch()
@@ -354,8 +324,8 @@ def test_on_after_backward_fires_with_amp():
         optimizer_factory=simple_optimizer_factory,
         train_step=DefaultTrainStep(),
         hooks=[AfterBackwardHook()],
+        autocast=torch.bfloat16,
     )
-    trainer.set_precision("bf16-mixed")
 
     trainer.train_step.on_train_batch(trainer, TrainState(), _make_batch())
 

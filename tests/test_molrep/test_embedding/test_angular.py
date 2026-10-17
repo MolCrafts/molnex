@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from molrep.embedding.angular import SphericalHarmonics, SphericalHarmonicsSpec
-from molrep.utils.equivariance import (
+from tests.conftest import (
     random_rotation_matrix,
     rotate_vectors,
     rotation_matrix_x,

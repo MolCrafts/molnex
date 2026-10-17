@@ -76,6 +76,7 @@ class BesselRBF(nn.Module):
         normalize: bool = True,
         normalize_samples: int = 4096,
         trainable: bool = False,
+        dtype: torch.dtype | None = None,
     ) -> None:
         """Initialize Bessel RBF module.
 
@@ -90,8 +91,12 @@ class BesselRBF(nn.Module):
                 learnable ``nn.Parameter`` (persistent in the state_dict). With
                 ``normalize=False`` and ``eps=0`` this reproduces the official
                 MACE spherical Bessel basis bit-for-bit.
+            dtype: Floating dtype of the basis (the owning module's).
         """
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
 
         self.config = BesselRBFSpec(
             r_cut=r_cut,
@@ -105,14 +110,14 @@ class BesselRBF(nn.Module):
         self.r_cut = float(self.config.r_cut)
         num = int(self.config.num_radial)
 
-        freqs = torch.arange(1, num + 1, dtype=config.ftype) * (math.pi / self.r_cut)
+        freqs = torch.arange(1, num + 1, dtype=dtype) * (math.pi / self.r_cut)
         if self.config.trainable:
             self.freqs = nn.Parameter(freqs)
         else:
             self.register_buffer("freqs", freqs, persistent=False)
         self.freqs: torch.Tensor
 
-        prefactor = torch.tensor(math.sqrt(2.0 / self.r_cut), dtype=config.ftype)
+        prefactor = torch.tensor(math.sqrt(2.0 / self.r_cut), dtype=dtype)
         self.register_buffer("prefactor", prefactor, persistent=False)
         self.prefactor: torch.Tensor
 
@@ -122,8 +127,8 @@ class BesselRBF(nn.Module):
         if self.normalize:
             mu, sigma = self._compute_stats(self.config.normalize_samples)
         else:
-            mu = torch.zeros(num, dtype=config.ftype)
-            sigma = torch.ones(num, dtype=config.ftype)
+            mu = torch.zeros(num, dtype=dtype)
+            sigma = torch.ones(num, dtype=dtype)
         self.register_buffer("mu", mu, persistent=False)
         self.register_buffer("sigma", sigma, persistent=False)
         self.mu: torch.Tensor
@@ -141,7 +146,7 @@ class BesselRBF(nn.Module):
         Uniform sampling over ``[eps, r_cut]`` avoids the r=0 singularity while
         matching the Allegro SI's stated assumption to within ``eps``.
         """
-        r = torch.linspace(self.eps, self.r_cut, n_samples, dtype=config.ftype)
+        r = torch.linspace(self.eps, self.r_cut, n_samples, dtype=self.freqs.dtype)
         phi = self._raw_basis(r)
         mu = phi.mean(dim=0)
         sigma = phi.std(dim=0).clamp(min=1e-8)
@@ -162,6 +167,46 @@ class BesselRBF(nn.Module):
         return phi
 
 
+class SincBesselRBF(nn.Module):
+    """Normalised-distance Bessel basis — nequip ``BesselEdgeLengthEncoding``.
+
+    ``b_n(x) = sinc(x w_n) · w_n = sin(π w_n x) / (π x)``, ``x = r / r_max``,
+    with ``w_n`` initialised to ``n = 1..num_basis``. Equal to
+    :class:`BesselRBF` up to the constant ``r_max / π`` and the
+    parameterisation: the stored quantity here is the dimensionless ``w_n``
+    (upstream's ``bessel_weights``), which is what an official checkpoint
+    carries. ``w`` and ``1 / r_max`` are float64, as upstream; the basis is
+    computed in float64 and cast to the input dtype.
+
+    The cutoff envelope is not applied here; multiply by
+    :class:`~molrep.embedding.cutoff.PolynomialCutoff` (same ``r_max``).
+
+    Args:
+        num_basis: Number of basis functions.
+        r_max: Cutoff radius in Å.
+        trainable: Make ``bessel_weights`` an ``nn.Parameter``.
+
+    Reference:
+        ``nequip/nn/embedding/_edge.py::BesselEdgeLengthEncoding`` (nequip 0.19).
+    """
+
+    def __init__(self, *, num_basis: int, r_max: float, trainable: bool = False) -> None:
+        super().__init__()
+        weights = torch.linspace(1.0, num_basis, num_basis, dtype=torch.float64).unsqueeze(0)
+        if trainable:
+            self.bessel_weights = nn.Parameter(weights)
+        else:
+            self.register_buffer("bessel_weights", weights)
+        self.register_buffer(
+            "_rmax_recip", torch.tensor(1.0 / r_max, dtype=torch.float64), persistent=False
+        )
+
+    def forward(self, r: torch.Tensor) -> torch.Tensor:
+        """Args: ``r`` distances ``(E,)`` in Å. Returns ``(E, num_basis)`` in ``r``'s dtype."""
+        x = (r.to(torch.float64) * self._rmax_recip).unsqueeze(-1)
+        return (torch.sinc(x * self.bessel_weights) * self.bessel_weights).to(r.dtype)
+
+
 class PolynomialBasisSpec(BaseModel):
     """Configuration for polynomial radial basis."""
 
@@ -175,13 +220,16 @@ class PolynomialBasis(nn.Module):
     itself does not apply a cutoff; it only shapes the envelope passed in.
     """
 
-    def __init__(self, n_basis: int) -> None:
+    def __init__(self, n_basis: int, *, dtype: torch.dtype | None = None) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         powers = list(range(1, int(n_basis) + 1))
         if not powers:
             raise ValueError("n_basis must define at least one polynomial power.")
         self.config = PolynomialBasisSpec(powers=powers)
-        self.register_buffer("powers", torch.tensor(powers, dtype=config.ftype), persistent=False)
+        self.register_buffer("powers", torch.tensor(powers, dtype=dtype), persistent=False)
         self.powers: torch.Tensor
 
     @property
@@ -224,14 +272,18 @@ class GaussianBasis(nn.Module):
         gamma: float | list[float] = 3.0,
         r_cut: float,
         n_basis: int,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         if center is None:
-            centers = torch.linspace(0.0, float(r_cut), int(n_basis), dtype=config.ftype)
+            centers = torch.linspace(0.0, float(r_cut), int(n_basis), dtype=dtype)
         elif isinstance(center, (int, float)):
-            centers = torch.full((int(n_basis),), float(center), dtype=config.ftype)
+            centers = torch.full((int(n_basis),), float(center), dtype=dtype)
         else:
-            centers = torch.tensor(list(center), dtype=config.ftype)
+            centers = torch.tensor(list(center), dtype=dtype)
         if centers.numel() != int(n_basis):
             raise ValueError(
                 f"center must contain n_basis={n_basis} values, got {centers.numel()}."
@@ -240,7 +292,7 @@ class GaussianBasis(nn.Module):
         if isinstance(gamma, (int, float)):
             gammas = torch.full_like(centers, float(gamma))
         else:
-            gammas = torch.tensor(list(gamma), dtype=config.ftype)
+            gammas = torch.tensor(list(gamma), dtype=dtype)
             if gammas.numel() == 1:
                 gammas = gammas.expand_as(centers).clone()
         if gammas.numel() != centers.numel():
@@ -314,9 +366,10 @@ class AgnesiTransform(nn.Module):
         a: float = 1.0805,
         max_z: int = 118,
         trainable: bool = False,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        ftype = config.ftype
+        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         values = {
             "q": torch.tensor(float(q), dtype=ftype),
             "p": torch.tensor(float(p), dtype=ftype),
@@ -331,7 +384,7 @@ class AgnesiTransform(nn.Module):
         self.p: torch.Tensor
         self.a: torch.Tensor
 
-        self.register_buffer("covalent_radii", covalent_radii(max_z))
+        self.register_buffer("covalent_radii", covalent_radii(max_z, dtype=ftype))
         self.covalent_radii: torch.Tensor
 
     def forward(

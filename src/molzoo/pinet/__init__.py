@@ -1,31 +1,27 @@
-"""PiNet package — encoder, potential, and property heads.
+"""PiNet2 — spec, feature body, energy model and property products.
 
-Layout (industrial split):
+* :mod:`molzoo.pinet.spec` — :class:`PiNetSpec`, torch-free validation
+* :mod:`molzoo.pinet.encoder` — :class:`PiNetEncoder`, the feature body
+* :mod:`molzoo.pinet.potential` — :class:`PiNetPotential` (energy, ``wrt=``)
+* :mod:`molzoo.pinet.properties` — :class:`PiNetDipole`, :class:`PiNetPolarizability`
 
-* :mod:`molzoo.pinet.spec` — config only
-* :mod:`molzoo.pinet.geometry` — PBC-safe edge geometry
-* :mod:`molzoo.pinet.encoder` — feature encoder (molrep GC blocks)
-* :mod:`molzoo.pinet.potential` — energy + functorch forces
-* :mod:`molzoo.pinet.properties` — dipole / polarizability façades
+* :mod:`molzoo.pinet.layers` — the PiNN layers (PI/IP, Cartesian PIX/Scale/Dot,
+  ``GCBlock``, ``ResUpdate``, ``OutLayer``)
 
-Public import surface is stable::
-
-    from molzoo.pinet import PiNet, PiNetPotential, PiNetSpec
+Generic pieces come from :mod:`molrep` (``embedding.mlp.FFLayer``, cutoffs,
+radial bases, ``embedding.geometry``).
 """
 
-from .encoder import PiNet
-from .geometry import compute_d5, edge_bond_diff
+from .encoder import PiNetEncoder, PiNetLayer
 from .potential import PiNetPotential
-from .properties import PiNetDipole, PiNetPolarizability, pool_layer
+from .properties import PiNetDipole, PiNetPolarizability
 from .spec import PiNetSpec
 
 __all__ = [
-    "PiNet",
-    "PiNetSpec",
-    "PiNetPotential",
     "PiNetDipole",
+    "PiNetEncoder",
+    "PiNetLayer",
     "PiNetPolarizability",
-    "compute_d5",
-    "edge_bond_diff",
-    "pool_layer",
+    "PiNetPotential",
+    "PiNetSpec",
 ]

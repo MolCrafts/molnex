@@ -10,7 +10,7 @@ _Generated 2026-09-11 by /mol:map._
 
 Rules source: `CLAUDE.md` § Architecture (+ design preferences). Boundary test: `tests/test_repository_boundaries.py`. Four packages under `src/`: **molix** (training/execution base) ← **molrep** (representation) ← **molzoo** / **molpot** (encoder recipes / physics). `PackedCache`, the ETL `molix.datasets`, `molpot.derivation` kernels/readouts/modes/stress, and `molpot.forcefield.neighbor_list` are gone. **molnex has no on-disk format**: `molix.block/1` / `FrameStore*` was deleted 2026-09-17 (spec `data-layer-01-consolidation`) as having no producer, consumer or instance. Dataset acquisition **and** persistence are **MolHub**, not molnex; `molix.data` is the data *layer* (datasets → batch → loader), which is a different thing from the deleted ETL package of the same name.
 
-Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neighbors`); `ForceField` (`molix.md` = `molpy.ForceField` re-export vs `molpot.forcefield.ForceField` subclass); `Derivative` (`molix.autograd.Derivative` nn.Module vs `molpot.contract.Derivative` StrEnum); `TypeHead` (`molrep.heads` vs `molpot.heads`); `ParamSpec` (`molpot.contract` vs `molpot.forcefield.schema`); `CosineCutoff` (`molrep.embedding` vs `molrep.utils.geometry`).
+Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neighbors`); `ForceField` (`molix.md` = `molpy.ForceField` re-export vs `molpot.forcefield.ForceField` subclass); `Derivative` (`molix.autograd.Derivative` nn.Module vs `molpot.contract.Derivative` StrEnum); `TypeHead` (`molrep.heads` vs `molpot.heads`); `ParamSpec` (`molpot.contract` vs `molpot.forcefield.schema`).
 
 ---
 
@@ -22,10 +22,10 @@ Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neigh
 - `src/molix/schema.py` — post-collate keys (`ENERGY_KEY`, `ATOMIC_ENERGY_KEY`, `ATOMIC_ENERGY_FLAT_KEY`, `FORCES_KEY`, `VIRIAL_KEY`, `STRAIN_KEY`, `POS_KEY`, `VEL_KEY`, `MASS_KEY`), `PAIR_DIST_CLAMP_MIN`, `dead_pair_length` / `dead_pair_shift`, `has_energy` / `has_forces` / `has_virial`, `CellBound` protocol (declared here so molpot implementers need not import `molix.md`).
 - `src/molix/units.py` — shared `molpy.UnitSystem` as `units`; `MD_ENERGY`; `DEAD_PAIR_CUTOFF_FACTOR` (10.0); `preset_energy_to_md` / `preset_energy_ratio`.
 - `src/molix/compile.py` — `Compiler`, `ExplainSummary`, `register_inductor_fallbacks` (`aten.index_add` extern).
-- `src/molix/export.py` — `Exporter` (AOTInductor `.pt2`; `export` vs `export_pretraced`).
+- `src/molix/export/` — one module per package format; `aoti.py`: `package` (`torch.export.export` then `aoti_compile_and_package`, returns the `.pt2` path and the non-ATen op namespaces), `load`, `custom_op_namespaces`. Engine- and model-agnostic.
 - `src/molix/quant.py` — fake-quant infrastructure (`QuantScheme` family, `FakeQuantize`, `Quantizer`, `ForceDelta`, `EffectiveTemperature`); orthogonal to `set_precision`.
 - `src/molix/logger.py` / `src/molix/logging.py` — mollog-backed stdlib façade.
-- `src/molix/autograd/` — batch-level derivative: `derivative.py` (`Derivative`), `variables.py` (`leaf`, `symmetrize_strain_grad`).
+- `src/molix/autograd/` — batch-level derivative and the potential contract: `derivative.py` (`Derivative`; takes a `Callable[[frame], frame]`, no duck typing), `potential.py` (`Potential`: abstract `energy(frame)`, `forward` = the op, `derivative` property; base of every potential, 2026-10-16), `variables.py` (`leaf`, `symmetrize_strain_grad`).
 - `src/molix/data/` — the one data layer (merged 2026-09-17 from `store` + `dataloader` + `batch`), no file IO: `dataset.py` (`BaseDataset` incl. `.counted_tables` / `.count_rows` / `.nrows_of`, `SubsetDataset`), `frame_dataset.py` (`FrameDataset`), `collate.py` (flat-dict → nested `TensorFrame`; `INDEX_KEYS` / `rebase`), `pad.py` (`MoleculePadder`), `collator.py` (`FrameCollator`), `datamodule.py` (`DataModule`, one collate route), `sampler.py`, `mixture.py`, `group_split.py`, `residual.py`, `task.py` (`BatchTask`), `charge.py` (`TotalCharge`), `valence_columns.py`, `bond_adapter.py`. **No** `cache.py` / `PackedCache` / `PackedView` / `MmapDataset` / `CachedDataset` / `FrameStore*`.
 - `src/molix/frame.py` — `TensorFrame`, `as_tensor_frame`: what the *model* reads, so not under `data/`.
 - `src/molix/neighbor.py` — `NeighborList`, Edge Convention owner: geometry, so not under `data/`.
@@ -36,31 +36,31 @@ Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neigh
 - `src/molix/hooks/` — concrete hooks (plural). Direction `hooks/ → io/ + core/`. `Trainer.fit` does a local `isinstance` import of `GradClipHook` when AMP is on (the only `core → hooks` runtime edge).
 - `src/molix/io/` — run-artifact IO: MolRec JSONL metrics, Zarr journal, numpy-only extxyz (no ASE).
 - `src/molix/md/` — in-process compilable MD: `driver.py` (`MD(dtype)`, `MaxwellBoltzmann`), `forcefield.py` (`ForceField` = molpy re-export, `MDForceField` protocol, `CellBound` re-export), `integrators.py`, `neighbors.py` (fixed-capacity MD list, `every`/`delay`/`check`), `barostat.py`, `runner.py`, `types.py`.
-- `src/molix/engine/` — engine-neutral export: `EngineAdapter` / `EngineForward` / `FlatTensorAdapter` / `MolnexTensorDictAdapter`, `StaticForward`, `export_for_lammps`, `LAMMPS_META_SCHEMA`.
+- `src/molix/deploy/` — engine-neutral deployment: `contract.py` (`SiteEnergyModel` protocol, `SiteEnergyAdapter` with `check`, `verify`, `example_inputs`, `DYNAMIC_SHAPES`) and `metadata.py` (`DeployMetadata` → versioned `{name}.json`: model units, cutoff, species, dtype, receptive field, native op libraries). `molix.engine` was removed 2026-10-15.
 - `src/molix/ff_export/` — Class-I `PotentialIR` → `ForceSpec` → LAMMPS/OpenMM via `molpy.io`. **Only documented `molix → molpot` edge.**
 - `src/molix/nn/` — `KeyedMLP`, `ScatterSum`, `BatchAggregation`.
 - `src/molix/F/` — stateless functionals over `torch.ops.molix` (`get_neighbor_pairs`, `pme_*`, `scatter_sum`, `batch_add`). `scatter_sum_compile_safe` is **not** in package `__all__` but is the compile/MACE hot-path import.
 - `src/molix/profiler/` — standalone profilers + mocks; no Trainer/hook coupling.
 - `src/molix/cli/` — Typer `molnex` console (`check` → `Doctor`).
-- `src/molix/op/` — C++/CUDA (`molix_library.cpp`, `neighbors/`, `pme/`, `scatter/`) + CMake; produces the arch-tagged `.so`.
+- `csrc/` (top level, not in the Python package; 2026-10-16) — molnex's native operator libraries, LibTorch only, built out of source (`cmake -S csrc -B build/csrc-<arch>`), each arch-tagged in its own binary dir and found by `molix` (Python) and `molnex_runtime` (C++) on `MOLNEX_OP_LIBRARY_PATH`:
+  - `csrc/molix/` (was `src/molix/op/`) — `TORCH_LIBRARY(molix)`: `molix_library.cpp`, `neighbors/`, `pme/`, `scatter/` → `libmolnex_opLib.<arch>.so`; `molnex_op_library_requirement()` = `molix_ops==<n>`; a wheel installs it as `molix/lib/`.
+  - `csrc/cueq/` — internal only, not tracked (`.gitignore`; operator ruling 2026-10-16): a local C++ registration of the `cuequivariance::*` ops the exported MACE / Allegro graphs call, for processes without Python; built only with `-DCUEQ_OPS_LIBRARY`. The upstream request for a native registration is NVIDIA/cuEquivariance#309.
 
 **molrep** (`src/molrep/`) — reusable representation blocks (no energy/force, no molpot import)
-- `src/molrep/__init__.py` — thin façade; `ProductHead` still imported through the `readout.product` shim.
-- `src/molrep/embedding/` — node/angular/radial/cutoff/MLP + `mace.py` (`EmbeddingBlock`/`EmbeddingSpec`), `covalent.py`, `support.py`.
-- `src/molrep/interaction/` — shared equivariant blocks + family namespaces `interaction/mace/` (block/conv/density), `interaction/pinet/` (pure GC, no energy), `interaction/polar/` (PolarMACE blocks, no molpot). Root `interaction/density.py` **gone**.
-- `src/molrep/readout/` — canonical `mace.py` (`ProductHead`, `LinearReadout`, `NonLinearReadout`, `NonLinearBiasReadout`), `pooling.py`, `projection.py`. `product.py` is a deprecated re-export shim (slated for `mace-subpackage-restructure-06-wire`). `readout/scalar.py` **gone**.
+- `src/molrep/__init__.py` — thin façade over `embedding` + `heads.scalar.ScalarHead`.
+- `src/molrep/embedding/` — `node.py` (`JointEmbedding`), `angular.py` (`SphericalHarmonics`, cue), `radial.py`, `cutoff.py`, `mlp.py` (`FFLayer`, `ScalarMLPFunction`, `MomentNormalizedMLP`, `normalize2mom`), `geometry.py`, `covalent.py`, `support.py`. `block.py` is gone (2026-10-16). No `src/molrep/utils/`.
+- `src/molrep/interaction/` — `product.py` only (`irreps_from_l_max`, `sh_irreps_from_l_max`). No per-model packages. A block that serves one model lives in that model's package (`molzoo/mace/layers.py`, `molzoo/mace/heads.py`, `molzoo/pinet/layers.py`, `molzoo/allegro/layers.py`; ruling 2026-10-15, MACE moved 2026-10-16). No `src/molrep/readout/`.
 - `src/molrep/heads/` — representation projections only (`ScalarHead`, `TypeHead`/`MultiTypeHead`, labelers). Physical heads live in `molpot.heads`.
 - `src/molrep/chem/` — continuous chemical perception (no energy).
 - `src/molrep/condensation/` — continuous MM params → discrete `TypeSystem`; physics gating via injected `physical_eval` only.
 - `src/molrep/perception/` — symbolic SMARTS/SMIRKS (`SmartsMatcher`, `SymbolicForceField`).
 - `src/molrep/analysis/` — latent diagnostics (must not import molpot/molzoo/condensation).
-- `src/molrep/utils/` — geometry helpers (`NeighborGraphBuilder`, `SphericalBasis`, `GaussianRBF`, `CosineCutoff`).
 
 **molpot** (`src/molpot/`) — physics: potentials, physical heads, tensor-level derivation, Class-I FF + IR
 - `src/molpot/__init__.py` — eager alphabetized façade (does **not** re-export `AtomicReferenceEnergy` or `ZBLRepulsion`).
 - `src/molpot/contract.py` — torch-free S1 vocabulary (`InteractionContract`, `Contribution`, `CutoffKind`, `ExclusionClass`, `Derivative` **StrEnum**, `ParamFrame`, `ParamSpec`, `TermSpec`).
 - `src/molpot/manifest.py` — `ModelManifest` + records (`MANIFEST_SCHEMA`).
-- `src/molpot/derivation/` — **four files only**: `energy.py` (`EnergyAggregation`), `force.py` (`ForceDerivation`, `autograd_forces*`), `hessian.py` (`HessianDerivation`), `protocol.py` (re-exports `molix.schema` keys + `write_energy`/`write_forces`/`absorb_model_output`). **Gone:** `kernels.py`, `energy_readout.py`, `force_readout.py`, `stress.py`, `modes/`. Batch-level `F = -∂E/∂pos` / virial is `molix.autograd.Derivative`.
+- `src/molpot/derivation/` — **three files only**: `energy.py` (`EnergyAggregation`), `force.py` (`ForceDerivation`, `autograd_forces*`), `hessian.py` (`HessianDerivation`). **Gone:** `kernels.py`, `energy_readout.py`, `force_readout.py`, `stress.py`, `modes/`, and (2026-10-16) `protocol.py` with `write_energy` / `write_forces` / `ensure_graphs` / `absorb_model_output` / `call_energy` / `PotentialModule` — a potential writes the `molix.schema` keys itself from `energy(frame)`; `hessian.py` and `forcefield/potentials.py` import `molix.schema` directly. Batch-level `F = -∂E/∂pos` / virial is `molix.autograd.Derivative`.
 - `src/molpot/heads/` — physical heads: `energy.py` (`AtomicReferenceEnergy`, `AtomicEnergyMLP`, `EnergyHead`), edge/dipole/multipole/electrostatics/element/charge_bond/charge_response/rescale/type; `provenance/`.
 - `src/molpot/composition/` — `PotentialComposer`, `Sonata`/`SonataSpec`, generic + MM parameter heads, `MultiHead`. `pooling.py` exists but is **not** in package `__all__`.
 - `src/molpot/pooling/` — encoder-output → energy adapters (layer/edge/graph).
@@ -70,14 +70,16 @@ Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neigh
 - `src/molpot/ir/` — Class-I IR bags, `PotentialIR`, `NonbondedScaling`, `NonbondedMethodRecord`, `UnitTag` / `CLASS_I_CANONICAL`.
 
 **molzoo** (`src/molzoo/`) — encoder recipes / foundation checkpoints
-- `src/molzoo/__init__.py` — **lazy** PEP 562 façade.
-- `src/molzoo/mace/` — `spec.py` (torch-free configs, eager), `geometry.py`, `encoder.py` (`MACEEncoder`; constructs `AtomicReferenceEnergy` + `GlobalRescale` + optional `ZBLRepulsion`), `potential.py` (`MacePotential`, `MaceMatpes`, `MaceOmol`; wraps `molix.autograd.Derivative`), `polar.py` (`MacePolar`), `research.py` (`MACE`), `checkpoint.py` (`CheckpointRemap`; remaps live inside `MaceXX.load` — no public `*_REMAP` / `load_*_state_dict`), `utils.py`. `variants.py` **gone**.
-- `src/molzoo/pinet/` — `spec`, `geometry`, `encoder` (`PiNet`), `potential` (`PiNetPotential`; energy + forces), `properties` (dipole/polarizability).
+- `src/molzoo/__init__.py` — docstring only; nothing exported. Families are imported by subpackage, eagerly (`from molzoo.mace import MaceMatpes`); no lazy tables (2026-10-16).
+- `src/molzoo/encoder.py` — `ElementTable` mixin: `validate_elements` / `_validate_once`, the element-table precondition the three encoders spend once on their first eager call (folded out under tracing).
+- `src/molzoo/mace/` — `spec.py` (torch-free specs, `extra="forbid"`: `MACESpec`, `MACEMatpesSpec`, `MACEOMolSpec`, `MACEOffSpec`, `MACELesSpec`, `MACEPolarSpec` (polar head fields folded in; no `PolarHeadSpec`), `BodySchedule`; typed official configs `MaceOfficialConfig` / `LesOfficialConfig` (`extra="ignore"`) and `<Spec>.from_official(cfg)`), `layers.py` (MACE-only blocks: conv mixin, `RadialMLP`, `GatedNonlinearity`, `ElementLinear`, `ElementIndex`, the interactions, `EquivariantProductBasis`), `heads.py` (`JointFeatureSpec` / `JointFeatureEmbedding`, `LinearReadout`, `NonLinearReadout`, `NonLinearBiasReadout`), `coupling.py` (`real_coupling`, `MaceO3`), `encoder.py` (`MACEEncoder(ElementTable, nn.Module)`: primitives + `forward(td)` writing `atoms.node_features (N, L, F)`, the `0e` block of each layer; no molpot import), `potential.py` (`MacePotential(Potential, MACEEncoder)` registers the energy heads on itself: `AtomicReferenceEnergy`, `GlobalRescale`, optional `ZBLRepulsion`, readouts; `energy(frame)` only, `input_dtype` constructor kwarg; `MaceMatpes`, `MaceOmol`, `MaceOff` (agnostic interactions, `avg_num_neighbors`), `MaceLes` (latent-charge readouts + `molpot.potentials.elec.les.LatentEwaldEnergy`); `.load(path, *, config=None, wrt=(), energy_dtype=, input_dtype=)` = `MaceArchive.read` → `from_official` → `CheckpointRemap(<family>_keys, skip=MACE_SKIP)`), `polar.py` (the Polar representation blocks + `MacePolar`), `checkpoint.py` (`matpes_keys` / `omol_keys` / `off_keys` / `les_keys` / `polar_keys`, `MACE_SKIP`), `utils.py` (`MaceArchive`). `variants.py` and the research `MACE` encoder (`research.py`) are **gone**. No nested `body` submodule.
+- `src/molzoo/pinet/` — `spec` (`PiNetSpec`), `layers` (PiNN layers), `encoder` (`PiNetEncoder`), `potential` (`PiNetPotential(PiNetEncoder)`), `properties` (`PiNetDipole` / `PiNetPolarizability`, each `(PiNetEncoder)`).
 - `src/molzoo/chem/` — `ChemPerception` over `molrep.chem.ChemEncoder` + `ChemPerceptionSpec`.
-- `src/molzoo/allegro.py` — Allegro encoder + spec (single module).
-- `src/molzoo/specs/` — per-encoder 10-section markdown (`mace.md`, `mace_matpes.md`, `mace_omol.md`, `allegro.md`, `pinet2.md`); not code.
+- `src/molzoo/allegro/` — `spec` (`AllegroSpec`), `layers` (type embedding, weighted channels, `Contracter`), `encoder` (`AllegroEncoder`), `potential` (`AllegroPotential(AllegroEncoder)`, `.load` of official `.nequip.zip`), `checkpoint` (key table), `utils` (package reader).
+- `src/molzoo/checkpoint.py` — shared `CheckpointRemap`, `ModuleStub`, `StubUnpickler` (MACE + Allegro loaders).
+- `src/molzoo/specs/` — per-encoder 10-section markdown (`allegro.md`, `mace_matpes.md`, `mace_omol.md`, `mace_off.md`, `pinet2.md`, `rondo.md`; mirrored byte-for-byte to `docs/molzoo/specs/`); not code.
 
-Out of `src/` (architecture counterpart, not a Python package in this inventory): repo-root `interface/` is the C++ LAMMPS `pair_style molnex` + AOTI `ModelRunner` that `molix.engine` exports into.
+Out of `src/` (architecture counterpart, not a Python package in this inventory): repo-root `interface/` is the C++ side: a format runtime (engine-free), native op libraries, and the LAMMPS `pair_style molnex` that loads what `molix.deploy` + `molix.export` write.
 
 ---
 
@@ -87,7 +89,7 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 
 **molix**
 - `molix`: `Checkpoint`, `CheckpointBackend`, `Compiler`, `Derivative`, `ExplainSummary`, `Exporter`, `JournalHook`, `MAELoss`, `MSELoss`, `ProfilerHook`, `Stage`, `StepResult`, `TorchSaveBackend`, `TrainState`, `Trainer`, `WeightedLoss`, `config`, `logger`, `logging`, `register_inductor_fallbacks`
-- `molix.autograd`: `Derivative`, `leaf`, `symmetrize_strain_grad`
+- `molix.autograd`: `Derivative`, `Potential`, `leaf`, `symmetrize_strain_grad`
 - `molix.data`: `BaseDataset`, `BatchSamplerSource`, `BatchTask`, `DataMixture`, `DataModule`, `DataModuleProtocol`, `EnergyResidual`, `FrameCollator`, `FrameDataset`, `MoleculeCollator`, `MoleculePadder`, `SubsetDataset`, `TaskMixtureBatchSampler`, `TokenBudgetBatchSampler`, `TokenBudgetPacker`, `TotalCharge`, `bond_index_from_columns`, `collate_molecules`, `group_split_indices`, `stack_angle_index`, `stack_improper_index`, `stack_proper_index`. Module-local extras: `collate.INDEX_KEYS` / `rebase`; `sampler.FrameLabelTable`.
 - `molix.frame`: `TensorFrame`, `as_tensor_frame`. `molix.neighbor`: `NeighborList`.
 - `molix.core`: **no `__all__`, no re-exports**. Per-module: `trainer.Trainer`; `state.{Stage,TrainState,StepResult,resolve,display,NAMESPACES}`; `hook.{Hook,BaseHook,ScalarHook}`; `metrics.{Metric,BaseMetric,MAE,RMSE,MSE,R2Score,Accuracy,MetricCollection,MoleculeCenteredRMSE,MoleculeCenteredMAE}`; `protocols.{TaskProtocol,WorkflowProtocol}`; `audit.{TaskGradientProbe,TaskGradientSnapshot,GradientBalanceReport}`; `seed.{seed_everything,make_worker_init_fn,make_generator}`
@@ -97,14 +99,14 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 - `molix.hooks`: `ActivationCheckpointingHook`, `CheckpointHook`, `EarlyStop`, `GPUMemoryHook`, `GPUUtilsHook`, `GradClipHook`, `GradientBalanceHook`, `JournalHook`, `Log`, `MetricsHook`, `MolRecMetricsHook`, `ProfilerHook`, `ProgressBarHook`, `StepSpeedHook`, `TensorBoardHook`
 - `molix.io`: `ExtxyzFrame`, `JournalReader`, `JournalWriter`, `METRICS_DIRNAME`, `METRICS_FILENAME`, `METRICS_INDEX_FILENAME`, `MetricReadResult`, `MetricsWriter`, `ensure_run_package`, `parse_extxyz_frames`, `read_metrics`, `rebuild_metrics_index`, `write_extxyz_frames`, `write_meta`, `write_status`
 - `molix.md`: `BerendsenBarostat`, `EnergyDrift`, `EnergyDriftHook`, `ForceField`, `Integrator`, `LangevinVerletIntegrator`, `MD`, `MDCheckpointHook`, `MDForceField`, `MDHook`, `MDObservables`, `MDRunner`, `MDState`, `MaxwellBoltzmann`, `NeighborList`, `NeighborStrategy`, `TrajectoryHook`, `VelocityInitHook`, `VelocityVerletIntegrator`, `instantaneous_pressure`, `pressure_bar_to_md`, `units`. Module extra: `forcefield.CellBound` (re-export of `molix.schema.CellBound`).
-- `molix.engine`: `LAMMPS_META_SCHEMA`, `FlatTensorAdapter`, `EngineAdapter`, `EngineForward`, `MolnexTensorDictAdapter`, `StaticForward`, `export_for_lammps`
+- `molix.deploy`: `DeployMetadata`, `SiteEnergyAdapter`, `SiteEnergyModel`, `example_inputs`, `verify`
 - `molix.ff_export`: `ANGSTROM_TO_NM`, `BOND_K_IR_TO_OPENMM`, `KCAL_PER_MOL_TO_KJ_PER_MOL`, `BackendAdapter`, `ConventionRow`, `ConventionTable`, `ForceFieldCompiler`, `ForceSpec`, `LammpsAdapter`, `LammpsWriter`, `OpenMMAdapter`, `TranslationCase`, `UnsupportedTermError`. Module extra: `conventions.ANGLE_K_IR_TO_OPENMM` (not in package `__all__`).
 - `molix.nn`: `BatchAggregation`, `KeyedMLP`, `KeyedMLPSpec`, `ScatterSum`
-- `molix.F`: `get_neighbor_pairs`, `pme_direct`, `pme_reciprocal`, `scatter_sum`, `batch_add`. Extra: `F.scatter.scatter_sum_compile_safe` (imported by `molrep.interaction.mace.conv` and `molzoo.mace.potential`).
+- `molix.F`: `get_neighbor_pairs`, `pme_direct`, `pme_reciprocal`, `scatter_sum`, `batch_add`. Extra: `F.scatter.scatter_sum_compile_safe` (imported by `molzoo.mace.layers` and `molzoo.mace.potential`).
 - `molix.profiler`: `DataLoaderProfiler`, `DataLoaderResult`, `DatasetProfiler`, `DatasetResult`, `Hotspot`, `Measurement`, `Memory`, `MockBatch`, `MockModel`, `MockSource`, `ProfileSpec`, `ProfileSweep`, `Profiler`, `ProfilerConfig`, `Report`, `ReportSpec`, `TaskProfiler`, `TaskResult`, `Timing`, `TrainerProfiler`, `TrainerResult`, `mock_node_feature_loss`
 - `molix.cli`: `app`, `main`. Extra: `doctor.{Doctor,CheckResult,Status}`
 - `molix.compile`: `Compiler`, `ExplainSummary`, `register_inductor_fallbacks` (no `__all__`)
-- `molix.export`: `Exporter` (no `__all__`)
+- `molix.export`: `aoti` (submodule: `package`, `load`, `custom_op_namespaces`, `Package`); nothing on `molix.__all__`
 - `molix.config`: `MolnexConfig`, singleton `config` (no `__all__`)
 - `molix.quant`: `QuantScheme`, `FP16Scheme`, `BF16Scheme`, `IntScheme`, `Int8Scheme`, `Int8PerChannelScheme`, `Int4Scheme`, `Int4PerChannelScheme`, `FakeQuantize`, `Quantizer`, `ForceDelta`, `EffectiveTemperature` (no `__all__`)
 - `molix.schema`: `ENERGY_KEY`, `ATOMIC_ENERGY_KEY`, `ATOMIC_ENERGY_FLAT_KEY`, `FORCES_KEY`, `VIRIAL_KEY`, `STRAIN_KEY`, `POS_KEY`, `VEL_KEY`, `MASS_KEY`, `PAIR_DIST_CLAMP_MIN`, `dead_pair_length`, `dead_pair_shift`, `has_energy`, `has_forces`, `has_virial`, `CellBound` (no `__all__`)
@@ -113,23 +115,21 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 
 **molrep**
 - `molrep`: `JointEmbedding`, `SphericalHarmonics`, `BesselRBF`, `CosineCutoff`, `PolynomialCutoff`, `ScalarHead`, `ProductHead`, `masked_sum_pooling`, `masked_mean_pooling`
-- `molrep.embedding`: `AgnesiTransform`, `BesselRBF`, `ChemicalSupportIndex`, `covalent_radii`, `MomentNormalizedMLP`, `normalize2mom`, `CosineCutoff`, `GaussianBasis`, `HalfCosineCutoff`, `JointEmbedding`, `JointFeatureEmbedding`, `JointFeatureSpec`, `PolynomialBasis`, `PolynomialCutoff`, `SphericalHarmonics`, `TanhCutoff`. Extra (not in package `__all__`): `embedding.mace.{EmbeddingBlock,EmbeddingSpec}`
-- `molrep.interaction`: `DensityInteraction`, `DensityResidualInteraction`, `GatedNonlinearity`, `ResidualInteraction`, `EquivariantProductBasis`, `RadialMLP`, `MessageAggregation`, `MessageAggregationSpec`, `EquivariantLinear`, `ConvTP`, `ConvTPSpec`, `irreps_from_l_max`, `sh_irreps_from_l_max`, `SymmetricContraction`, `SymmetricContractionSpec`, `ElementUpdate`, `ElementUpdateSpec`, `RadialWeightMLP`, `RadialWeightMLPSpec`
-- `molrep.interaction.mace`: `ConvTP`, `ConvTPSpec`, `InteractionBlock`, `InteractionSpec`, `DensityInteraction`, `DensityResidualInteraction`, `SKIP_TP_METHOD`
-- `molrep.interaction.pinet`: `FFLayer`, `activation_from_name`, `PILayer`, `IPLayer`, `PIXLayer`, `ScaleLayer`, `DotLayer`, `ResUpdate`, `InvarLayer`, `EquivarLayer`, `OutLayer`, `GCBlock`
-- `molrep.interaction.polar`: `AgnosticEmbeddedOneBodyVariableUpdate`, `EnvironmentDependentSpinSourceBlock`, `MultiLayerFeatureMixer`, `OneBodyMLPFieldReadout`, `SparseUvuTensorProduct`
-- `molrep.readout`: `masked_sum_pooling`, `masked_mean_pooling`, `BasisProjection`, `BasisProjectionSpec`, `ProductHead`, `ProductHeadSpec` — plus `LinearReadout`, `NonLinearBiasReadout`, `NonLinearReadout` imported **after** `__all__` (importable, undeclared)
+- `molrep.embedding`: `AgnesiTransform`, `BesselRBF`, `ChemicalSupportIndex`, `covalent_radii`, `MomentNormalizedMLP`, `normalize2mom`, `CosineCutoff`, `GaussianBasis`, `HalfCosineCutoff`, `JointEmbedding`, `PolynomialBasis`, `PolynomialCutoff`, `SphericalHarmonics`, `TanhCutoff`. Extra (not in package `__all__`): `embedding.block.{EmbeddingBlock,EmbeddingSpec}`
+- `molrep.interaction`: `irreps_from_l_max`, `sh_irreps_from_l_max`
+- MACE: blocks in `molzoo.mace.layers` (`_CueqChannelwiseBlockMixin`, `RadialMLP`, `GatedNonlinearity`, `ElementLinear`, `DensityInteraction`, `DensityResidualInteraction`, `AgnosticInteraction`, `AgnosticResidualInteraction`, `ResidualInteraction`, `EquivariantProductBasis`) and `molzoo.mace.heads` (`JointFeatureSpec`, `JointFeatureEmbedding`, `LinearReadout`, `NonLinearReadout`, `NonLinearBiasReadout`)
+- PiNet2: layers in `molzoo.pinet.layers` (`PILayer`, `IPLayer`, `PIXLayer`, `ScaleLayer`, `DotLayer`, `compute_d5`, `ResUpdate`, `InvarLayer`, `EquivarLayer`, `GCBlock`, `GCOutput`, `OutLayer`); generic `molrep.embedding.mlp.FFLayer`, `molix.nn.activation_from_name`
+- Allegro: layers in `molzoo.allegro.layers` (`ProductTypeEmbedding`, `WeightedChannels`, `Contracter`); generic `molrep.embedding.{SincBesselRBF, ScalarMLPFunction}`, `molpot.potentials.UniversalZBL`; edge geometry `molrep.embedding.geometry.edge_vectors` / `edge_lengths`
+- `molzoo.mace.polar` (blocks above the product): `AgnosticEmbeddedOneBodyVariableUpdate`, `EnvironmentDependentSpinSourceBlock`, `MultiLayerFeatureMixer`, `OneBodyMLPFieldReadout`, `SparseUvuTensorProduct`
 - `molrep.heads`: `TypeHead`, `MultiTypeHead`, `Labeler`, `ProxyLabeler`, `TypeSystemLabeler`, `ScalarHead`
 - `molrep.chem`: `AngleContext`, `AtomChemEmbedding`, `AtomTypeReadout`, `BondChemEmbedding`, `BondContext`, `ChemEmbeddings`, `ChemEncoder`, `ChemGraphBlock`, `ImproperContext`, `ProperContext`, `TypingRecoveryMetrics`, `TypingRecoveryReport`
 - `molrep.condensation`: `InteractionClass`, `MergeCriterion`, `default_criterion`, `bond_default_criterion`, `angle_default_criterion`, `proper_default_criterion`, `improper_default_criterion`, `lj_default_criterion`, `charge_default_criterion`, `TypeRecord`, `TypeSystem`, `UNMATCHED_TYPE_ID`, `ClassAssignment`, `PhysicalErrorMetrics`, `Condenser`, `CondensationResult`, `TypeSystemLabeler`
 - `molrep.perception`: `ClassPatternRegistry`, `DiscreteClassRecord`, `FakeSmartsMatcher`, `MolpySmartsMatcher`, `SmartsMatcher`, `SymbolicForceField`, `SymbolicPattern`
 - `molrep.analysis`: `AtomLatentTable`, `NearestNeighbourTypePurity`, `TypePurityReport`, `LatentPCA2D`, `LatentAnalysisArtifacts`
-- `molrep.utils`: `NeighborGraphBuilder`, `SphericalBasis`, `GaussianRBF`, `CosineCutoff`
 
 **molpot**
 - `molpot` (top-level, alphabetized): `AngleBag`, `AngleHarmonic`, `AngleParamHead`, `AtomicChargeModel`, `AtomicEnergyMLP`, `BasePotential`, `BondBag`, `BondHarmonic`, `BondParamHead`, `CLASS_I_CANONICAL`, `ChargeBag`, `ChargeEquilibrationProblem`, `ChargeHead`, `ChargeTransfer`, `ChargeTransferParameterHead`, `ChiEtaHead`, `Contribution`, `CutoffKind`, `Derivative` (StrEnum), `DiagonalHardnessKernel`, `DihedralHarmonic`, `DispersionC6`, `EdgeToNodePooling`, `ElectronegativityEqualization`, `ElectrostaticsRecord`, `EnergyAggregation`, `EnergyHead`, `ExclusionClass`, `ExclusionScales`, `ExclusionTable`, `ForceDerivation`, `ForceField`, `ForceFieldPredictions`, `ForceFieldSchemaView`, `HessianDerivation`, `ImproperHarmonic`, `ImproperHarmonicBag`, `ImproperParamHead`, `ImproperPeriodic`, `ImproperPeriodicBag`, `InteractionContract`, `InteractionRecord`, `LJ126`, `LJBag`, `LJParameterHead`, `LayerPooling`, `MANIFEST_SCHEMA`, `MaxPooling`, `MeanPooling`, `MixingRule`, `ModelManifest`, `MultiHead`, `NonbondedMethodRecord`, `NonbondedScaling`, `NumericsRecord`, `OPLSAAForceField`, `ParamFrame`, `ParamTableRecord`, `Parameterizer`, `Polarization`, `PotentialComposer`, `PotentialIR`, `PotentialMeta`, `Potentials`, `ProperTorsionBag`, `ProperTorsionParamHead`, `ProperTorsionPeriodic`, `ProvenanceRecord`, `RepresentationRecord`, `RepulsionExp6`, `RepulsionParameterHead`, `ShieldedCoulombKernel`, `SolverRecord`, `Sonata`, `SonataSpec`, `SumPooling`, `TSScalingHead`, `TermSpec`, `TypeHead`, `UnitTag`, `WilsonBMatrix`, `geometric_arithmetic_mixing`, `geometric_mixing`, `lorentz_berthelot`. **Not** on this façade: `AtomicReferenceEnergy` (use `molpot.heads`), `ZBLRepulsion` (use `molpot.potentials`).
 - `molpot.derivation`: `EnergyAggregation`, `ForceDerivation`, `HessianDerivation`, `autograd_forces`, `autograd_forces_from_energy`
-- `molpot.derivation.protocol`: `ATOMIC_ENERGY_FLAT_KEY`, `ATOMIC_ENERGY_KEY`, `ENERGY_KEY`, `FORCES_KEY`, `POS_KEY`, `VIRIAL_KEY`, `PotentialModule`, `absorb_model_output`, `call_energy`, `ensure_graphs`, `has_energy`, `has_forces`, `has_virial`, `write_energy`, `write_forces`
 - `molpot.heads`: `AtomicEnergyMLP`, `AtomicReferenceEnergy`, `BondChargeHead`, `ChargeResponseHead`, `CoverageRegime`, `DipoleHead`, `EdgeEnergyHead`, `ElementAlphaTable`, `ElementChargeTable`, `EnergyHead`, `GlobalRescale`, `HardnessHead`, `HardnessHeadSpec`, `ParameterProvenance`, `PermMultipoleHead`, `PermMultipoleHeadSpec`, `PolarizabilityHead`, `PolarizabilityHeadSpec`, `PerSpeciesScaleShift`, `SupportClassifier`, `TypeHead`, `attach_provenance`
 - `molpot.heads.provenance`: `CoverageRegime`, `ParameterProvenance`, `SupportClassifier`, `attach_provenance`
 - `molpot.composition`: `LJParameterHead`, `RepulsionParameterHead`, `ChargeTransferParameterHead`, `ChargeHead`, `TSScalingHead`, `BondParamHead`, `AngleParamHead`, `ProperTorsionParamHead`, `ImproperParamHead`, `MultiHead`, `PotentialComposer`, `Sonata`, `SonataSpec`
@@ -145,75 +145,90 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 - `molpot.manifest`: `ElectrostaticsRecord`, `InteractionRecord`, `MANIFEST_SCHEMA`, `ModelManifest`, `NumericsRecord`, `ParamTableRecord`, `ProvenanceRecord`, `RepresentationRecord`, `SolverRecord`
 
 **molzoo**
-- `molzoo` (all **lazy**, PEP 562 `__getattr__` + `__dir__`): `Allegro`, `AllegroSpec`, `ChemPerception`, `ChemPerceptionSpec`, `MACE`, `MACESpec`, `MaceMatpes`, `MaceOmol`, `MacePolar`, `MacePotential`, `PiNet`, `PiNetSpec`. **Gone from façade:** `load_matpes_state_dict`, `load_omol_state_dict` (now `MaceMatpes.load` / `MaceOmol.load`).
-- `molzoo.mace` (specs eager, rest lazy): `CheckpointRemap`, `MACE`, `MACEMatpesSpec`, `MACEOMolSpec`, `MACEPolarSpec`, `MACEResearchSpec`, `MACESpec`, `MaceMatpes`, `MaceOmol`, `MacePolar`, `MacePotential`. Extra (not in `__all__`): `encoder.MACEEncoder`; `geometry.{edge_vectors,edge_lengths}`; `utils.read_archive`.
-- `molzoo.pinet` (eager): `PiNet`, `PiNetSpec`, `PiNetPotential`, `PiNetDipole`, `PiNetPolarizability`, `compute_d5`, `edge_bond_diff`, `pool_layer`
+- `molzoo`: nothing (docstring only; 2026-10-16). Families export eagerly from their subpackages. **Gone:** the lazy façade, `load_matpes_state_dict`, `load_omol_state_dict` (now `MaceMatpes.load` / `MaceOmol.load`).
+- `molzoo.mace` (eager): `MACEEncoder`, `MACELesSpec`, `MACEMatpesSpec`, `MACEOMolSpec`, `MACEOffSpec`, `MACEPolarSpec`, `MACESpec`, `MaceLes`, `MaceMatpes`, `MaceOff`, `MaceOfficialConfig`, `MaceOmol`, `MacePolar`, `MacePotential`. Extra (not in `__all__`): `checkpoint.{matpes_keys,omol_keys,off_keys,les_keys,polar_keys,MACE_SKIP}`; `utils.MaceArchive`; `layers.*`, `heads.*`, `coupling.{real_coupling,MaceO3}`.
+- `molzoo.pinet` (eager): `PiNetDipole`, `PiNetEncoder`, `PiNetLayer`, `PiNetPolarizability`, `PiNetPotential`, `PiNetSpec`
 - `molzoo.chem`: `ChemPerception`, `ChemPerceptionSpec`
-- `molzoo.allegro` (module, no package `__init__`): `Allegro`, `AllegroSpec`
+- `molzoo.allegro` (eager): `AllegroEncoder`, `AllegroPotential`, `AllegroSpec`, `NequipConfig`
 
 ---
 
 ### Style summary
 
-- **molix**: naming=nouns with role suffixes (`*Hook` implementations vs singular `core/hook.py` contract; `*Profiler`/`*Result`; `*Dataset`; `*Sampler`; `*Adapter`; `*Writer`/`*Reader`). construction=`Class(...)` with keyword-only tails; fluent MD (`MD(dtype).set_forcefield(...).set_integrator(...).set_neighbors(...)`); `Trainer.compile(...)` in-place; no `make_*` façades except `seed.make_generator` / `make_worker_init_fn` (torch-object producers) and `EngineAdapter.build_inputs` (method). `collate_molecules(..., dtype=)` returns a `TensorFrame`. errors=`ValueError` with f-string key/shape; `TrainState.__setitem__` rejects slash/tuple **writes**; op-library loader `warnings.warn`s, `ensure_op_registered` raises `RuntimeError`. Precision: one home `config.set_precision` / `config["ftype"]`; DataModule collate casts floats via `batch_to`; `MD(dtype)` owns MD-side precision; `molix.quant` perturbs weight *values* while compute stays at `ftype`. TensorFrame is a typed view (`TypedTensorDict`) with **no** dtype/storage/behaviour of its own. Cache: materialization is MolHub's; there is no molnex format and no `PackedCache`.
-- **molrep**: naming=`Block`/`Layer`/`Head`/`Embedding`; configurable blocks pair `nn.Module` + pydantic `XxxSpec(BaseModel)` (`ConfigDict(arbitrary_types_allowed=True)`). construction=`nn.Module.__init__` with explicit dims (no `LazyLinear`); `register_buffer` constants at `config["ftype"]`. errors=`ValueError` on irreps/shape. Docstrings: Google + `Reference:` arXiv/DOI. Deprecated locations are thin re-export shims (`readout/product.py`); polar/pinet/mace family namespaces hold family-only blocks.
+- **molix**: naming=nouns with role suffixes (`*Hook` implementations vs singular `core/hook.py` contract; `*Profiler`/`*Result`; `*Dataset`; `*Sampler`; `*Adapter`; `*Writer`/`*Reader`). construction=`Class(...)` with keyword-only tails; fluent MD (`MD(dtype).set_forcefield(...).set_integrator(...).set_neighbors(...)`); `Trainer.compile(...)` in-place; no `make_*` façades except `seed.make_generator` / `make_worker_init_fn` (torch-object producers). `collate_molecules(..., dtype=)` returns a `TensorFrame`. errors=`ValueError` with f-string key/shape; `TrainState.__setitem__` rejects slash/tuple **writes**; op-library loader `warnings.warn`s, `ensure_op_registered` raises `RuntimeError`. Precision: one home `config.set_precision` / `config["ftype"]`; DataModule collate casts floats via `batch_to`; `MD(dtype)` owns MD-side precision; `molix.quant` perturbs weight *values* while compute stays at `ftype`. TensorFrame is a typed view (`TypedTensorDict`) with **no** dtype/storage/behaviour of its own. Cache: materialization is MolHub's; there is no molnex format and no `PackedCache`.
+- **molrep**: naming=`Block`/`Layer`/`Head`/`Embedding`; a few blocks carry a plain pydantic `BaseModel` spec. construction=`nn.Module.__init__` with explicit dims (no `LazyLinear`); `register_buffer` constants at `config["ftype"]`. errors=`ValueError` on irreps/shape. Docstrings: Google + `Reference:` arXiv/DOI. molrep holds generic components only — embeddings, radial bases, cutoffs, spherical harmonics, MLPs, edge geometry, `interaction.product`, `cueq`; no `readout/`, no `utils/`, no MACE / Polar blocks (moved to `molzoo/mace/{layers,heads,polar}.py` 2026-10-16); blocks that serve one model live in that model's molzoo package (2026-10-15).
 - **molpot**: naming=physical-quantity types (`ForceDerivation`, `HessianDerivation`, `WilsonBMatrix`, `AtomicReferenceEnergy`); `*Bag` IR containers; `*Head` predictors; algorithm-named solvers/kernels. `molpot.contract.Derivative` is a **StrEnum of capability**, not the autograd op. construction=`BasePotential` = `nn.Module` + ABC; `energy(frame) -> frame` / scalar; derivation types are stateless `nn.Module`s reused; `@dataclass(frozen=True)` IR bags/records; `contract.py` is torch-free. errors=`ValueError` with physics-explicit message; `BondHarmonic` rejects `(E, 2)` as `bond_index`; `UnsupportedTermError` on export. Reference energy: `AtomicReferenceEnergy` is a **frozen Z-indexed `E0` buffer** (persistent, not learnable) with `pooled(Z, batch, num_graphs)` for atomic dressing; `AtomicEnergyMLP` predicts interaction energy; `EnergyAggregation` only scatter-sums. `EnergyHead` still bundles MLP+pool; new code composes MLP + `EnergyAggregation`.
-- **molzoo**: naming=model name = class (`MACE`, `MaceMatpes`, `PiNet`, `Allegro`, `ChemPerception`); config = `<Model>Spec`; foundation variants constructed by keyword with `.load(path, format="official")`. construction=`TensorDictModuleBase` / `nn.Module` `forward(td) -> td`; energy/force potentials compose `molix.autograd.Derivative` in `__init__` (`wrt=("atoms.pos",)`). Import policy: **lazy PEP 562** so config reads never pull cuEquivariance; `AttributeError` (not `ImportError`) on unknown names. Docstrings: long headers + mandatory `Reference:`; encoder specs in `src/molzoo/specs/<encoder>.md`. Encoder-co-location exception: MACE/PiNet potentials import `molpot.heads` / `molpot.derivation.protocol` / `molpot.potentials.repulsion` / `molpot.potentials.gto`.
+- **molzoo**: naming=body `<Model>Encoder(spec)` + product `<Model>Potential` / named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, `ChemPerception`); config = `<Model>Spec` (pydantic, `extra="forbid"`, every default on the spec). construction=product over the typed spec object, `Product(spec, *, wrt=(), …)`; foundation weights through `Product.load(path, *, wrt=(), …)` (MACE: `config=`, `energy_dtype=`, `input_dtype=`; Allegro: `tp_method=`), never a `format=` switch. Every product is a `molix.autograd.Potential`: two public methods, `energy(frame)` (writes `atoms.energy` / `graphs.energy`; `graphs` namespace required) and `forward` (= `Derivative(self.energy, wrt)` built as the last line of `__init__`); no `energy_core` / `atomic_energy` / `configure_input_dtype`. Encoders are `(ElementTable, nn.Module)` with `forward(td) -> td`. Import policy: **eager** subpackage imports (`from molzoo.mace import …`); `molzoo/__init__` exports nothing. Docstrings: long headers + mandatory `Reference:`; encoder specs in `src/molzoo/specs/<encoder>.md`. Encoder-co-location exception: MACE/PiNet/Allegro potentials import `molpot.heads` / `molpot.potentials.{repulsion,gto,elec.les}`; nothing in molzoo imports `molpot.derivation`.
 
 ---
 
 ### Layer roles
 
 - **`molix` = base layer.** Owns dtype singleton (`molix.config`), post-collate schema (`molix.schema` + `molix.data.collate`), `TrainState` namespace contract, hooks/steps, storage, IO, MD, leaf execution (`compile` / `export` / `engine` / `quant` / `profiler`), and the **one batch-level derivative** (`molix.autograd.Derivative`). Documented one-way rule: `molix ← molrep ← molzoo / molpot`.
-- **Verified import edges (`src/`, AST):** `molrep → molix` (32 files: `config` / `F.scatter`); `molpot → molix` (24: `config`, `schema` keys, `autograd.leaf`, `batch.TensorFrame`/`NeighborList`); `molpot → molrep` (4: `heads/edge.py`, provenance classifier/parameter, `potentials/repulsion.py`); `molzoo → molix` (5), `molzoo → molrep` (7), `molzoo → molpot` (5: mace encoder/polar/potential, pinet potential/properties); `molpot → molzoo`: **none**; `molrep → molpot/molzoo`: **none**.
-- **One documented-graph exception:** `molix.ff_export` → `molpot` (5 files): `PotentialIR` / `NonbondedScaling` / `NonbondedMethodRecord` / `ProperTorsionBag` from `molpot.ir`; `ForceField` / `TypeAssignment` from `molpot.forcefield`; public `molpot.MixingRule` from `lammps_writer.py` / `openmm_adapter.py`. Import through package public surface, never a deep private path. `molix.engine` takes the manifest as a plain `Mapping` for the same one-way reason.
+- **Verified import edges (`src/`, AST, 2026-10-09):** `molrep → molix` (33 files: `config` / `F.scatter`); `molpot → molix` (23: `config`, `schema` keys, `autograd.leaf`, `batch.TensorFrame`/`NeighborList`); `molpot → molrep` (4: `heads/edge.py`, provenance classifier/parameter, `potentials/repulsion.py`); `molzoo → molix` (6), `molzoo → molrep` (9), `molzoo → molpot` (6 on 2026-10-16: `mace/polar.py`, `mace/potential.py`, `allegro/potential.py`, `rondo/model.py`, `pinet/potential.py`, `pinet/properties.py`); `molpot → molzoo`: **none**; `molrep → molpot/molzoo`: **none**. The MACE feature body (`mace/encoder.py`) does not import molpot.
+- **One documented-graph exception:** `molix.ff_export` → `molpot` (5 files): `PotentialIR` / `NonbondedScaling` / `NonbondedMethodRecord` / `ProperTorsionBag` from `molpot.ir`; `ForceField` / `TypeAssignment` from `molpot.forcefield`; public `molpot.MixingRule` from `lammps_writer.py` / `openmm_adapter.py`. Import through package public surface, never a deep private path. A provenance manifest for a deployed package is the caller's own file, so `molix.deploy` needs no molpot import.
 - **Intra-molix roles:** `data` = dataset → batch → loader, one package, no file IO and no acquisition (owns `BaseDataset`/`FrameDataset`, collate, `MoleculePadder`, samplers, `BatchTask`, `DataModule`). `frame` = `TensorFrame`, the container the model reads. `neighbor` = the cutoff graph. `io` = run-artifact IO, consumed by `hooks` (`hooks → io + core`). `core` = trainer + contracts; consumes `batch.DataModuleProtocol` and `autograd.Derivative.mark_leaves` from steps; must not become a second home for schema or storage. `autograd` = the batch derivative op. `schema` = key constants + `CellBound` (cross-package protocol declared at the base so molpot need not import `md`). `md` = in-process MD driver; `engine`/`export`/`compile` = leaf execution; `quant` = fake-quant on generic `nn.Module`; `ff_export` = Class-I file export (the upward edge); `F`/`nn`/`op` = kernels; `cli`/`profiler` = tooling.
-- **Two-tier data contract.** Pre-collate: flat `dict` (`sample["Z"]`). Post-collate: nested plain `TensorDict` / `TensorFrame` (`batch["atoms","Z"]`). Single conversion: `molix.data.collate.collate_molecules`. Namespaces: `atoms` / `edges` / `graphs` / `bonds` / `angles` / `propers` / `impropers`. Edge: `pair_index[:,0]=source`, `pair_diff = pos[target]-pos[source]`; `bond_index` is `(2,N)` COO. Dead padding edges: `dead_pair_shift(cutoff)` shared by `NeighborList` (MD), `PadMolecularBatch`, `StaticForward`.
+- **Two-tier data contract.** Pre-collate: flat `dict` (`sample["Z"]`). Post-collate: nested plain `TensorDict` / `TensorFrame` (`batch["atoms","Z"]`). Single conversion: `molix.data.collate.collate_molecules`. Namespaces: `atoms` / `edges` / `graphs` / `bonds` / `angles` / `propers` / `impropers`. Edge: `pair_index[:,0]=source`, `pair_diff = pos[target]-pos[source]`; `bond_index` is `(2,N)` COO. Dead padding edges: `dead_pair_shift(cutoff)` shared by `NeighborList` (MD) and `MoleculePadder`.
 - **Cache / store placement (for librarian).** Durable materialized data = **MolHub's**, in whatever shape MolHub chooses; molnex defines no format and must not grow one back. Rebuildable source-index cache = **MolHub** `Cache` (not in molnex; `.claude/notes/cache-layers.md`). In-flight residual labels, force weights, padding, neighbor geometry = `molix.data` `BatchTask` / `TensorFrame` columns, never persisted. Geometry binding / neighbor skin / compiled buffers = runtime owner (`molix.md.neighbors.NeighborList`, `CellBound.bind_cell`), explicitly invalidated. Do not revive `PackedCache` / `TensorDict.memmap_()`, and do not revive a molnex on-disk format.
 - **TensorFrame precision placement.** `TensorFrame` does not own dtype. Compute dtype = `molix.config.config["ftype"]` via `MolnexConfig.set_precision` (must run before model `__init__` and `DataModule` construction). Collate boundary = `DataModule._CollateFn` + `molix.core.steps.batch_to` (floats cast, index tensors left). MD-side precision = `MD(dtype)`, separate from training `ftype`. Weight fake-quant = `molix.quant`, orthogonal. Column-aware scientific precision (raw totals / reference table stay float64; residual follows model dtype) is specified by cache-layers notes — not a second dtype singleton, and not a TensorFrame method.
-- **Reference-energy placement.** Scientific `E0` table = `molpot.heads.energy.AtomicReferenceEnergy` (frozen Z-indexed buffer, `pooled` for per-graph dressing). Learnable per-atom interaction = `AtomicEnergyMLP`. Graph sum = `molpot.derivation.energy.EnergyAggregation`. Convenience bundle = `EnergyHead` (prefer compose). Encoder consumer today = `molzoo.mace.encoder.MACEEncoder` (also `GlobalRescale`). Schema addresses: `("graphs","energy")` / `("atoms","energy")` / flat `"atomic_energy"` in `molix.schema`. Fitting/freezing/checkpointing a reference table is training/checkpoint-owner state (small, required), not a dataset column and not a MolHub cache. Unsupported elements must not silently zero; padding slots are not element support.
+- **Reference-energy placement.** Scientific `E0` table = `molpot.heads.energy.AtomicReferenceEnergy` (frozen Z-indexed buffer, `pooled` for per-graph dressing). Learnable per-atom interaction = `AtomicEnergyMLP`. Graph sum = `molpot.derivation.energy.EnergyAggregation`. Convenience bundle = `EnergyHead` (prefer compose). MACE consumer = `molzoo.mace.potential.MacePotential` (also `GlobalRescale` and the scalar readouts); the feature body does not own them. Schema addresses: `("graphs","energy")` / `("atoms","energy")` / flat `"atomic_energy"` in `molix.schema`. Fitting/freezing/checkpointing a reference table is training/checkpoint-owner state (small, required), not a dataset column and not a MolHub cache. Unsupported elements must not silently zero; padding slots are not element support.
 - **Forces / virial.** Batch-level: `molix.autograd.Derivative(energy, of="graphs.energy", wrt=...)` — the only frame derivative; `wrt=("atoms.pos",)` → `atoms.forces` (scale −1); `wrt=("graphs.strain",)` → `graphs.virial` via `symmetrize_strain_grad`. Tensor-level (raw `energy_fn(pos)`): `molpot.derivation.ForceDerivation` / `autograd_forces*` for `BasePotential` / `Sonata` / Hessian first pass. Hessian: `molpot.derivation.HessianDerivation`. No `StressDerivation`, no `func_force_pass` / `grad_force_pass` / `EnergyReadout` / `ForceReadout`, no `compute_forces` family. Default steps call `Derivative.mark_leaves` in eager `forward_loss` so force training traces as one graph.
 - **Two `NeighborList` types.** Pipeline: `molix.neighbor.NeighborList` (`task_id`/`execute`, Edge Convention, uses `molix.F.get_neighbor_pairs`). MD: `molix.md.neighbors.NeighborList` (fixed capacity, Verlet skin, LAMMPS `every`/`delay`/`check`, writes `("pairs","shifts")`). molpot never enumerates pairs: `Potentials` consumes the placed `edges` namespace.
-- **`molrep`** = reusable representation only (embedding → interaction → readout + chem/condensation/perception/analysis). No energy, no force, no molpot. `molrep.heads` ≠ `molpot.heads`. `molrep.interaction.polar` holds PolarMACE *representation* blocks; GTO electrostatics live in `molpot.potentials.gto`.
+- **`molrep`** = reusable representation only (embedding, `interaction.product`, `cueq`, representation heads + chem/condensation/perception/analysis; no readout, no per-model blocks). No energy, no force, no molpot. `molrep.heads` ≠ `molpot.heads`. PolarMACE *representation* blocks live in `molzoo.mace.polar` above the product; GTO electrostatics live in `molpot.potentials.gto`.
 - **`molpot`** = physics. Must not import `molzoo` (verified). `molpot.heads` may import `molrep.embedding` (arrow heads→embedding). `ForceField` is `molpy.ForceField` subclass; `to_potentials()` is the torch override; IO is `molpy.io` after `realize`.
-- **`molzoo`** = encoder recipes / foundation checkpoints, top of the graph. Consumes molrep blocks. Scoped exception: energy/force heads co-located with MACE/PiNet/Allegro (pending any mace-subpackage restructure). Spec-first: `src/molzoo/specs/<encoder>.md`.
+- **`molzoo`** = encoder recipes / foundation checkpoints, top of the graph. Consumes molrep blocks. Scoped exception: energy/force products co-located with MACE/PiNet/Allegro (each subclasses its encoder; decision 2026-10-15). Spec-first: `src/molzoo/specs/<encoder>.md`.
 - **MolHub owns dataset acquisition.** No `molix.data` / `molix.datasets` / `molhub` imports under `src/`. New specs retarget `molix.data` / `molix.data` / `molix.io`, or MolHub for acquisition/source-index cache.
-- **`interface/` (C++, repo root)** = LAMMPS plugin counterpart of `molix.engine`: façade `pair_molnex`, bridge (LAMMPS-free), `cutoff_graph_impl`, AOTI `ModelRunner`. Not a Python package; schema version pinned with `LAMMPS_META_SCHEMA`.
-- **Deprecated shim still in tree:** `src/molrep/readout/product.py`; `molrep/__init__.py` still resolves `ProductHead` through it rather than `molrep.readout.mace`.
+- **`interface/` (C++, repo root)** = C++ counterpart of `molix.deploy` / `molix.export`, two layers one-way: `interface/runtime/` (`molnex_runtime`, engine-neutral: `Metadata` reads the versioned `DeployMetadata` `{name}.json`, `ModelArtifact::open` picks the loader by format — `AotiArtifact` for `aoti` —, `OpLibraries` loads native op libraries, `SiteEnergyExec` runs the calling convention) ← `interface/lammps/` (bridge, `CutoffGraphImpl`, one `pair_style molnex`). The runtime never references LAMMPS. Not a Python package.
 - **Hard-rule reminders for librarian:** (1) one-way `molix ← molrep ← molzoo/molpot` except `molix.ff_export → molpot`; (2) two-tier data + Edge Convention + `(2,N)` `bond_index`; (3) persistence is MolHub's — molnex has no file format — plus MolHub's source-index Cache; never a second owner of labels on disk; (4) batch derivatives = `molix.autograd.Derivative`; tensor `F=-dE/dpos` = `ForceDerivation`; (5) compute dtype = `config["ftype"]`; TensorFrame is a view; (6) reference energy = `molpot.heads.AtomicReferenceEnergy`, not a store column and not a batch cache.
 
 <!-- mol:map:managed end -->
 
-## Custom annotation — `interface/` (LAMMPS plugin), pending next /mol:map regen
+## Custom annotation — `interface/` (LAMMPS plugin)
 
-_Added 2026-08-30 after the `lammps-iface` chain (01-meta … 05-pbc) closed; the
-managed block above predates it. Fold into the inventory on the next `/mol:map`
-run (do not run it against a tree carrying another workstream's WIP)._
+**`interface/` — engine-neutral runtime + one generic pair style (repo root, not `src/`):**
 
-**`interface/` — C++ engine bridge, three layers (repo root, not `src/`):**
-
-- **Facade** — `interface/lammps/pair_molnex.{h,cpp}`: `pair_style molnex`
-  protocol mechanics only (settings/coeff token piping, neighbor request,
-  compute forwarding, ev tally, comm pack/unpack forwarding). Zero semantic
-  branches; written once, generally never changed.
-- **Bridge** — `interface/lammps/bridge/`: LAMMPS-free, unit-testable
-  components. `lammps_view.h` (POD span view, the only LAMMPS-type seam),
-  `species_map`, `node_staging`, `graph_bridge` (neighbor list → edge tensors;
-  walks `inum+gnum`; sorts iff `requires_sorted_edges`), `force_scatter`,
-  `comm_reverse` (dormant seam — reduction ownership is the integrator's global
-  reverse comm), `exec.h` (`Exec` base + `ModelOutputs`), `dynamic_exec`,
-  `graphed_exec` (CUDA-graph 5-input path). Static lib `molnex_lammps_bridge`.
-- **Impls** — `interface/lammps/impls/`: one impl per **runtime-contract
-  family**, never per network. `cutoff_graph_impl` serves PiNet/MACE/Allegro
-  alike; `registry.cpp` dispatches on `Contract` with an exhaustive switch
-  (`fixed_graph` declared, rejected until its consumer spec lands — see
-  notes.md topic `lammps-iface-post-chain`).
-- **Engine-neutral core** — `interface/include/molnex/interface/`
-  (`meta_schema.h`, `model_runner.h`) + `interface/src/model_runner.cpp`:
-  meta.json schema-v3 reader and AOTI runner, no LAMMPS types.
-- **Python counterpart** — `src/molix/engine/` (`export_for_lammps`,
-  `EngineForward` 4-input / `StaticForward` 5-input, `LAMMPS_META_SCHEMA = 3`).
-  The schema version is pinned on both sides and must bump together
-  (`regressions/lammps-iface-01-meta.py`).
-- **Tests** — `interface/tests/` (ctest; fixture generation needs an absolute
-  `PYTHONPATH` to `src/`). Toolchain: `interface/.clang-format`, gated in CI.
+- **Runtime** — `interface/runtime/` (`molnex_runtime`, LibTorch only, no
+  engine, no Python). `Metadata` reads `{name}.json` (`molix.deploy.DeployMetadata`,
+  `schema_version` 2: format, cutoff, species, dtype, receptive field, the
+  model's own units, op libraries; the version also names the calling
+  convention). `ModelArtifact::open(dir, name, metadata)`
+  loads the op libraries (`OpLibraries`, `MOLNEX_OP_LIBRARY_PATH`, requirement
+  checked through `molnex_op_library_requirement()`) and then the package by
+  format — `AotiArtifact` (`AOTIModelPackageLoader`, device from
+  `AOTI_DEVICE_KEY`, `update_weights` under a shared_mutex) for `aoti`.
+  `SiteEnergyExec` casts `pos` and `shifts` to the model dtype, runs
+  `(Z, pos, pair_index, shifts, local_mask)` and accepts exactly
+  `(energy, forces (n, 3), site_energy (n,), virial (3, 3))` as CPU float64
+  copies (2026-10-16, schema 2; `virial` = `+dE/deps`).
+- **Facade** — `interface/lammps/pair_molnex.{h,cpp}`: `pair_style molnex
+  <model_dir> [name] [mode fold|ghost]` (default `fold` on one rank, `ghost`
+  otherwise). Reads the metadata, opens the artifact, computes the energy
+  factor from the model's energy unit with LAMMPS'
+  `utils::get_conversion_factor` (eV ↔ metal, kcal/mol ↔ real), and constructs
+  `CutoffGraphImpl` with the mode. In `fold` it builds the per-step owner
+  table (owned atom ID → local index; every ghost → the owned atom it copies),
+  disables `virial_fdotr_compute` and tallies the model's virial.
+- **Bridge** — `interface/lammps/bridge/`: LAMMPS-free and model-free.
+  `GraphBridge` builds `pair_index` in neighbour-list order and does not sort;
+  `build_folded` walks owned centres only and emits `(i, owner(j))` with
+  `shift = x[j] - x[owner(j)]` (exact lattice translation, triclinic included;
+  a self-image is `(i, i)` with a non-zero shift).
+- **Impl** — `interface/lammps/impls/cutoff_graph_impl`: over the runtime's
+  `Metadata` + `SiteEnergyExec`. Refuses a length unit other than angstrom;
+  full neighbour list always. `GraphMode::kGhost`: ghost centres, `newton on`,
+  ghost cutoff `>= T * cutoff + skin`, `n_graph = nall()`, zero shifts, fdotr
+  virial. `GraphMode::kFold` (single rank, refused on more): owned atoms only,
+  folded shifted pairs, forces on owned rows, the model's virial negated to
+  LAMMPS' sign. Measured motivation: ghost staging was 5-6x the atoms for a
+  35 A PEO box on one GPU (OFF24-M 927 vs 179 ms/step; Allegro-OAM-L and
+  OMol-0 OOM). No per-model pair style.
+- **Python** — `molix.deploy.SiteEnergyModel` is the protocol,
+  `SiteEnergyAdapter` adapts an in-tree potential; `molix.export.aoti.package`
+  writes the `.pt2`; `DeployMetadata.write` the `{name}.json`. A third party
+  writes a module whose `forward` matches the protocol.
+- **Tests** — `interface/tests/` (ctest): runtime cases (`test_metadata`,
+  `test_op_libraries`, `test_model_artifact`, `test_aoti_artifact`,
+  `test_site_energy_exec`) and adapter cases (`test_bridge_*`,
+  `test_contract_impl`). `generate_fixtures.py` deploys the toy models through
+  `molix.export.aoti` + `DeployMetadata`, so the C++ reader is tested against
+  the Python writer.

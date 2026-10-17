@@ -5,7 +5,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molix.autograd import Derivative
+from molix.autograd import Derivative, Potential
 from molix.data import collate_molecules
 from molix.frame import TensorFrame
 from molix.md import (
@@ -82,14 +82,18 @@ def _nve(force, *, dt: float, dtype=None, hooks=None) -> MD:
     )
 
 
-class _ZeroPots:
+class _ZeroPots(Potential):
     """The minimal energy the adapter's op composes: ``E = 0 · Σ pos``, zero forces.
 
     The energy has to hang off the positions — a constant would give the op
     nothing to differentiate — so it is a zero *function* of them.
     """
 
-    def __call__(self, work: TensorDict) -> TensorDict:
+    def __init__(self) -> None:
+        super().__init__()
+        self._derivative = Derivative(self.energy)
+
+    def energy(self, work: TensorDict) -> TensorDict:
         pos = work["atoms", "pos"]
         if "graphs" not in work.keys():
             work["graphs"] = TensorDict({}, batch_size=[])
@@ -111,6 +115,7 @@ class _CellRecordingPots(_ZeroPots):
     """
 
     def __init__(self, *, raise_after: int | None = None) -> None:
+        super().__init__()
         self.calls: list[tuple[int, torch.Tensor]] = []
         self._raise_after = raise_after
 
@@ -120,19 +125,16 @@ class _CellRecordingPots(_ZeroPots):
             raise RuntimeError("KSpaceGrid overflow")
 
 
-def _stub_forcefield(pots: object):
+def _stub_forcefield(pots: Potential):
     """A minimal ``MDForceField``: molpy container with a nullary ``to_potentials``."""
-    from molpy import ForceField as MolpyForceField
+    from molpy.ff.forcefield import ForceField as MolpyForceField
 
     class _StubForceField(MolpyForceField):
         def __new__(cls) -> "_StubForceField":
-            # molrs __new__ only accepts (name, units).
+            # The molrs base is built in __new__ (name, units) and has no __init__.
             return super().__new__(cls, "stub", "metal")
 
-        def __init__(self) -> None:
-            super().__init__("stub", "metal")
-
-        def to_potentials(self) -> object:
+        def to_potentials(self) -> Potential:
             return pots
 
     return _StubForceField()
@@ -216,14 +218,14 @@ class TestMD:
         assert len(ops) == 2
         assert all(isinstance(op, Derivative) for op in ops)
         assert all(op.wrt == FORCES for op in ops)
-        assert isinstance(ops[0].energy, Potentials)
+        assert isinstance(ops[0].energy.__self__, Potentials)
         assert ops[0] is not ops[1]
-        assert ops[0].energy is ops[1].energy
+        assert ops[0].energy.__self__ is ops[1].energy.__self__
 
         md.set_integrator(VelocityVerletIntegrator(0.02))
         md.run(_two_atom_system(), 0)
         assert len(ops) == 3
-        assert ops[2].energy is not ops[0].energy
+        assert ops[2].energy.__self__ is not ops[0].energy.__self__
 
         md.set_barostat(_expanding_barostat())
         md.run(_two_atom_system(box=10.0), 0)
@@ -294,7 +296,7 @@ class TestMD:
             batch = butane_pair_batch().apply(
                 lambda leaf: leaf.to(dtype) if leaf.is_floating_point() else leaf
             )
-            forces = Derivative(potentials, wrt=FORCES)(batch)[FORCES_KEY]
+            forces = Derivative(potentials.energy, wrt=FORCES)(batch)[FORCES_KEY]
             return forces.double() * preset_energy_to_md(forcefield.units)
 
         reference32 = forces_at(torch.float32)
@@ -446,9 +448,9 @@ class TestMD:
             MD(torch.float64).run(system, 1)
 
     def test_set_integrator_takes_a_constructed_integrator(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
-        force = MolpyForceField()
+        force = ForceField()
         integrator = VelocityVerletIntegrator(0.01)
         md = MD(torch.float64).set_forcefield(force).set_integrator(integrator)
         assert md.integrator is integrator
@@ -466,10 +468,10 @@ class TestMD:
         with pytest.raises(TypeError):
             MD(object(), mass=1.0, dt=0.01)  # type: ignore[misc]
 
-    def test_set_forcefield_accepts_molpy_forcefield_and_returns_self(self):
-        from molpy import ForceField as MolpyForceField
+    def test_set_forcefield_accepts_an_mdforcefield_and_returns_self(self):
+        from molpot.forcefield import ForceField
 
-        ff = MolpyForceField()
+        ff = ForceField()
         md = MD()
         assert md.set_forcefield(ff) is md
         assert md.force is ff
@@ -511,16 +513,13 @@ class TestMD:
         with pytest.raises(TypeError, match="ForceField"):
             MD().set_forcefield(_pos_callable)  # type: ignore[arg-type]
 
-    def test_bare_molpy_to_potentials_rejects_tensordict(self):
-        from molpy import ForceField as MolpyForceField
+    def test_a_bare_molpy_forcefield_is_refused_at_set_forcefield(self):
+        """It has no to_potentials (molrs 0.15); refused where it is attached,
+        not deep inside the first wire."""
+        from molpy.ff.forcefield import ForceField as MolpyForceField
 
-        md = (
-            MD()
-            .set_forcefield(MolpyForceField("bare", units="real"))
-            .set_integrator(VelocityVerletIntegrator(0.1))
-        )
-        with pytest.raises(TypeError, match="callable"):
-            md.run(_two_atom_system(), 1)
+        with pytest.raises(TypeError, match="to_potentials"):
+            MD().set_forcefield(MolpyForceField("bare", units="real"))
 
     def test_set_neighbors_returns_self(self):
         pos, cell = make_cubic_lattice()
@@ -530,13 +529,13 @@ class TestMD:
         assert md.neighbors is neighbors
 
     def test_set_forcefield_set_integrator_set_neighbors_arms_rebuild(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
         pos, cell = make_cubic_lattice()
         neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
         md = (
             MD()
-            .set_forcefield(MolpyForceField())
+            .set_forcefield(ForceField())
             .set_integrator(VelocityVerletIntegrator(0.01))
             .set_neighbors(neighbors)
         )
@@ -544,9 +543,9 @@ class TestMD:
         assert md.neighbors is neighbors
 
     def test_rebuild_is_false_without_set_neighbors(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
-        md = MD().set_forcefield(MolpyForceField()).set_integrator(VelocityVerletIntegrator(0.01))
+        md = MD().set_forcefield(ForceField()).set_integrator(VelocityVerletIntegrator(0.01))
         assert md.integrator is not None
         assert md.neighbors is None
 
@@ -559,20 +558,20 @@ class TestMDNeighborPolicy:
             MD(torch.float64, rebuild_every=1)  # type: ignore[call-arg]
 
     def test_no_step_start_hook_is_installed(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
-        md = _nve(MolpyForceField(), dt=0.01)
+        md = _nve(ForceField(), dt=0.01)
         assert md.runner.hooks == []
 
     def test_the_switch_follows_set_neighbors(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
-        listless = _nve(MolpyForceField(), dt=0.01)
+        listless = _nve(ForceField(), dt=0.01)
         pos, cell = make_cubic_lattice()
         neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
         live = (
             MD()
-            .set_forcefield(MolpyForceField())
+            .set_forcefield(ForceField())
             .set_integrator(VelocityVerletIntegrator(0.01))
             .set_neighbors(neighbors)
         )
@@ -580,11 +579,11 @@ class TestMDNeighborPolicy:
         assert live.neighbors is neighbors
 
     def test_without_set_neighbors_the_list_is_not_mounted(self):
-        from molpy import ForceField as MolpyForceField
+        from molpot.forcefield import ForceField
 
         pos, cell = make_cubic_lattice()
         neighbors = NeighborList(cell=cell, cutoff=3.5, positions=pos)
-        md = _nve(MolpyForceField(), dt=0.01)
+        md = _nve(ForceField(), dt=0.01)
         assert md.neighbors is None
         assert neighbors.rebuild_count == 0
         assert neighbors.ago == 0
@@ -760,9 +759,9 @@ class TestRebindCell:
         holder: list[_TensorDictForce] = []
 
         class _ReentrantPots(_CellRecordingPots):
-            def __call__(self, work: TensorDict) -> TensorDict:
+            def energy(self, work: TensorDict) -> TensorDict:
                 holder[0].rebind_cell(torch.eye(3, dtype=torch.float64) * 4.0)
-                return super().__call__(work)
+                return super().energy(work)
 
         work = _cell_system((torch.eye(3, dtype=torch.float64) * 10.0).unsqueeze(0))
         adapter = _TensorDictForce(
@@ -867,7 +866,6 @@ class TestCompiledMlipStep:
             CLUSTER_POS,
             CLUSTER_Z,
             TINY_POLAR_KWARGS,
-            polar_kwargs,
         )
 
         spec = MACEPolarSpec(
@@ -876,7 +874,7 @@ class TestCompiledMlipStep:
             **TINY_POLAR_KWARGS,
         )
         torch.manual_seed(0)
-        mlip = MacePolar(**polar_kwargs(spec)).eval()
+        mlip = MacePolar(spec).eval()
         pos = torch.tensor(CLUSTER_POS, dtype=torch.float64)
         n_atoms = len(CLUSTER_Z)
         cell = torch.eye(3, dtype=torch.float64) * 10.0
@@ -1006,11 +1004,12 @@ class _EdgeRecordingPots(_ZeroPots):
     """Records the ``pairs`` batch size the op hands the potential on every call."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.seen: list[torch.Size] = []
 
-    def __call__(self, work: TensorDict) -> TensorDict:
+    def energy(self, work: TensorDict) -> TensorDict:
         self.seen.append(work["pairs"].batch_size)
-        return super().__call__(work)
+        return super().energy(work)
 
 
 class TestStaticCapacity:
@@ -1060,7 +1059,7 @@ class TestStaticCapacity:
         live["pairs"] = TensorDict(
             {key: column[:n_live] for key, column in live["pairs"].items()}, batch_size=[n_live]
         )
-        forces = Derivative(_argon_forcefield(n_atoms).to_potentials(), wrt=FORCES)(live)[
+        forces = Derivative(_argon_forcefield(n_atoms).to_potentials().energy, wrt=FORCES)(live)[
             FORCES_KEY
         ]
         expected = forces * preset_energy_to_md("metal")

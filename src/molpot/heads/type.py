@@ -9,7 +9,9 @@ from molix import config
 class TypeHead(nn.Module):
     """Predict atom types from atomic representations."""
 
-    def __init__(self, hidden_dim: int = 64, num_types: int = 100):
+    def __init__(
+        self, hidden_dim: int = 64, num_types: int = 100, *, dtype: torch.dtype | None = None
+    ):
         """Initialize type head.
 
         Args:
@@ -17,10 +19,13 @@ class TypeHead(nn.Module):
             num_types: Number of atom types to predict
         """
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.module = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, num_types, dtype=config.ftype),
+            nn.Linear(hidden_dim, num_types, dtype=dtype),
         )
 
     def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:

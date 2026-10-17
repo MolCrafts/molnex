@@ -56,9 +56,9 @@ parameters, so a Hessian loss can reach a Class-I parameter head — while
 derivative always keeps its graph — it is what the second one differentiates.
 
 Units: the producer is unit-agnostic, exactly like the derivative op — it
-differentiates whatever the energy core emits. With energies in kcal/mol and
+differentiates whatever the energy emits. With energies in kcal/mol and
 positions in Å the Hessian is
-kcal·mol⁻¹·Å⁻² (eV/Å² for the repo-default eV convention); keeping the core on
+kcal·mol⁻¹·Å⁻² (eV/Å² for the repo-default eV convention); keeping the energy on
 one convention is the caller's job.
 
 Reference:
@@ -84,22 +84,15 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molix.autograd import leaf as position_leaf
+from molix.schema import ENERGY_KEY, FORCES_KEY, POS_KEY, has_energy
 from molpot.derivation.force import autograd_forces_from_energy
-from molpot.derivation.protocol import (
-    ENERGY_KEY,
-    FORCES_KEY,
-    POS_KEY,
-    absorb_model_output,
-    has_energy,
-    write_forces,
-)
 
 __all__ = ["HessianDerivation"]
 
-#: An energy core: reads ``atoms.pos`` off the batch and writes ``graphs.energy``
-#: (optionally ``atoms.energy``). May return the batch, a ``dict`` with an
-#: ``"energy"`` entry, or ``None`` when it wrote in place.
-EnergyCore = Callable[[TensorDict], "TensorDict | dict | None"]
+#: An energy: ``energy(batch) -> batch``, reading ``atoms.pos`` off the batch
+#: and writing ``graphs.energy`` (optionally ``atoms.energy``) in place — a
+#: potential's ``energy`` method.
+Energy = Callable[[TensorDict], TensorDict]
 
 
 class HessianDerivation(nn.Module):
@@ -152,7 +145,7 @@ class HessianDerivation(nn.Module):
             Hessian ``(3N, 3N)`` with row/column index ``i = 3a + c`` for atom
             ``a`` and Cartesian component ``c ∈ {x, y, z}``
             (``x0, y0, z0, x1, …``), in energy per Å²: kcal·mol⁻¹·Å⁻² for a
-            kcal/mol energy core, eV/Å² for an eV one.
+            kcal/mol energy, eV/Å² for an eV one.
 
         Raises:
             ValueError: If ``pos`` is not a ``(N, 3)`` tensor.
@@ -172,7 +165,7 @@ class HessianDerivation(nn.Module):
             ]
         return torch.stack(rows)
 
-    def graph_blocks(self, energy_core: EnergyCore, batch: TensorDict) -> list[torch.Tensor]:
+    def graph_blocks(self, energy: Energy, batch: TensorDict) -> list[torch.Tensor]:
         """Per-graph Hessian blocks of a packed batch, in graph order.
 
         A packed batch stores several molecules as one long atom axis; a
@@ -202,9 +195,9 @@ class HessianDerivation(nn.Module):
         ``graphs.energy`` / ``atoms.forces``, both attached.
 
         Args:
-            energy_core: Energy core — a callable ``energy_core(batch)`` that
-                runs the model on the batch and writes the per-molecule energies
-                ``graphs.energy`` ``(B,)`` back onto it.
+            energy: ``energy(batch) -> batch`` — a potential's ``energy``
+                method — writing the per-molecule energies ``graphs.energy``
+                ``(B,)`` back onto the batch.
             batch: Post-collate batch carrying ``atoms.pos`` ``(N, 3)`` Å and
                 the graph-membership vector ``atoms.batch`` ``(N,)`` (which
                 molecule each atom belongs to), which must be non-decreasing
@@ -214,7 +207,7 @@ class HessianDerivation(nn.Module):
             One Hessian block ``(3Nᵢ, 3Nᵢ)`` per graph, in graph order, each in
             the ``x0, y0, z0, x1, …`` Cartesian layout (index ``i = 3a + c``
             within the graph) and in energy per Å²: kcal·mol⁻¹·Å⁻² for a
-            kcal/mol energy core, eV/Å² for an eV one.
+            kcal/mol energy, eV/Å² for an eV one.
 
         Raises:
             ValueError: If ``atoms.batch`` is not non-decreasing — atoms of one
@@ -237,12 +230,13 @@ class HessianDerivation(nn.Module):
         leaf = position_leaf(cast(torch.Tensor, batch[POS_KEY]))
         batch[POS_KEY] = leaf
         with torch.enable_grad():
-            batch = absorb_model_output(batch, energy_core(batch))
+            # ``energy`` writes in place (molix.autograd.Potential.energy): the
+            # columns are read back off the same batch the leaf sits in.
+            energy(batch)
             if not has_energy(batch):
-                raise RuntimeError("energy core must write batch['graphs', 'energy']")
-            write_forces(
-                batch,
-                autograd_forces_from_energy(batch[ENERGY_KEY], leaf, create_graph=True),
+                raise RuntimeError("energy must write batch['graphs', 'energy']")
+            batch[FORCES_KEY] = autograd_forces_from_energy(
+                batch[ENERGY_KEY], leaf, create_graph=True
             )
 
         counts = torch.unique_consecutive(membership, return_counts=True)[1].tolist()

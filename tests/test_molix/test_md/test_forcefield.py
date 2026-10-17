@@ -7,7 +7,7 @@ driver binds.
 
 from __future__ import annotations
 
-from molpy import ForceField as MolpyForceField
+from molpy.ff.forcefield import ForceField as MolpyForceField
 
 from molix.md.forcefield import CellBound, ForceField, MDForceField
 

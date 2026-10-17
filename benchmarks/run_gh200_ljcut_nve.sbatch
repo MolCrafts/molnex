@@ -37,9 +37,10 @@ export LD_LIBRARY_PATH="$GCC_LIBDIR:${LD_LIBRARY_PATH:-}"
 
 "$PY" -c "import torch, platform; print('arch', platform.machine(), 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
-cmake -S src/molix/op -B src/molix/op/build-gh200 -DMOLNEX_OP_ENABLE_CUDA=ON \
+cmake -S csrc -B build/csrc-gh200 -DMOLNEX_OP_ENABLE_CUDA=ON \
   -DCMAKE_PREFIX_PATH="$("$PY" -c 'import torch; print(torch.utils.cmake_prefix_path)')"
-cmake --build src/molix/op/build-gh200 -j
+cmake --build build/csrc-gh200 -j
+export MOLNEX_OP_LIBRARY_PATH="$PWD/build/csrc-gh200"
 
 EXTRA=("$@")
 COMMON=(

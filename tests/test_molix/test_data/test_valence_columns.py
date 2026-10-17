@@ -88,3 +88,25 @@ def test_stack_length_mismatch_raises():
     }
     with pytest.raises(ValueError, match="share length"):
         stack_angle_index(angles)
+
+
+class TestCyclicImpropers:
+    def test_three_cyclic_rows_per_centre_centre_first(self):
+        from molix.data.valence_columns import cyclic_impropers
+
+        block = {
+            "atomi": torch.tensor([1, 7]),
+            "atomj": torch.tensor([2, 8]),
+            "atomk": torch.tensor([3, 9]),
+            "atoml": torch.tensor([4, 10]),
+        }
+        rows = cyclic_impropers(block)
+        stacked = torch.stack([rows[name] for name in ("atomi", "atomj", "atomk", "atoml")], -1)
+        assert stacked.tolist() == [
+            [1, 2, 3, 4],
+            [1, 3, 4, 2],
+            [1, 4, 2, 3],
+            [7, 8, 9, 10],
+            [7, 9, 10, 8],
+            [7, 10, 8, 9],
+        ]

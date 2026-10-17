@@ -1,6 +1,6 @@
 """ForceField — molpy ForceField with torch param tables and a torch override.
 
-This **is** a :class:`molpy.ForceField`. Styles and native types go through
+This **is** a :class:`molpy.ff.forcefield.ForceField`. Styles and native types go through
 molpy; learnable continuous tables live on the instance. ``to_potentials()``
 overrides the molrs CPU kernels with :class:`Potentials` (torch).
 IO is :mod:`molpy.io` — pass this object to the writers after :meth:`realize`.
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 import torch
-from molpy import ForceField as MolpyForceField
+from molpy.ff.forcefield import ForceField as MolpyForceField
 
 from molix.frame import TensorFrame, as_tensor_frame
 from molix.neighbor import NeighborList
@@ -271,7 +271,9 @@ class ForceField(MolpyForceField):
         nonbonded_scaling: NonbondedScaling | None = None,
         **_kwargs: Any,
     ) -> None:
-        super().__init__(name, units)
+        # The molrs base is built entirely in ``__new__`` (``name``, ``units``) and
+        # has no ``__init__`` of its own, so there is nothing to forward here — a
+        # ``super().__init__(name, units)`` reaches ``object.__init__`` and raises.
         self.nonbonded_scaling = (
             nonbonded_scaling if nonbonded_scaling is not None else NonbondedScaling()
         )
@@ -284,7 +286,7 @@ class ForceField(MolpyForceField):
         """The 1–2 / 1–3 / 1–4 exclusion policy, mirrored into molpy on write.
 
         Assigning here also calls molpy's
-        :meth:`~molpy.ForceField.set_special_bonds`, because molpy — not molnex
+        :meth:`~molpy.ff.forcefield.ForceField.set_special_bonds`, because molpy — not molnex
         — is what formats the ``special_bonds`` line of an exported deck, and it
         formats it from *its own* arrays. A policy that lived only on the Python
         side would leave those at molpy's unscaled default and export
@@ -308,7 +310,7 @@ class ForceField(MolpyForceField):
     def set_special_bonds(self, lj: Any, coul: Any) -> None:
         """Set molpy's exclusion triples **and** this container's scaling, together.
 
-        Overrides :meth:`molpy.ForceField.set_special_bonds` so the two
+        Overrides :meth:`molpy.ff.forcefield.ForceField.set_special_bonds` so the two
         representations of one policy cannot diverge. molpy owns the arrays an
         exported deck's ``special_bonds`` line is formatted from; molnex owns
         :class:`~molpot.ir.NonbondedScaling`, which
@@ -352,23 +354,23 @@ class ForceField(MolpyForceField):
         self._nonbonded_scaling = NonbondedScaling(**scales)
 
     def def_atomstyle(self, name: str = "full") -> Self:
-        super().def_atomstyle(name)
+        self.def_style("atom", name)
         return self
 
     def def_bondstyle(self, name: str = "harmonic") -> Self:
-        super().def_bondstyle(name)
+        self.def_style("bond", name)
         return self
 
     def def_anglestyle(self, name: str = "harmonic") -> Self:
-        super().def_anglestyle(name)
+        self.def_style("angle", name)
         return self
 
     def def_dihedralstyle(self, name: str = "periodic") -> Self:
-        super().def_dihedralstyle(name)
+        self.def_style("dihedral", name)
         return self
 
     def def_improperstyle(self, name: str = "harmonic") -> Self:
-        super().def_improperstyle(name)
+        self.def_style("improper", name)
         return self
 
     def def_pairstyle(self, name: str | Any = "lj/cut", **options: Any) -> Self:
@@ -436,7 +438,7 @@ class ForceField(MolpyForceField):
             return self
         key = f"pair:{name}"
         self._check_style_options(key, options)
-        super().def_pairstyle(name)
+        self.def_style("pair", name)
         if options:
             self._style_options.setdefault(key, {}).update(options)
         return self
@@ -480,6 +482,15 @@ class ForceField(MolpyForceField):
     def style_options(self, key: str) -> dict[str, Any]:
         """Options registered for a style key (e.g. ``pair:lj/cut``)."""
         return dict(self._style_options.get(key, {}))
+
+    def style_names(self) -> list[str]:
+        """Declared styles as ``"<category>:<name>"`` keys, in declaration order.
+
+        molrs 0.15 exposes styles as handles (:attr:`styles`); this is the key
+        form the registry (:class:`~molpot.forcefield.schema.PotentialMeta`) and
+        the option table here are indexed by.
+        """
+        return [f"{style.category}:{style.name}" for style in self.styles]
 
     def has_style(self, key: str) -> bool:
         return key in self.style_names()
@@ -909,14 +920,19 @@ class ForceField(MolpyForceField):
         *,
         masses: torch.Tensor | list[float] | None = None,
         types: TypeAssignment | None = None,
+        pairs: bool = True,
     ) -> Self:
         """Fill native molpy type tables from torch params + topology.
+
+        ``pairs=False`` registers no pair types: a **bonded-only** realization,
+        for a deck whose nonbonded section is written elsewhere (the molrs
+        writer prints a ``pair_coeff`` line for every pair type it holds).
 
         One molpy type per class of :meth:`assign_types` — the condensed typing
         that replaced one-type-per-atom on 2026-09-08 (ledger debt **F25**) —
         registered under that method's labels. After this, :mod:`molpy.io` can
         write ``self`` directly. Bonded types are given their label explicitly
-        (``def_type(…, name="b1")``) rather than letting molpy compose one from
+        (``def_type("b1", …)``) rather than letting molpy compose one from
         the atom types: two O–H bonds with different force constants share their
         atom types, so a composed name would collide and one of the two
         ``bond_coeff`` lines would silently disappear.
@@ -981,7 +997,8 @@ class ForceField(MolpyForceField):
         self._realize_bonds(frame, atom_types, types)
         self._realize_angles(frame, atom_types, types)
         self._realize_propers(frame, atom_types, types)
-        self._realize_pairs(atom_types, atom_reps)
+        if pairs:
+            self._realize_pairs(atom_types, atom_reps)
         return self
 
     def to_ir(self) -> PotentialIR:
@@ -1123,9 +1140,9 @@ class ForceField(MolpyForceField):
 
         :attr:`~molpot.manifest.ModelManifest.representation` and
         :attr:`~molpot.manifest.ModelManifest.provenance` are left ``None`` on
-        purpose — composition is the caller's job, with ``model`` the
-        :class:`~molpot.forcefield.Parameterizer` that filled this ForceField's
-        tables (the fuller example, electrostatics included, is on
+        purpose — composition is the caller's job, with ``record`` the
+        :class:`~molpot.manifest.RepresentationRecord` of whatever filled this
+        ForceField's tables (the fuller example, electrostatics included, is on
         :class:`~molpot.manifest.ModelManifest`)::
 
             import dataclasses
@@ -1134,7 +1151,7 @@ class ForceField(MolpyForceField):
 
             manifest = dataclasses.replace(
                 ff.manifest(profile="A0"),
-                representation=model.representation_record(),
+                representation=record,
                 provenance=ProvenanceRecord(
                     reference_method="wB97X-D/def2-TZVPD",
                     data_version="v0",
@@ -1279,6 +1296,11 @@ class ForceField(MolpyForceField):
     def _bond_params(self, count: int) -> list[dict[str, float]]:
         """``BondStyle.def_type`` parameters of every bond — ``k``, ``r0``.
 
+        In molrs's convention, which is LAMMPS's (molrs ≥ 0.16): ``k`` is
+        LAMMPS's ``K`` in ``K (r − r0)²``, i.e. half of this container's
+        ``½ k (r − r0)²`` force constant. Handing molrs the container's ``k``
+        unconverted doubled every realized bond energy.
+
         Empty mappings when the field declares no harmonic bond style or carries
         no ``bonds`` table: :meth:`realize` registers nothing for those bonds, so
         nothing distinguishes them beyond the atom types they join.
@@ -1287,16 +1309,25 @@ class ForceField(MolpyForceField):
         if self.bond_style() != "harmonic" or bp is None:
             return [{} for _ in range(count)]
         return [
-            {"k": float(bp["k"][n].item()), "r0": float(bp["r0"][n].item())} for n in range(count)
+            {"k": 0.5 * float(bp["k"][n].item()), "r0": float(bp["r0"][n].item())}
+            for n in range(count)
         ]
 
     def _angle_params(self, count: int) -> list[dict[str, float]]:
-        """``AngleStyle.def_type`` parameters of every angle — ``k``, ``theta0``."""
+        """``AngleStyle.def_type`` parameters of every angle — ``k``, ``theta0``.
+
+        In molrs's (LAMMPS's) convention: ``k`` is ``K`` in ``K (θ − θ0)²``,
+        half of this container's ``½ k`` force constant, and ``theta0`` is in
+        **degrees**, where the container stores radians.
+        """
         ap = self.params("angles")
         if self.angle_style() != "harmonic" or ap is None:
             return [{} for _ in range(count)]
         return [
-            {"k": float(ap["k"][n].item()), "theta0": float(ap["theta0"][n].item())}
+            {
+                "k": 0.5 * float(ap["k"][n].item()),
+                "theta0": math.degrees(float(ap["theta0"][n].item())),
+            }
             for n in range(count)
         ]
 
@@ -1340,7 +1371,8 @@ class ForceField(MolpyForceField):
             for m in range(n_terms):
                 terms[f"k{m + 1}"] = float(bag.k[n, m].item())
                 terms[f"periodicity{m + 1}"] = float(bag.periodicity[n, m].item())
-                terms[f"phase{m + 1}"] = float(bag.phase[n, m].item())
+                # molrs stores every phase in degrees; the bag holds radians.
+                terms[f"phase{m + 1}"] = math.degrees(float(bag.phase[n, m].item()))
             out.append(terms)
         return out
 
@@ -1362,9 +1394,9 @@ class ForceField(MolpyForceField):
         ):
             i, j = bonds[rep]
             bstyle.def_type(
+                label,
                 atom_types[types.atom_type[i]],
                 atom_types[types.atom_type[j]],
-                name=label,
                 **params[rep],
             )
 
@@ -1386,10 +1418,10 @@ class ForceField(MolpyForceField):
         ):
             i, j, k = angles[rep]
             astyle.def_type(
+                label,
                 atom_types[types.atom_type[i]],
                 atom_types[types.atom_type[j]],
                 atom_types[types.atom_type[k]],
-                name=label,
                 **params[rep],
             )
 
@@ -1412,11 +1444,11 @@ class ForceField(MolpyForceField):
         ):
             i, j, k, l = propers[rep]
             dstyle.def_type(
+                label,
                 atom_types[types.atom_type[i]],
                 atom_types[types.atom_type[j]],
                 atom_types[types.atom_type[k]],
                 atom_types[types.atom_type[l]],
-                name=label,
                 **params[rep],
             )
 
@@ -1428,8 +1460,9 @@ class ForceField(MolpyForceField):
             return
         pstyle = self.get_style("pair", "lj/cut")
         for at, rep in zip(atom_types, atom_reps, strict=True):
+            # A self pair is named by its atom type, as molrs keys it.
             pstyle.def_type(
-                at,
+                at.name,
                 at,
                 epsilon=float(atoms["epsilon"][rep].item()),
                 sigma=float(atoms["sigma"][rep].item()),

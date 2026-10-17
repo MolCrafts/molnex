@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.autograd import Derivative
+from molix.autograd import Derivative, Potential
 from molix.compile import Compiler
 from molix.config import config
 from molix.core.losses import energy_force_mse, energy_mse
@@ -96,13 +96,19 @@ def _batch() -> dict[str, dict[str, torch.Tensor]]:
     return {"atoms": {"pos": pos}}
 
 
-def _make_trainer(*, loss_fn: LossFn | None, train_step: object | None = None) -> Trainer:
+def _make_trainer(
+    *,
+    loss_fn: LossFn | None,
+    train_step: object | None = None,
+    autocast: torch.dtype | None = None,
+) -> Trainer:
     torch.manual_seed(0)
     return Trainer(
         model=_StubModel(),
         loss_fn=loss_fn,
         optimizer_factory=lambda params: torch.optim.SGD(params, lr=0.1),
         train_step=train_step,
+        autocast=autocast,
     )
 
 
@@ -133,7 +139,7 @@ class _Energy(nn.Module):
         return batch
 
 
-class _Potential(nn.Module):
+class _Potential(Potential):
     """A potential in the molnex shape: ``forward`` runs the op it exposes as ``derivative``."""
 
     def __init__(self) -> None:
@@ -141,16 +147,9 @@ class _Potential(nn.Module):
         self.linear = nn.Linear(3, 1)
         self._derivative = Derivative(self.energy, wrt=("atoms.pos",))
 
-    @property
-    def derivative(self) -> Derivative:
-        return self._derivative
-
     def energy(self, batch: TensorDict) -> TensorDict:
         batch["graphs", "energy"] = self.linear(batch["atoms", "pos"]).sum().reshape(1)
         return batch
-
-    def forward(self, batch: TensorDict) -> TensorDict:
-        return self._derivative(batch)
 
 
 class _RecordingTracedBody:
@@ -201,14 +200,17 @@ def _mace_trainer(*, wrt: tuple[str, ...], loss_fn: LossFn) -> tuple[Trainer, Te
     eager precondition of the compile boundary.
     """
     from molzoo.mace.potential import MaceMatpes
+    from molzoo.mace.spec import MACEMatpesSpec
 
     config.set_precision("fp64")
     torch.manual_seed(0)
     model = MaceMatpes(
-        atomic_numbers=list(ATOMIC_NUMBERS),
-        atomic_energies=torch.tensor(ATOMIC_ENERGIES),
+        MACEMatpesSpec(
+            atomic_numbers=list(ATOMIC_NUMBERS),
+            atomic_energies=list(ATOMIC_ENERGIES),
+            **TINY_MATPES_KWARGS,
+        ),
         wrt=wrt,
-        **TINY_MATPES_KWARGS,
     )
     n_atoms = len(CLUSTER_Z)
     batch = make_graph_batch(
@@ -287,7 +289,7 @@ class TestDefaultTrainStep:
         assert torch.equal(received, pos)
 
     def test_forward_loss_finds_the_op_behind_a_potential(self) -> None:
-        """A model exposing ``derivative`` — every molnex potential — is marked through it."""
+        """A :class:`Potential` — every molnex potential — is marked through its ``derivative``."""
         step = DefaultTrainStep()
         trainer = _frame_trainer(_Potential(), loss_fn=_force_square_loss, train_step=step)
         recording = _RecordingTracedBody(step._traced_forward_loss)
@@ -350,17 +352,14 @@ class TestDefaultTrainStep:
 
         step.on_train_batch(trainer, TrainState(), _batch())
 
-        assert step.autocast_flags == [bool(config["use_amp"])]
         assert step.autocast_flags == [False]
 
     def test_seam_runs_inside_autocast_with_amp(self) -> None:
         step = _SpyTrainStep()
-        trainer = _make_trainer(loss_fn=_RecordingLoss(), train_step=step)
-        trainer.set_precision("bf16-mixed")
+        trainer = _make_trainer(loss_fn=_RecordingLoss(), train_step=step, autocast=torch.bfloat16)
 
         step.on_train_batch(trainer, TrainState(), _batch())
 
-        assert step.autocast_flags == [bool(config["use_amp"])]
         assert step.autocast_flags == [True]
 
 

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 import torch.nn as nn
-from molpy import UnitsError
+from molpy.core import UnitsError
 
 from molix import config
 from molix.units import units
@@ -34,7 +34,7 @@ class AtomicReferenceEnergy(nn.Module):
     """Frozen Z-indexed map ``c[Z]`` (eV, float64), additive reference energy.
 
     Stores a dense lookup ``atomic_energies[Z]`` always in float64, independent
-    of ``config["ftype"]``, plus a boolean ``supported`` mask. A stored ``0.0``
+    of the model dtype, plus a boolean ``supported`` mask. A stored ``0.0``
     is a legal coefficient only when ``supported[Z]`` is true. The module does
     not fit ``c``; it applies a published or already-fitted table.
 
@@ -269,12 +269,15 @@ class AtomicEnergyMLP(nn.Module):
         hidden_dim: Dimension of input hidden representation.
     """
 
-    def __init__(self, hidden_dim: int = 64):
+    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype | None = None):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def forward(self, atoms_h: torch.Tensor) -> torch.Tensor:
@@ -297,12 +300,15 @@ class EnergyHead(nn.Module):
     explicitly.
     """
 
-    def __init__(self, hidden_dim: int = 64):
+    def __init__(self, hidden_dim: int = 64, *, dtype: torch.dtype | None = None):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.atomic_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def forward(self, atoms_h: torch.Tensor, graph_batch: torch.Tensor) -> torch.Tensor:

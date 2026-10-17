@@ -133,8 +133,12 @@ class BondChargeHead(nn.Module):
         hidden_dim: int = 64,
         full_neighbor_list: bool = True,
         charge_projection: bool = True,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.node_dim = node_dim
         self.edge_dim = edge_dim or 0
         self.full_neighbor_list = full_neighbor_list
@@ -142,11 +146,11 @@ class BondChargeHead(nn.Module):
 
         in_dim = 2 * node_dim + 1 + self.edge_dim
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(in_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(hidden_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def _bond_charges(
@@ -231,7 +235,7 @@ class BondChargeHead(nn.Module):
                 target = torch.zeros_like(pre)
             else:
                 target = total_charge.view_as(pre).to(dtype=charges.dtype)
-            correction = (pre - target) / _graph_counts(atom_batch, num_graphs)
+            correction = (pre - target) / _graph_counts(atom_batch, num_graphs, dtype=charges.dtype)
             charges = charges - correction[atom_batch]
             post = scatter_sum(charges, atom_batch, dim=0, dim_size=num_graphs)
         else:

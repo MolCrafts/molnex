@@ -1,4 +1,4 @@
-"""Shared :class:`molpy.UnitSystem` — pint-style quantities.
+"""Shared :class:`molpy.core.UnitRegistry` — pint-style quantities.
 
 pint (https://pint.readthedocs.io) is the Python physical-units library molpy
 builds on. A pint *quantity* is a magnitude paired with a unit, and
@@ -23,10 +23,10 @@ Usage::
 
 from __future__ import annotations
 
-from molpy import Unit, UnitSystem
+from molpy.core import Unit, UnitPreset, UnitRegistry
 
 #: Process-wide registry. All conversions go through pint-style ``Quantity.to``.
-units = UnitSystem()
+units = UnitRegistry()
 
 #: Integrator energy unit: ``(amu, Å, fs)`` so ``v += Δt·F/m`` is consistent.
 MD_ENERGY = "amu * angstrom ** 2 / femtosecond ** 2"
@@ -40,13 +40,14 @@ def _preset_energy(style: str) -> Unit:
     ``ValueError`` for a name it does not carry — LAMMPS ``lj``, for instance,
     whose energies are reduced (dimensionless) and have no absolute unit.
     """
-    return UnitSystem.preset(style).base_units["energy"]
+    # The preset names its energy unit; the registry turns the name into a unit.
+    return units.parse(UnitPreset(style).energy())
 
 
 def preset_energy_to_md(style: str) -> float:
     """Magnitude of one energy unit of LAMMPS ``style`` in amu·Å²/fs².
 
-    Resolves the style through :meth:`molpy.UnitSystem.preset` (``metal`` →
+    Resolves the style through :class:`molpy.core.UnitPreset` (``metal`` →
     ``electron_volt``, ``real`` → ``kilocalorie_per_mole``) and converts with
     pint ``.to``.
 
@@ -68,7 +69,7 @@ def preset_energy_to_md(style: str) -> float:
 def preset_energy_ratio(source_style: str, target_style: str) -> float:
     """Magnitude of one energy unit of ``source_style`` in the unit of ``target_style``.
 
-    Both styles resolve through :meth:`molpy.UnitSystem.preset` (``real`` →
+    Both styles resolve through :class:`molpy.core.UnitPreset` (``real`` →
     kcal/mol, ``metal`` → eV) and the conversion is evaluated by pint ``.to``,
     so no conversion factor is ever spelled out in Python. Stamped into the
     LAMMPS ``meta.json`` ``energy_conv`` table, from which ``pair_style molnex``
@@ -97,6 +98,5 @@ def preset_energy_ratio(source_style: str, target_style: str) -> float:
 
 #: Padded ("dead") neighbour edges are displaced to ``factor · r_cut`` so every
 #: cutoff envelope evaluates to exactly zero. Shared by
-#: :class:`molix.md.neighbors.NeighborList` and
-#: :class:`molix.engine.static.StaticForward`.
+#: :class:`molix.md.neighbors.NeighborList` and the training padder.
 DEAD_PAIR_CUTOFF_FACTOR: float = 10.0

@@ -49,13 +49,14 @@ import torch.nn as nn
 from tensordict import TensorDict
 
 from molpot.heads import PermMultipoleHead
-from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
-from molzoo import Allegro
+from molzoo.allegro import AllegroEncoder, AllegroSpec
 from tests.conftest import (
     make_graph_batch,
     permute_graph,
+    random_rotation_matrix,
     recompute_edge_geometry,
     rotate_graph,
+    rotate_vectors,
     translate_graph,
 )
 
@@ -154,19 +155,21 @@ def small_molecule_neutral() -> TensorDict:
     )
 
 
-def _build_allegro(*, expose_tensor_track: bool) -> Allegro:
+def _build_allegro(*, expose_tensor_track: bool) -> AllegroEncoder:
     torch.manual_seed(0)
-    encoder = Allegro(
-        num_elements=10,
-        num_scalar_features=16,
-        num_tensor_features=8,
-        r_max=8.0,
-        num_layers=2,
-        type_embed_dim=16,
-        latent_mlp_depth=1,
-        latent_mlp_width=16,
-        avg_num_neighbors=4.0,
-        expose_tensor_track=expose_tensor_track,
+    encoder = AllegroEncoder(
+        AllegroSpec(
+            atomic_numbers=[1, 6, 7, 8],
+            num_scalar_features=16,
+            num_tensor_features=8,
+            r_max=8.0,
+            num_layers=2,
+            radial_chemical_embed_dim=16,
+            allegro_mlp_hidden_layers_depth=1,
+            allegro_mlp_hidden_layers_width=16,
+            avg_num_neighbors=4.0,
+            expose_tensor_track=expose_tensor_track,
+        )
     )
     encoder.eval()
     return encoder
@@ -230,7 +233,7 @@ class _PipelineModule(nn.Module):
     rotate / translate / permute transforms.
     """
 
-    def __init__(self, encoder: Allegro, head: PermMultipoleHead):
+    def __init__(self, encoder: AllegroEncoder, head: PermMultipoleHead):
         super().__init__()
         self.encoder = encoder
         self.head = head

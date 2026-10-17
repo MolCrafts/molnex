@@ -313,7 +313,10 @@ class RepulsionExp6(nn.Module):
 
 
 class DispersionC6(nn.Module):
-    """Tang-Toennies-style C6 dispersion.
+    """Rationally damped C6 dispersion.
+
+    Not Tang-Toennies: the damping is a constant ``s_disp · r*⁶`` added to the
+    denominator, not the incomplete-gamma series of Tang & Toennies (1984).
 
     ``U = -C6 / (s_disp * r*^6 + r^6)``, where ``r`` is the pair separation,
     ``C6`` the dispersion coefficient and ``r*`` the reference radius; in
@@ -418,13 +421,17 @@ class ChargeTransfer(nn.Module):
 
     *Charge transfer* is the small flow of electron density from one atom onto
     a close neighbour — a genuinely quantum effect that neither electrostatics
-    nor dispersion accounts for. It is short-ranged, and the form above encodes
-    that twice over: the ``r⁻⁴`` prefactor supplies the decay, and the
-    exponential of ``-(lam r*/r)³`` switches the term **off** as ``r`` shrinks,
-    since the argument grows without bound there. The product therefore peaks at
-    an intermediate separation and vanishes at both extremes, which is why no
-    short-range wall is needed here. For ``U`` to be an energy, ``eps`` carries
-    units of energy × length⁴.
+    nor dispersion accounts for, and it is attractive and short-ranged.
+
+    **This form is neither.** It has no published source. ``U`` is positive (a
+    repulsion), and since ``exp(-(lam r*/r)³) → 1`` as ``r → ∞`` it decays only
+    as ``eps / r⁴`` — a long-range tail, not a short-range term. The exponential
+    does switch the term off as ``r → 0``, so ``U`` peaks at an intermediate
+    separation. ByteFF-Pol (arXiv:2508.08575), for comparison, prices charge
+    transfer as ``-eps · r⁻⁴ · exp(-(lam r / r*)³)``, which is attractive and
+    vanishes faster than any power. Do not build on this class: it is replaced
+    by a molrs-defined style in the molpot composable redesign (unit 05). For
+    ``U`` to be an energy, ``eps`` carries units of energy × length⁴.
 
     Args:
         mixing_fn: Combining rule making per-pair parameters from per-atom ones,

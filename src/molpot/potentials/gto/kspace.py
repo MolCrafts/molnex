@@ -134,7 +134,11 @@ def reciprocal_basis(cell: torch.Tensor) -> torch.Tensor:
 
     Same ``g`` :meth:`KSpaceGrid.vectors` uses: ``k(n) = n · g``.
     """
-    return _TWOPI * torch.linalg.inv(_as_cell(cell)).T
+    cell = _as_cell(cell)
+    # ``inv_ex`` skips the singularity check, a host sync no CUDA-graph
+    # capture admits (``aten._linalg_check_errors``).
+    inverse = torch.linalg.inv_ex(cell)[0] if cell.is_cuda else torch.linalg.inv(cell)
+    return _TWOPI * inverse.T
 
 
 class KSpaceGrid:

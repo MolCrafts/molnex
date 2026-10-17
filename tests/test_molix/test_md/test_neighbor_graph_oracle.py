@@ -221,19 +221,13 @@ class TestWrapInvarianceEnergyForces:
         weights = _matpes_weights()
         if weights is None:
             pytest.skip("MatPES weights not available")
+        from tensordict import TensorDict
+
         from molix import config
-        from molpot.derivation.force import autograd_forces_from_energy
         from molzoo.mace import MaceMatpes
 
         config.set_precision("fp64")
-        model = (
-            MaceMatpes.load(
-                weights / "matpes_r2scan_config.json",
-                use_fallback=True,
-            )
-            .eval()
-            .to(dtype=torch.float64)
-        )
+        model = MaceMatpes.load(weights / "matpes_r2scan_config.json", wrt=("atoms.pos",)).eval()
         r_c = float(model.cutoff_fn.r_cut)
         # small water-like openish box: need L/2 >= r_c
         L = 2.0 * r_c + 0.5
@@ -246,19 +240,21 @@ class TestWrapInvarianceEnergyForces:
 
         def ef(p: torch.Tensor) -> tuple[float, torch.Tensor]:
             nl = _list(p, cell, r_c)
-            leaf = p.detach().requires_grad_(True)
-            batch = torch.zeros(n, dtype=torch.long)
-            with torch.enable_grad():
-                e = model.energy_core(
-                    leaf,
-                    Z,
-                    nl.pair_index[: nl.num_pairs],
-                    batch,
-                    1,
-                    nl.shifts[: nl.num_pairs],
-                ).sum()
-            f = autograd_forces_from_energy(e, leaf)
-            return float(e.detach()), f.detach()
+            pair_index = nl.pair_index[: nl.num_pairs]
+            pair_diff = p[pair_index[:, 1]] - p[pair_index[:, 0]] + nl.shifts[: nl.num_pairs]
+            frame = TensorDict(
+                atoms=TensorDict(
+                    Z=Z, pos=p.clone(), batch=torch.zeros(n, dtype=torch.long), batch_size=[n]
+                ),
+                pairs=TensorDict(
+                    pair_index=pair_index, pair_diff=pair_diff, batch_size=[pair_index.shape[0]]
+                ),
+                graphs=TensorDict(batch_size=[1]),
+                batch_size=[],
+            )
+            with torch.no_grad():
+                out = model(frame)
+            return float(out["graphs", "energy"].sum()), out["atoms", "forces"]
 
         e0, f0 = ef(pos)
         pos_w = pos.clone()

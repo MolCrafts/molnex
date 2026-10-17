@@ -59,7 +59,7 @@ class TestAtomicChargeModel:
         """The charge path is a hot path: ``features -> q`` must be one graph.
 
         With ``max_atoms`` declared on the solver and the ``(B,)`` total charge
-        the Parameterizer always forwards, nothing on the way from features to
+        a model (Rondo) always forwards, nothing on the way from features to
         charges reads a tensor back to the host — ``B`` is the total-charge
         length, the dense layout is the capacity, the empty-molecule pin is a
         mask select. Zero breaks, measured once here at the public entry.

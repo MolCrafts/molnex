@@ -1,9 +1,8 @@
 """Tests for ElectronegativityEqualization (EEM/QEq-family).
 
 The solver only: who *owns* a charge model is
-``tests/test_molpot/test_charge/test_assignment.py``, and what a
-``Parameterizer`` does with one is
-``tests/test_molpot/test_forcefield/test_parameterizer.py``.
+``tests/test_molpot/test_charge/test_assignment.py``, and what a model
+does with one is ``tests/test_molzoo/test_rondo/test_model.py``.
 """
 
 from __future__ import annotations

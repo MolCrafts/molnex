@@ -1,9 +1,11 @@
 """Tests for molrep.embedding.radial module."""
 
+import math
+
 import pytest
 import torch
 
-from molrep.embedding.radial import AgnesiTransform, BesselRBF, BesselRBFSpec
+from molrep.embedding.radial import AgnesiTransform, BesselRBF, BesselRBFSpec, SincBesselRBF
 
 
 class TestBesselRBFSpec:
@@ -163,3 +165,31 @@ class TestAgnesiTransform:
         """``trainable=True`` exposes a / q / p for fine-tuning."""
         names = {n for n, _ in AgnesiTransform(trainable=True).named_parameters()}
         assert {"a", "q", "p"} <= names
+
+
+class TestSincBesselRBF:
+    def test_hand_values(self):
+        r = torch.tensor([1.0], dtype=torch.float64)
+        out = SincBesselRBF(num_basis=2, r_max=4.0)(r)
+        # sin(n pi x) / (pi x), x = 1/4
+        expected = torch.tensor(
+            [[math.sin(math.pi / 4), math.sin(math.pi / 2)]], dtype=torch.float64
+        )
+        torch.testing.assert_close(out, expected / (math.pi / 4))
+
+    def test_is_bessel_rbf_times_r_max_over_pi(self):
+        r = torch.linspace(0.3, 3.9, 7, dtype=torch.float64)
+        sinc = SincBesselRBF(num_basis=5, r_max=4.0)(r)
+        bessel = BesselRBF(r_cut=4.0, num_radial=5, normalize=False, eps=0.0)(r).double()
+        # BesselRBF holds fp32 frequencies at the default precision: fp32 rounding.
+        torch.testing.assert_close(
+            sinc, bessel * (4.0 / math.pi) / math.sqrt(2.0 / 4.0), rtol=1e-5, atol=0
+        )
+
+    def test_output_follows_the_input_dtype(self):
+        assert SincBesselRBF(num_basis=3, r_max=4.0)(torch.ones(2)).dtype == torch.float32
+
+    def test_trainable_weights_are_a_parameter(self):
+        assert isinstance(
+            SincBesselRBF(num_basis=3, r_max=4.0, trainable=True).bessel_weights, torch.nn.Parameter
+        )

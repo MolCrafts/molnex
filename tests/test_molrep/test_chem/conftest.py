@@ -43,7 +43,7 @@ def mini_batch() -> TensorDict:
                 {
                     "atomi": torch.tensor([0, 0, 0], dtype=torch.long),
                     "atomj": torch.tensor([1, 2, 3], dtype=torch.long),
-                    "bond_types": torch.tensor([1, 1, 1], dtype=torch.long),
+                    "bond_type": torch.tensor([1, 1, 1], dtype=torch.long),
                 },
                 batch_size=[3],
             ),

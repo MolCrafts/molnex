@@ -1,9 +1,11 @@
 """Tests for molpot.potentials.repulsion module."""
 
+import math
+
 import pytest
 import torch
 
-from molpot.potentials.repulsion import ZBLRepulsion
+from molpot.potentials.repulsion import UniversalZBL, ZBLRepulsion
 
 
 @pytest.fixture
@@ -83,3 +85,27 @@ class TestZBLRepulsion:
         trainable = ZBLRepulsion(trainable=True)
         names = {n for n, _ in trainable.named_parameters()}
         assert {"a_exp", "a_prefactor"} <= names
+
+
+class TestUniversalZBL:
+    def test_hand_value_for_an_h2_pair(self):
+        """½ k_e Z²/r φ(x) u(r) per direction, summed onto the source; LAMMPS constants."""
+        r = torch.tensor([0.5, 0.5], dtype=torch.float64)
+        out = UniversalZBL(r_max=4.0)(r, torch.tensor([1, 1]), torch.tensor([[0, 1], [1, 0]]))
+        x = 2.0 * 0.5 / 0.46850
+        phi = sum(
+            c * math.exp(d * x)
+            for c, d in zip(
+                (0.02817, 0.28022, 0.50986, 0.18175), (-0.20162, -0.40290, -0.94229, -3.19980)
+            )
+        )
+        y = 0.5 / 4.0
+        envelope = 1 - 28 * y**6 + 48 * y**7 - 21 * y**8
+        expected = 0.5 * 14.399645 / 0.5 * phi * envelope
+        torch.testing.assert_close(out, torch.tensor([expected, expected], dtype=torch.float64))
+
+    def test_vanishes_at_the_cutoff(self):
+        out = UniversalZBL(r_max=2.0)(
+            torch.tensor([2.0], dtype=torch.float64), torch.tensor([6, 8]), torch.tensor([[0, 1]])
+        )
+        torch.testing.assert_close(out, torch.zeros(2, dtype=torch.float64))

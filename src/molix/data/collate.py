@@ -89,8 +89,18 @@ _VECTORS: dict[str, tuple[str, str, str]] = {
     "forces": ("fx", "fy", "fz"),
     "vel": ("vx", "vy", "vz"),
 }
+#: Frame columns that hold atomic numbers. molrs 0.15 writes ``number``;
+#: older frames still say ``atomic_number``. Either becomes ``atoms.Z``, and
+#: neither is also copied through as a scalar leaf.
+_ATOMIC_NUMBER_COLUMNS = ("number", "atomic_number")
 #: Frame ``atoms`` columns that become structure, not a per-atom scalar leaf.
-_ATOM_STRUCTURAL = frozenset({"number", *(c for cols in _VECTORS.values() for c in cols)})
+_ATOM_STRUCTURAL = frozenset(
+    {*_ATOMIC_NUMBER_COLUMNS, *(c for cols in _VECTORS.values() for c in cols)}
+)
+#: Frame meta keys (molrec conventions) whose ``graphs`` leaf has a molnex name.
+#: ``pe`` is the state's potential energy; molnex's batch calls it ``energy``.
+#: Every other numeric meta key becomes ``graphs.<key>`` unchanged.
+_GRAPH_LEAF = {"pe": "energy"}
 
 _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
 
@@ -102,6 +112,29 @@ _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"
 #: them by the running ``hessian_pairs`` length — rebasing them by the atom
 #: offset instead would point every term at the wrong molecule's blocks.
 _NAMESPACE_INDEX_PREFIX: dict[str, str] = {"hpair_": "hessian_pairs"}
+#: The namespaces a prefixed column addresses, in first-seen order.
+OFFSET_TARGETS: tuple[str, ...] = tuple(dict.fromkeys(_NAMESPACE_INDEX_PREFIX.values()))
+
+
+def rebase_kind(ns: str, name: str) -> tuple[str, int]:
+    """How column *name* of namespace *ns* moves into a batch, and its concat axis.
+
+    ``atom`` / ``graph`` / ``off:<namespace>`` add the running offset of that
+    axis; ``row`` is rewritten to the row's place in the batch; ``none`` is
+    concatenated as values. One rule for the collate and for a stored row.
+    """
+    if ns == "atoms" and name == "batch":
+        return "graph", 0
+    if ns == "graphs" and name == "row":
+        return "row", 0
+    if name in INDEX_KEYS:
+        return "atom", INDEX_KEYS[name][0]
+    for prefix, target in _NAMESPACE_INDEX_PREFIX.items():
+        if name.startswith(prefix):
+            return f"off:{target}", 0
+    if name in _ATOM_INDEX_COLS:
+        return "atom", 0
+    return "none", 0
 
 
 def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.Tensor:
@@ -138,7 +171,7 @@ def rebase(tensor: torch.Tensor, offset: int | torch.Tensor, key: str) -> torch.
 #: ``torch._foreach_add(leaves, 0)`` whenever the container knows its device, so
 #: a batch carrying a uint64 leaf raises ``"ufunc_add_CUDA" not implemented for
 #: 'UInt64'`` the moment anything clones it after a ``.to(device)`` —
-#: ``RondoPredictions.physics`` clones once per run to seed its container.
+#: a model that clones its input batch trips it.
 #: tensordict excludes ``torch.bool`` from that fused path for exactly this
 #: reason and does not exclude the unsigned types. molpy writes ``bond_number``
 #: and ``bond_type`` as ``uint64``; nothing downstream wants the extra bit, and
@@ -214,7 +247,7 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
     * ``meta`` — every scalar becomes a per-graph leaf ``graphs.<name>``.
     * ``box`` — a frame's lattice becomes ``graphs.cell`` ``(B, 3, 3)`` with the
       lattice vectors as **rows** (the convention every reader of ``graphs.cell``
-      uses: ``fractional @ cell``); molpy's ``Box.matrix`` holds them as columns
+      uses: ``fractional @ cell``); molpy's ``Box.h`` holds them as columns
       and is transposed here. Either every frame carries a box or none does.
     * ``bonds`` block — ``atomi``/``atomj`` become the COO ``bonds.bond_index``
       (rebased into batch space), ``type`` becomes ``bonds.bond_types``.
@@ -231,8 +264,8 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
     nothing on its own, because a caller that prices a golden at 1e-10 cannot
     cast single precision's rounding of the geometry back out. The floating
     dtype a *pipeline* wants is a policy of the loader that serves it:
-    :class:`~molix.data.datamodule.DataModule` passes its ``ftype`` as
-    *dtype*, and compute float leaves (columns, stacked vectors, other meta
+    :class:`~molix.data.datamodule.DataModule` passes its ``dtype`` here, and
+    compute float leaves (columns, stacked vectors, other meta
     floats, the cell) are then built at that dtype directly. Graph totals at
     :data:`~molix.schema.FLOAT64_LABEL_KEYS` stay IEEE-754 binary64 regardless
     of *dtype* — a Python float is a double and the Frame at rest is fp64.
@@ -294,7 +327,16 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         if "atoms" not in frame:
             raise KeyError("every frame needs an atoms block")
         atoms = frame["atoms"]
-        z = torch.as_tensor(np.asarray(atoms["number"]), dtype=torch.long)
+        number_column = next((name for name in _ATOMIC_NUMBER_COLUMNS if name in atoms), None)
+        if number_column is None:
+            raise KeyError(
+                "frame atoms have no atomic-number column "
+                f"({', '.join(_ATOMIC_NUMBER_COLUMNS)}); "
+                f"available: {', '.join(atoms.keys())}"
+            )
+        z = torch.as_tensor(
+            np.asarray(atoms[number_column]).astype(np.int64).reshape(-1), dtype=torch.long
+        )
         n_atoms = int(z.shape[0])
         columns = set(atoms.keys())
         pos = torch.stack([_column(atoms[axis], dtype) for axis in _VECTORS["pos"]], dim=-1)
@@ -323,12 +365,13 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         if box is None:
             boxless.append(graph_idx)
         else:
-            # molpy holds the lattice vectors as the columns of ``Box.matrix``;
+            # molpy holds the lattice vectors as the columns of ``Box.h``;
             # ``graphs.cell`` holds them as rows.
-            matrix = np.asarray(box.matrix, dtype=np.float64).T
+            matrix = np.asarray(box.h, dtype=np.float64).T
             cells.append(_column(matrix, dtype).reshape(3, 3))
 
-        for name, raw in (getattr(frame, "meta", None) or {}).items():
+        for key, raw in (getattr(frame, "meta", None) or {}).items():
+            name = _GRAPH_LEAF.get(key, key)
             # molrs >= 0.14 wraps meta entries in MetaValue; .value unwraps.
             value = getattr(raw, "value", raw)
             if isinstance(value, str):
@@ -404,7 +447,7 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         offset += n_atoms
         for target in _NAMESPACE_INDEX_PREFIX.values():
             if target in frame.keys():
-                namespace_offsets[target] += int(frame[target].nrows)
+                namespace_offsets[target] += int(frame[target].n_rows)
 
     atoms_dict: dict[str, torch.Tensor] = {
         "Z": torch.cat(z_all),

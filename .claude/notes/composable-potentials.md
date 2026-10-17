@@ -40,10 +40,10 @@ with `/mol:spec` when reached and must re-read this note first.
 
 | Rule | Statement |
 |---|---|
-| Placement | Family A physics + contract + manifest in `molpot`; export plumbing in `molix.ff_export` / `molix.engine` (the one sanctioned `molix → molpot` edge is `molix.ff_export`; `molix.engine` takes a `Mapping`, never a molpot type). |
+| Placement | Family A physics + contract + manifest in `molpot`; export plumbing in `molix.ff_export` / `molix.deploy` + `molix.export` (the one sanctioned `molix → molpot` edge is `molix.ff_export`; `molix.deploy` never imports a molpot type). |
 | S-decomposition | `E = E_local + E_disp + E_perm + E_pol + E_CT` is a **grouping of `term_energies()` by registry labels**, never a second energy path. `calc_energy` keeps summing `term_energies`, so the partition is by construction and double counting is impossible (S3). LJ splits into `lj_repulsion → local`, `lj_dispersion → disp`. |
 | Contract | Every style in `PotentialMeta._REGISTRY` carries an `InteractionContract`; `Potentials.__init__` runs `PotentialMeta.check_composition` and raises on unsupported combinations (replaces the `Polarization` `UserWarning`). Unregistered styles raise (closes F6). |
-| Manifest | `ForceField.manifest(*, profile)` owns it; `MANIFEST_SCHEMA` is versioned independently of `LAMMPS_META_SCHEMA`; it is persisted as a **sibling** `manifest.json` (`ModelManifest.write`; `export_for_lammps(manifest=m.to_dict())` writes `{name}.manifest.json` beside the AOTI export — a0-05 dropped the planned `LammpsWriter.write_manifest` pass-through as a façade) and as `run_record.write_meta(extra={"manifest": …})`. The C++ meta reader validates only `doc["lammps"]`, so no v3 bump. |
+| Manifest | `ForceField.manifest(*, profile)` owns it; `MANIFEST_SCHEMA` is versioned independently of the deployment metadata (`molix.deploy.metadata.SCHEMA_VERSION`); it is persisted as a **sibling** `manifest.json` (`ModelManifest.write`, the caller's own file beside a deployed package — `export_for_lammps(manifest=)` went with `molix.engine` on 2026-10-15) and as `run_record.write_meta(extra={"manifest": …})`. No engine reads it. |
 | Compile-clean | Everything on the MD force path obeys `compile-no-graph-breaks` (`notes.md`): fixed-capacity lists + masks, fixed-iteration solvers, `torch.where` guards, k-space shapes frozen at `bind_cell`. The single `.item()` for "converged?" lives in an observer hook, never in an energy. |
 | Exclusions | Declared **per interaction class**: `NonbondedScaling(charge=…, lj=…)` for permanent terms; `InducedScaling(perm_*, mutual_*)` for the induced term (A1). One permanent scale for field and energy (d ≡ p) — required for a variational functional to exist. |
 | Total charge | Fail-closed: a `Parameterizer` with a `charge_model` requires `graphs.total_charge`; `Potentials.bind_topology` checks `Σ_g q = Q_g` eagerly. |
@@ -58,7 +58,7 @@ Legend: ✅ exists · ◐ partial · ✗ missing. Anchors are `file:line` at com
 
 | Requirement | Status | Anchor |
 |---|---|---|
-| Representation / parameter generation / interaction evaluation / engine integration separated | ✅ | `molrep` / `Parameterizer` (`molpot/forcefield/parameterizer.py:92`) / `Potentials` (`forcefield/potentials.py`) / `molix.engine`, `molix.ff_export` |
+| Representation / parameter generation / interaction evaluation / engine integration separated | ✅ | `molrep` / `Parameterizer` (`molpot/forcefield/parameterizer.py:92`) / `Potentials` (`forcefield/potentials.py`) / `molix.deploy`, `molix.export`, `molix.ff_export` |
 | System record (Z, pos, cell, pbc, total charge, topology, spin, field) | ◐ | batch `atoms/edges/graphs/bonds` + `angles/propers/impropers` columns; total charge via `AtomicChargeModel(total_charge)`; no external-field slot |
 | Per-module declaration (inputs, shapes, units, transformation law, cutoff/LR solver, exclusions, derivatives) | ◐ | `ParamSpec(name, shape, unit, description)`, `StyleSchema(category, name, index_arity, params, energy_formula)`, `PotentialMeta._REGISTRY` (`forcefield/schema.py:15-174`) — params + units only |
 | Assembled model returns E, named contributions, F, virial | ◐ | A: `Potentials.term_energies()` (`potentials.py:567`; keys bonds/angles/propers/impropers/lj/coulomb), `calc_energy_forces_virial` (`:348`). B: `MacePolar.energy_core` returns one unlabeled scalar (`molzoo/mace/polar.py:384`) |
@@ -69,7 +69,7 @@ Legend: ✅ exists · ◐ partial · ✗ missing. Anchors are `file:line` at com
 
 | Requirement | Status | Anchor |
 |---|---|---|
-| Single versioned model manifest | ✗ | pieces: pydantic `MACEPolarSpec` / `SonataSpec` / `EwaldMultipoleEnergySpec` / `PermMultipoleHeadSpec`; LAMMPS `meta.json` v3 (`molix/engine/export.py:18-72`, `LAMMPS_META_SCHEMA = 3` at `:123`, pinned in C++); `molix.io.run_record.write_meta(extra=)` (`:90`); `BlockManifest` (data only); `ForceSpec.to_dict` = `dataclasses.asdict` precedent |
+| Single versioned model manifest | ✗ | pieces: pydantic `MACEPolarSpec` / `SonataSpec` / `EwaldMultipoleEnergySpec` / `PermMultipoleHeadSpec`; deployment metadata `{name}.json` (`molix.deploy.metadata.DeployMetadata`, `SCHEMA_VERSION = 1`, read by `interface/runtime` `Metadata`; replaced the LAMMPS `meta.json` 2026-10-15); `molix.io.run_record.write_meta(extra=)` (`:90`); `BlockManifest` (data only); `ForceSpec.to_dict` = `dataclasses.asdict` precedent |
 | Fields recorded nowhere | ✗ | enabled-terms list, polarization scheme, damping, exclusions/scaling, solver tolerances, reference method, energy offsets ↔ checkpoint, data version |
 
 ### S3 — no double counting
@@ -120,7 +120,7 @@ Legend: ✅ exists · ◐ partial · ✗ missing. Anchors are `file:line` at com
 |---|---|---|
 | MACE backbone; MACE-POLAR-1 with interaction preserved | ✅ | `MacePotential` (`molzoo/mace/potential.py:124`), `MacePolar` (`polar.py:56`); `_from_official` rejects unsupported configs (`polar.py:386`) |
 | Fine-tuning bases | ✅ | `MaceMatpes` / `MaceOmol` (`potential.py:903,986`) |
-| Allegro / reduced MACE production student | ◐ | `Allegro` encoder-only; fused `tp_method` not fullgraph (`molzoo/allegro.py:319,400-406`) |
+| Allegro / reduced MACE production student | ● | `AllegroPotential` (mainline nequip-allegro 0.8.3, official `.nequip.zip` loads bit-exact); `energy_core` 1 graph / 0 breaks (CPU naive; fused `uniform_1d` see notes `compile-no-graph-breaks`) |
 | Distillation machinery | ✗ | none in `src/`, `scripts/` |
 | PME for multipoles, per-order tested; Ewald↔PME parity | ✗ | `PMECalculator` charge-only (`elec/calculators/pme.py:14`); `tests/test_molpot/test_elec/calculators/test_calculator.py` is shape-only |
 | Compile-clean long-range path | ◐ | GTO yes (`hartree.py:394`; one-graph explain test); `ewald_multipole.py:217,264` host-syncs |
@@ -138,7 +138,7 @@ Legend: ✅ exists · ◐ partial · ✗ missing. Anchors are `file:line` at com
 | Requirement | Status | Anchor |
 |---|---|---|
 | Differentiable reference | ✅ | `molpot` |
-| Family B compiled neural potential in LAMMPS | ✅ short-range only | `export_for_lammps` (`molix/engine/export.py:352`), `interface/lammps/`; meta v3 has **no cell / charge / long-range / global-constraint** field (`interface/lammps/README.md:417`) |
+| Family B compiled neural potential in LAMMPS | ✅ short-range only | `molix.deploy` (`SiteEnergyAdapter`, `DeployMetadata`) + `molix.export.aoti`, `interface/runtime/` + `interface/lammps/` (2026-10-15 split); the site-energy convention has **no cell / charge / long-range / global-constraint** term — `SiteEnergyAdapter.check` refuses a long-range model |
 | No host sync in the force loop | ✅ (law) | `notes.md` topic `compile-no-graph-breaks` |
 | Local vs long-range benchmarked independently | ◐ | ad hoc per-term fp64 splits (`notes.md` Polar parity); no harness |
 | Polarization iteration counts | ✗ | `MDObservables` (`molix/md/types.py:47-80`) has no field |
@@ -316,7 +316,7 @@ Acceptance ledgers were deleted at close; the verdicts and commit shas live in t
 
 | Step | Scope | Key acceptance |
 |---|---|---|
-| `01-cell` | meta v4: `cell` + per-atom `charges` inputs; global reductions per `mace-polar-10k-review.md` §"Global operations that must remain exact" (Σq constraint once, `|Σ_r S_r(k)|²` not `Σ_r |S_r|²`); bumps `LAMMPS_META_SCHEMA` on both sides; the `LAMMPS_META_SCHEMA` pin in `tests/test_molix/test_engine/test_export.py` and `interface/tests` re-pinned | 1-rank / N-rank / in-process three-way agreement on a periodic charged box (pattern `interface/tests/` parity) |
+| `01-cell` | meta v4: `cell` + per-atom `charges` inputs; global reductions per `mace-polar-10k-review.md` §"Global operations that must remain exact" (Σq constraint once, `|Σ_r S_r(k)|²` not `Σ_r |S_r|²`); bumps `molix.deploy.metadata.SCHEMA_VERSION` and the `interface/runtime` `Metadata` check together (their tests re-pinned) | 1-rank / N-rank / in-process three-way agreement on a periodic charged box (pattern `interface/tests/` parity) |
 
 ### `composable-b1` — physics-augmented foundation potential
 
@@ -332,7 +332,7 @@ Acceptance ledgers were deleted at close; the verdicts and commit shas live in t
 
 | Step | Scope |
 |---|---|
-| `01-allegro-potential` | `AllegroPotential` with fullgraph compile (`tp_method="naive"` or a `setup_context`-capable fused kernel) |
+| `01-allegro-potential` | **superseded 2026-10-15** by chain `zoo-unify` (`molzoo.allegro.AllegroPotential`) |
 | `02-distill` | teacher-label task in `MultiTaskTrainStep`; independent QM labels retained (data in MolHub) |
 | `03-scaling-harness` | strong / weak scaling report; local vs long-range timed separately; polarization iteration counts in `MDObservables` |
 
@@ -387,7 +387,7 @@ Acceptance ledgers were deleted at close; the verdicts and commit shas live in t
 | F38 | **Closed 2026-09-08.** `vx`/`vy`/`vz` stack into `atoms.vel` the way `fx`/`fy`/`fz` stack into `forces` — the per-atom vector leaves are one table (`_VECTORS`) in the collate, so a new one is a new row. The four post-collate `atoms.vel` writes are gone; the MD builders carry velocities in the frame. | `src/molix/data/collate.py` | closed |
 | F39 | **Landing constraints debt-07 put on the Frame-native series — resolved 2026-09-08 by landing the series and debt-07 together on `dev` (operator decision).** Found by the debt-07 architect review: (a) `molix.data.TensorFrame` was untracked at HEAD while debt-07's `src/` imported it — moot once both landed in one commit; (b) `as_tensor_frame` now lives beside `TensorFrame` in `src/molix/frame.py` (the sibling `view.py` it briefly had was deleted); (c) the `frame()` test helper was promoted to `tests/conftest.py` — the root conftest, `test_molpot` and the `test_molix` leaf conftest all import it from there; (d) the `molix/data/__init__.py` docstring fragment was repaired and the `TotalCharge` mention (8b3c1880) restored, with a typed-view bullet. | closed | closed |
 | F40 | `molix.ff_export.LammpsWriter` reaches the **private** statics `ForceField._arity` and `ForceField._mass_list` across the sanctioned `molix.ff_export → molpot` edge (pre-existing; debt-07 threaded the typed view through them). Its own `_tensor` twin of `ForceField._system_tensor` was deleted by the debt-07 review round (the view's leaves are tensors; `_system_tensor` is the one remaining guard, on the molpot side). The `TensorDict | dict` half of `BatchTask.execute`'s signature is likewise an extension-point promise no in-tree producer uses (every DataModule / profiler path passes the collate's `TensorDict`); `TotalCharge` now fails closed on a dict. | `src/molix/ff_export/lammps_writer.py`, `src/molpot/forcefield/container.py`, `src/molix/data/task.py` | promote `_arity` / `_mass_list` / `_system_tensor` to a documented `ForceField` surface (they are the writer's contract in practice) or move the batch → topology-tuple read into `molix.ff_export`; drop the `| dict` half of `BatchTask` if `PadMolecularBatch` does not need it — with the F10 refactor queue |
-| F8 | (unverified, outside the touched surface) `tests/test_molzoo/test_mace/test_variants.py` and `src/molzoo/specs/mace_omol.md:3` reference the folded-away `mace/variants.py`. | — | note only; check when `molzoo/mace` is next touched |
+| F8 | `tests/test_molzoo/test_mace/test_variants.py` and the MACE specs referenced the folded-away `mace/variants.py` — **closed 2026-10-15**: tests merged into `test_potential.py`, specs refreshed (chain `zoo-unify`). | — | closed |
 
 ## Decisions pending (resolve at each chain's spec time)
 

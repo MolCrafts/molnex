@@ -119,7 +119,7 @@ class MolpySmartsMatcher:
         # Soft import — keep the class importable even if SmartsPattern is
         # missing from a stripped molpy build; construction fails loudly.
         try:
-            from molpy import SmartsPattern as _SmartsPattern
+            from molpy.perceive import SmartsPattern as _SmartsPattern
         except ImportError as exc:  # pragma: no cover - env-dependent
             raise ImportError(
                 "MolpySmartsMatcher requires molpy.SmartsPattern on the public "

@@ -84,7 +84,8 @@ class WeightedLoss(nn.Module):
             tuple(str(name) for name in names)
             if names is not None
             else tuple(
-                type(fn).__name__.removesuffix("Loss").lower() if isinstance(fn, nn.Module)
+                type(fn).__name__.removesuffix("Loss").lower()
+                if isinstance(fn, nn.Module)
                 else f"term{i}"
                 for i, fn in enumerate(self._terms)
             )

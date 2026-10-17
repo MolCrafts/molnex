@@ -12,6 +12,7 @@ import torch
 
 from molix.core.steps.base import Step
 from molix.core.steps.eval import DefaultEvalStep
+from molix.core.steps.joint import JointEvalStep, JointObjective, JointTrainStep
 from molix.core.steps.multitask import (
     MultiTaskEvalStep,
     MultiTaskTrainStep,
@@ -70,6 +71,9 @@ def cast_compute_floats(batch: Any, dtype: torch.dtype) -> Any:
 __all__ = [
     "DefaultEvalStep",
     "DefaultTrainStep",
+    "JointEvalStep",
+    "JointObjective",
+    "JointTrainStep",
     "MultiTaskEvalStep",
     "MultiTaskTrainStep",
     "Step",

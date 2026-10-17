@@ -4,7 +4,7 @@
 all lattice images with a range derived from perpendicular cell widths so
 pairs that need |S| > 1 are found when the box is small relative to the cutoff.
 
-No imports from ``molix.md.neighbors``, ``molix.op``, matscipy, ASE, freud, or
+No imports from ``molix.md.neighbors``, ``torch.ops.molix``, matscipy, ASE, freud, or
 LAMMPS. Production filter parity (``get_neighbor_pairs`` / binned path)::
 
     0 < |dr| <= cutoff

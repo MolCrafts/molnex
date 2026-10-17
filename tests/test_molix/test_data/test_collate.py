@@ -149,15 +149,17 @@ def test_integer_meta_scalars_stay_integral():
 def test_a_frame_box_becomes_graphs_cell_with_the_lattice_vectors_as_rows():
     """``frame.box`` → ``graphs.cell (B, 3, 3)``, rows = lattice vectors, at the frame's precision.
 
-    molpy's ``Box.matrix`` holds the lattice vectors as *columns*; every
+    molpy's ``Box.h`` holds the lattice vectors as *columns*; every
     reader of ``graphs.cell`` (the MD list, the periodic pair terms) computes
     ``fractional @ cell``, so the collate transposes. A triclinic box is the
     only geometry that can tell the two apart.
     """
     from molpy import Box
 
-    box = Box.from_lengths_angles(np.array([10.0, 12.0, 14.0]), np.array([90.0, 90.0, 60.0]))
-    rows = np.asarray(box.matrix).T  # the helper takes rows and rebuilds the same Box
+    columns = Box.matrix_from_lengths_angles(
+        np.array([10.0, 12.0, 14.0]), np.array([90.0, 90.0, 60.0])
+    )
+    rows = np.asarray(columns).T  # the helper takes rows and rebuilds the same Box
     batch = collate_molecules(
         [
             frame(Z=[1, 8], pos=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], box=rows),
@@ -428,3 +430,27 @@ def test_unsigned_integer_columns_become_int64() -> None:
     assert batch["bonds", "bond_number"].dtype == torch.int64
     for _, leaf in batch.items(True, True):
         assert leaf.dtype not in (torch.uint64, torch.uint32, torch.uint16), leaf.dtype
+
+
+def _renamed_atoms(sample, old: str, new: str | None):
+    """*sample* with its ``atoms`` column *old* renamed to *new* (dropped when ``None``)."""
+    atoms = {column: np.asarray(sample["atoms"][column]) for column in sample["atoms"].keys()}
+    values = atoms.pop(old)
+    if new is not None:
+        atoms[new] = values
+    sample["atoms"] = atoms
+    return sample
+
+
+def test_number_is_an_atomic_number_column_too():
+    """molrs 0.15 writes ``number``; either spelling becomes ``atoms.Z`` and no scalar leaf."""
+    sample = _renamed_atoms(frame(Z=[6, 1], pos=[[0, 0, 0], [1, 0, 0]]), "atomic_number", "number")
+    batch = collate_molecules([sample])
+    assert batch["atoms", "Z"].tolist() == [6, 1]
+    assert "number" not in batch["atoms"].keys()
+
+
+def test_a_frame_without_atomic_numbers_is_refused_by_name():
+    sample = _renamed_atoms(frame(Z=[6, 1], pos=[[0, 0, 0], [1, 0, 0]]), "atomic_number", None)
+    with pytest.raises(KeyError, match="atomic-number column"):
+        collate_molecules([sample])

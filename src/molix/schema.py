@@ -5,9 +5,9 @@ The nested ``atoms / edges / graphs`` TensorDict layout produced by
 CLAUDE.md, "Post-collate batch schema"). The tuple keys under which models
 write energy/force outputs live here so every layer — molix execution
 utilities and the higher molpot/molzoo packages alike — addresses one schema
-without molix ever importing upward. :mod:`molpot.derivation.protocol`
-re-exports these names for potential-side code; molix-internal consumers
-(:mod:`molix.md`, :mod:`molix.quant`, :mod:`molix.engine`) import them from
+without molix ever importing upward. Potential-side code (molpot, molzoo)
+imports these names from here too; molix-internal consumers
+(:mod:`molix.md`, :mod:`molix.quant`, :mod:`molix.deploy`) import them from
 here, keeping the one-way package dependency ``molix ← molrep ← molzoo/molpot``
 intact.
 
@@ -51,15 +51,12 @@ ENERGY_RESIDUAL_KEY: tuple[str, str] = ("graphs", "energy_residual")
 FLOAT64_LABEL_KEYS: frozenset[tuple[str, str]] = frozenset({ENERGY_KEY, E0_KEY})
 #: Per-atom energy contributions (``batch["atoms", "energy"]``).
 ATOMIC_ENERGY_KEY: tuple[str, str] = ("atoms", "energy")
-#: Export name of :data:`ATOMIC_ENERGY_KEY`. A molnex model forward is a
-#: ``TensorDict`` and is read at the nested key. This flat spelling is the
-#: LAMMPS ``outputs`` tensor name, and the key :class:`molix.engine.adapter.FlatTensorAdapter`
-#: reads from a third-party model that already returns a flat dict. A third
-#: spelling (``node_energies`` and friends) is not accepted: a reader looking
-#: for the wrong one gets ``None`` and drops the per-atom energy silently.
-#: Since spec ``lammps-iface-05-pbc`` that silence would be a silent *zero*
-#: partition energy in LAMMPS, the per-atom energy being the only source of
-#: ``eng_vdwl`` there.
+#: Flat spelling of :data:`ATOMIC_ENERGY_KEY`, the third output of the
+#: deployed site-energy contract (:mod:`molix.deploy.contract`). A molnex
+#: potential writes the nested key; :class:`molix.deploy.SiteEnergyAdapter`
+#: reads it. A third spelling (``node_energies`` and friends) is not accepted:
+#: the per-atom energy is the only source of the deployed partition, and
+#: dropping it would deploy a model that reports zero.
 ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 
 #: Lower bound for ``pair_dist`` on the flat export paths, in Å.
@@ -70,14 +67,20 @@ ATOMIC_ENERGY_FLAT_KEY: str = "atomic_energy"
 #: the backward pass, into every force. Clamping the distance keeps such a pair
 #: finite and inert instead of poisoning the whole step.
 #:
-#: Shared — deliberately — by ``molix.engine.adapter.MolnexTensorDictAdapter``
-#: (dynamic path) and ``molix.engine.static.StaticForward`` (CUDA-graph path),
-#: which are documented as equivalent constructions of the same batch and used
-#: to disagree (1e-6 vs 1e-8). One constant is what makes that documented
-#: equivalence checkable; the more conservative value wins.
+#: Shared by every producer of a flat export batch, including
+#: :meth:`molix.deploy.SiteEnergyAdapter.build_batch`. One constant
+#: so two constructions of the same pair cannot clamp at two floors.
 PAIR_DIST_CLAMP_MIN: float = 1e-6
 #: Per-atom forces ``= -∂E/∂pos`` (``batch["atoms", "forces"]``).
 FORCES_KEY: tuple[str, str] = ("atoms", "forces")
+#: Where a model's own energy and forces land when :data:`ENERGY_KEY` and
+#: :data:`FORCES_KEY` hold the labels it is trained against.
+ENERGY_PRED_KEY: tuple[str, str] = ("graphs", "energy_pred")
+FORCES_PRED_KEY: tuple[str, str] = ("atoms", "forces_pred")
+#: The force of a model's non-bonded styles alone, written detached.
+NONBONDED_FORCES_KEY: tuple[str, str] = ("atoms", "forces_nonbonded")
+#: Per-term partial Hessian blocks, ``(P, 9)``, one row per ``hessian_pairs`` row.
+HESSIAN_KEY: tuple[str, str] = ("hessian_pairs", "partial_hessian")
 #: Graph-level virial ``W = ∂E/∂ε`` (``batch["graphs", "virial"]``), ``(1, 3, 3)``
 #: in the energy unit. Cauchy stress is ``σ = W / V``: ``ε`` is the symmetric
 #: strain and a shear component is **not** doubled. Producers route their raw
@@ -100,9 +103,8 @@ def dead_pair_length(cutoff: float) -> float:
     """Displacement of a dead (padding) edge, in Å: ``DEAD_PAIR_CUTOFF_FACTOR · r_cut``.
 
     The one dead-edge convention of the batch schema. A padded edge — the tail
-    of a fixed-capacity MD neighbour list (:class:`molix.md.NeighborList`), the
-    padding rows of a training batch (:class:`molix.data.MoleculePadder`)
-    or of an exported fixed-shape forward (:class:`molix.engine.static.StaticForward`)
+    of a fixed-capacity MD neighbour list (:class:`molix.md.NeighborList`) or
+    the padding rows of a training batch (:class:`molix.data.MoleculePadder`)
     — is a self-loop displaced by :func:`dead_pair_shift`, so its ``pair_dist``
     is exactly this length, every cutoff envelope evaluates to zero on it and
     no ``1/r`` term ever sees ``r = 0``. Three producers used to spell it

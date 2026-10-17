@@ -54,7 +54,6 @@ from __future__ import annotations
 import math
 
 import cuequivariance as cue
-import cuequivariance_torch as cuet
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
@@ -62,6 +61,7 @@ from tensordict import TensorDict
 
 from molix import config
 from molpot.heads._common import scalar_mlp as _scalar_mlp
+from molrep import cueq
 
 
 def _find_irrep_offset(
@@ -211,8 +211,12 @@ class PermMultipoleHead(nn.Module):
         out_dipole_key: str = "atomic_dipoles",
         out_quadrupole_key: str = "atomic_quadrupoles",
         tensor_irreps: cue.Irreps | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         # Build (and validate) the spec from the kwargs — single source of
         # truth for the head's configuration. The spec is frozen, so it
         # also serves as a checkpointable description.
@@ -257,7 +261,7 @@ class PermMultipoleHead(nn.Module):
 
         # Charge readout: l=0 scalar MLP on pooled atom features.
         if cfg.charge:
-            self.q_head = _scalar_mlp(cfg.input_dim, [cfg.hidden_dim], 1)
+            self.q_head = _scalar_mlp(cfg.input_dim, [cfg.hidden_dim], 1, dtype=dtype)
 
         # Equivariant moment readouts share one structural recipe (see
         # _equivariant_moment_readout). Both require the encoder's
@@ -291,12 +295,12 @@ class PermMultipoleHead(nn.Module):
         if cfg.dipole:
             self._mu_offset = _find_irrep_offset(tensor_irreps, G(1, -1))
             self._mu_size = 3 * self._u
-            self.mu_proj = nn.Linear(cfg.input_dim, self._u, dtype=config.ftype)
-            self.mu_collapse = cuet.Linear(
+            self.mu_proj = nn.Linear(cfg.input_dim, self._u, dtype=dtype)
+            self.mu_collapse = cueq.Linear(
                 irreps_in=cue.Irreps(G, [(self._u, "1o")]),
                 irreps_out=cue.Irreps(G, [(1, "1o")]),
                 layout=cue.ir_mul,
-                dtype=config.ftype,
+                dtype=dtype,
             )
 
         # Θ readout (l=2, parity even): slice 2e block, gate, collapse u·2e → 1·2e.
@@ -309,12 +313,12 @@ class PermMultipoleHead(nn.Module):
                     f"build the encoder with l_max>=2. ({e})"
                 ) from None
             self._theta_size = 5 * self._u
-            self.theta_proj = nn.Linear(cfg.input_dim, self._u, dtype=config.ftype)
-            self.theta_collapse = cuet.Linear(
+            self.theta_proj = nn.Linear(cfg.input_dim, self._u, dtype=dtype)
+            self.theta_collapse = cueq.Linear(
                 irreps_in=cue.Irreps(G, [(self._u, "2e")]),
                 irreps_out=cue.Irreps(G, [(1, "2e")]),
                 layout=cue.ir_mul,
-                dtype=config.ftype,
+                dtype=dtype,
             )
 
     @classmethod
@@ -323,6 +327,7 @@ class PermMultipoleHead(nn.Module):
         spec: PermMultipoleHeadSpec,
         *,
         tensor_irreps: cue.Irreps | None = None,
+        dtype: torch.dtype | None = None,
     ) -> "PermMultipoleHead":
         """Construct from a spec.
 
@@ -332,7 +337,7 @@ class PermMultipoleHead(nn.Module):
         ``encoder.tensor_track_irreps`` from an Allegro built with
         ``expose_tensor_track=True`` (and ``l_max >= 2`` if quadrupole is on).
         """
-        return cls(**spec.model_dump(), tensor_irreps=tensor_irreps)
+        return cls(**spec.model_dump(), tensor_irreps=tensor_irreps, dtype=dtype)
 
     # ------------------------------------------------------------------
     # forward
@@ -433,7 +438,7 @@ class PermMultipoleHead(nn.Module):
         block_size: int,  # = (2ℓ+1) * u
         out_dim: int,  # = 2ℓ + 1
         scalar_proj: nn.Module,  # F → u  (l=0, rotation-invariant)
-        collapse: nn.Module,  # cuet.Linear(u·lℓ → 1·lℓ)
+        collapse: nn.Module,  # cueq.Linear(u·lℓ → 1·lℓ)
     ) -> torch.Tensor:
         r"""Inlined PaiNN-style scalar-gated lℓ readout.
 

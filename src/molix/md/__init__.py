@@ -3,7 +3,7 @@
 :class:`~molix.md.driver.MD` is the composer: ``MD(dtype).set_forcefield(ff)
 .set_neighbors(nl).set_integrator(Integrator(dt)).to(device)``. It owns the
 MD-side precision only. :class:`~molix.md.forcefield.ForceField` is
-identically :class:`molpy.ForceField`. The neighbour-list cadence belongs to
+identically :class:`molpy.ff.forcefield.ForceField`. The neighbour-list cadence belongs to
 :class:`~molix.md.neighbors.NeighborList`. The lower layers are the primitives
 the caller composes:
 
@@ -11,7 +11,7 @@ the caller composes:
   typed pytree contracts for the stepped state and hook snapshot. The force
   provider returns a plain ``dict`` (``energy`` / ``forces``, optional
   ``virial``).
-* :class:`~molix.md.forcefield.ForceField` — ``molpy.ForceField`` re-export;
+* :class:`~molix.md.forcefield.ForceField` — ``molpy.ff.forcefield.ForceField`` re-export;
   mount with :meth:`~molix.md.driver.MD.set_forcefield`.
 * :class:`~molix.md.integrators.Integrator` /
   :class:`~molix.md.integrators.VelocityVerletIntegrator` (NVE — constant

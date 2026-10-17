@@ -74,7 +74,9 @@ nav = [
         ]},
         { "Spec" = [
             { "Allegro Spec" = "molzoo/specs/allegro.md" },
+            { "MACE-MatPES Spec" = "molzoo/specs/mace_matpes.md" },
             { "MACEOMol Spec" = "molzoo/specs/mace_omol.md" },
+            { "PiNet2 Spec" = "molzoo/specs/pinet2.md" },
             { "Rondo Spec" = "molzoo/specs/rondo.md" }
         ]}
     ]},

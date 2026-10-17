@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from time import perf_counter
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
-from molix.config import config
 from molix.core.seed import make_generator, make_worker_init_fn
 from molix.core.steps import cast_compute_floats
 from molix.data.collate import MoleculeCollator
@@ -18,6 +17,7 @@ from molix.data.collator import FrameCollator
 from molix.data.dataset import BaseDataset
 from molix.data.mixture import DataMixture
 from molix.data.pad import MoleculePadder
+from molix.data.prepared import PreparedRow, PreparedRows
 from molix.data.sampler import BatchPlanShard, BatchSamplerSource, TokenBudgetBatchSampler
 from molix.data.task import BatchTask
 
@@ -104,6 +104,12 @@ class DataModule:
             :class:`~molix.data.collate.MoleculeCollator` (ragged). Pass a
             padder on the composer for compile-static shapes. Pad is not a
             :class:`~molix.data.task.BatchTask`.
+        dtype: Floating dtype every emitted batch's compute float leaves are
+            cast to (:func:`molix.core.steps.cast_compute_floats`) — the
+            model's build dtype; graph totals at
+            :data:`~molix.schema.FLOAT64_LABEL_KEYS` stay float64 and index
+            tensors are left alone. A ``collate_fn`` whose collator names a
+            different dtype is refused: one dtype, passed once.
         batch_tasks: Post-collate
             :class:`~molix.data.task.BatchTask` instances, applied to every
             collated batch in the order given (neighbor list, charge — not pad).
@@ -187,6 +193,7 @@ class DataModule:
         val_dataset: BaseDataset,
         *,
         collate_fn: FrameCollator | None = None,
+        dtype: torch.dtype = torch.float32,
         batch_tasks: Sequence[BatchTask] | None = None,
         batch_size: int = 32,
         max_atoms_per_batch: int | None = None,
@@ -253,9 +260,16 @@ class DataModule:
             if val_batch_counts is not None:
                 padder.check(val_batch_counts)
 
+        collator_dtype = getattr(getattr(collate_fn, "collator", None), "dtype", None)
+        if collator_dtype is not None and collator_dtype is not dtype:
+            raise ValueError(
+                f"collate_fn builds batches at {collator_dtype} but DataModule(dtype={dtype}); "
+                "one dtype, passed once"
+            )
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.collate_fn = collate_fn
+        self.dtype = dtype
         self.batch_tasks: tuple[BatchTask, ...] = tuple(batch_tasks) if batch_tasks else ()
         self.batch_size = batch_size
         self.max_atoms_per_batch = max_atoms_per_batch
@@ -452,8 +466,8 @@ class DataModule:
         Otherwise: under DDP, wraps the train dataset in a shuffling
         :class:`~torch.utils.data.DistributedSampler` (shuffle handled by
         the sampler, ``drop_last=True``); otherwise shuffles directly. The
-        collate function casts floating-point leaves to the captured
-        ``ftype`` and applies any post-collate batch tasks.
+        collate function casts floating-point leaves to ``dtype`` and
+        applies any post-collate batch tasks.
 
         Returns:
             A configured training ``DataLoader``.
@@ -607,11 +621,16 @@ class DataModule:
             self._val_loader = loader
         return loader
 
-    def _make_collate_fn(self) -> "_CollateFn":
+    def _make_collate_fn(self, dataset: BaseDataset | PreparedRows | None = None) -> "_CollateFn":
         frame_collator = self.collate_fn
         if frame_collator is None:
-            frame_collator = FrameCollator(collator=MoleculeCollator(dtype=config["ftype"]))
-        return _CollateFn(frame_collator, self.batch_tasks)
+            frame_collator = FrameCollator(collator=MoleculeCollator(dtype=self.dtype))
+        captured = (
+            tuple(task.task_id for task in dataset.tasks)
+            if isinstance(dataset, PreparedRows)
+            else ()
+        )
+        return _CollateFn(frame_collator, self.batch_tasks, dtype=self.dtype, captured=captured)
 
     def _resolve_collation(self, dataset: BaseDataset) -> tuple[object, object]:
         """Pick ``(loader_dataset, collate_fn)`` — one route, the per-sample collate.
@@ -629,17 +648,12 @@ class DataModule:
         Returns:
             ``(loader_dataset, collate_fn)`` to hand to ``DataLoader``.
         """
-        return dataset, self._make_collate_fn()
+        return dataset, self._make_collate_fn(dataset)
 
-    @property
-    def ftype(self) -> torch.dtype:
-        """The floating-point dtype each collated batch will be cast to.
-
-        Captured from :data:`molix.config.config` at dataloader-construction
-        time so that ``spawn``-launched workers see a stable value even after
-        their module-level re-import of :mod:`molix.config`.
-        """
-        return config["ftype"]
+    def release(self) -> None:
+        """Drop the cached loaders, so their persistent workers exit; the next call rebuilds."""
+        self._train_loader = None
+        self._val_loader = None
 
     # -- Epoch hook ---------------------------------------------------------
 
@@ -681,36 +695,45 @@ class _CollateFn:
     and is what we default to in :class:`DataModule` to sidestep the
     Python 3.14 multi-threaded-fork DeprecationWarning).
 
-    Captures :data:`molix.config.config["ftype"]` at construction time
-    (in the main process) and routes each emitted batch through
-    :func:`molix.core.steps.cast_compute_floats` with ``self.ftype``. Compute
-    floating leaves follow ``ftype``. Frame collate emits graph totals at
+    Routes each emitted batch through
+    :func:`molix.core.steps.cast_compute_floats` with ``dtype`` — the
+    :class:`DataModule`'s, the model's build dtype — so compute floating
+    leaves follow it. Frame collate emits graph totals at
     :data:`~molix.schema.FLOAT64_LABEL_KEYS` as IEEE-754 binary64; the
     store route does not narrow those totals below the mmap column and
-    does not upcast. This is what makes
-    :meth:`molix.config.MolnexConfig.set_precision` a true
-    single-source-of-truth for compute precision: workers re-import
-    :mod:`molix.config` after spawn and would otherwise reset ``ftype``
-    to its default ``float32``, so the value must be captured by the
-    parent and pickled along with this callable.
+    does not upcast. ``dtype`` is an attribute of this callable, so it is
+    pickled into every worker with it: a spawned worker casts exactly as
+    the parent would, with no process-wide state to re-read.
     """
 
-    def __init__(self, frame_collator: FrameCollator, batch_tasks: Sequence[BatchTask]) -> None:
-        self.ftype = config["ftype"]
+    def __init__(
+        self,
+        frame_collator: FrameCollator,
+        batch_tasks: Sequence[BatchTask],
+        *,
+        dtype: torch.dtype,
+        captured: Iterable[str] = (),
+    ) -> None:
+        self.dtype = dtype
         self.frame_collator = frame_collator
         self.batch_tasks = batch_tasks
+        #: ``task_id`` of every task the prepared rows were captured with
+        #: (:attr:`~molix.data.prepared.PreparedRows.tasks`): those ran per row
+        #: and are skipped for a batch of prepared rows; every other task runs.
+        self.captured = frozenset(captured)
         self.stage_seconds: dict[str, float] | None = None
 
     def time_stages(self) -> dict[str, float]:
         """Start accumulating per-stage wall time and return the live record.
 
-        The input path's cost is a sum over prepare / collate / one entry per
-        batch task / pad, and only the total is observable from outside. A
-        total says the loader leads the GPU; it does not say which stage to
-        attack, and picking one without the split is guessing. Off by default
-        (``None``) so the production path pays nothing; the returned dict is
-        updated in place on every call and is only meaningful with
-        ``num_workers=0``, since a worker's copy dies with the worker.
+        The input path's cost is a sum over prepare / collate (or assemble, for
+        a batch of prepared rows) / one entry per batch task / pad, and only
+        the total is observable from outside. A total says the loader leads the
+        GPU; it does not say which stage to attack, and picking one without the
+        split is guessing. Off by default (``None``) so the production path
+        pays nothing; the returned dict is updated in place on every call and
+        is only meaningful with ``num_workers=0``, since a worker's copy dies
+        with the worker.
 
         Returns:
             The accumulator, keyed by stage name, in seconds.
@@ -718,50 +741,53 @@ class _CollateFn:
         self.stage_seconds = {}
         return self.stage_seconds
 
-    def __call__(self, samples: list[dict]) -> dict:
+    def __call__(self, samples: list[Any]) -> dict:
         # Prepare (if any), collate, then tasks (NeighborList fills edges),
         # then pad. Pad after nlist so dead edges sit on the cutoff graph.
         # Must call prepare_samples here — wrapping FrameCollator in another
         # callable is invisible: this method uses .collator, not __call__.
+        # A batch of PreparedRow skips prepare, collate, and every task the rows
+        # were captured with (``captured``): those already ran per row. A task
+        # the rows lack runs here, whatever it could have been captured with —
+        # the Class-I loader stores no cutoff graph (36 B a pair for every
+        # conformer) and rebuilds it per batch.
         stages = self.stage_seconds
-        if stages is None:
+        mark = perf_counter() if stages is not None else 0.0
+
+        def tick(name: str) -> None:
+            nonlocal mark
+            if stages is None:
+                return
+            now = perf_counter()
+            stages[name] = stages.get(name, 0.0) + (now - mark)
+            mark = now
+
+        prepared = bool(samples) and isinstance(samples[0], PreparedRow)
+        if prepared:
+            if any(not isinstance(sample, PreparedRow) for sample in samples):
+                raise TypeError("prepared rows and raw frames cannot share a batch")
+            batch = PreparedRow.assemble(samples)
+            tick("assemble")
+        else:
             prepare_samples = getattr(self.frame_collator, "prepare_samples", None)
             if callable(prepare_samples):
                 samples = prepare_samples(samples)
+            tick("prepare")
             batch = self.frame_collator.collator(samples)
-            for task in self.batch_tasks:
-                batch = task.execute(batch)
-            self.frame_collator.record_live(batch)
-            padder = self.frame_collator.padder
-            if padder is not None:
-                batch = padder(batch)
-            batch = self.frame_collator.apply_graph_schema(batch)
-            self.frame_collator._last = batch
-            return cast_compute_floats(batch, self.ftype)
-
-        def _tick(name: str, start: float) -> float:
-            now = perf_counter()
-            stages[name] = stages.get(name, 0.0) + (now - start)
-            return now
-
-        mark = perf_counter()
-        prepare_samples = getattr(self.frame_collator, "prepare_samples", None)
-        if callable(prepare_samples):
-            samples = prepare_samples(samples)
-        mark = _tick("prepare", mark)
-        batch = self.frame_collator.collator(samples)
-        mark = _tick("collate", mark)
+            tick("collate")
         for task in self.batch_tasks:
+            if prepared and task.task_id in self.captured:
+                continue
             batch = task.execute(batch)
-            mark = _tick(f"task:{type(task).__name__}", mark)
+            tick(f"task:{type(task).__name__}")
         self.frame_collator.record_live(batch)
-        mark = _tick("record_live", mark)
+        tick("record_live")
         padder = self.frame_collator.padder
         if padder is not None:
             batch = padder(batch)
-        mark = _tick("pad", mark)
+        tick("pad")
         batch = self.frame_collator.apply_graph_schema(batch)
         self.frame_collator._last = batch
-        out = cast_compute_floats(batch, self.ftype)
-        _tick("schema+cast", mark)
+        out = cast_compute_floats(batch, self.dtype)
+        tick("schema+cast")
         return out

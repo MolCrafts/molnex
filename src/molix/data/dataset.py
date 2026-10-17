@@ -58,7 +58,7 @@ class BaseDataset(Dataset[Any], ABC):
         decode to count, and wants to cache the result. Prefer
         :attr:`counted_tables` when the vector is already held.
 
-        This is deliberately **a verb**. ``Block.nrows`` is an attribute: the
+        This is deliberately **a verb**. ``Block.n_rows`` is an attribute: the
         length of one block, free. This is a request over a whole dataset
         whose cost ranges from a column read to a fifteen-minute scan, and a
         caller reading the two spellings side by side should not be able to
@@ -91,7 +91,7 @@ class BaseDataset(Dataset[Any], ABC):
            vector — a packed column, a sidecar. A read.
         2. :meth:`count_rows` is implemented — the container measures, and may
            cache what it measured.
-        3. Neither: every sample is materialised and its ``Block.nrows`` read.
+        3. Neither: every sample is materialised and its ``Block.n_rows`` read.
            Correct, and the slowest thing in a data path.
 
         Args:
@@ -354,17 +354,17 @@ def _no_table(source: Any, table: str) -> ValueError:
 
 
 def _record_nrows(sample: Any, table: str) -> int:
-    """``sample[table].nrows`` of one Frame, or the sum over a sequence."""
+    """``sample[table].n_rows`` of one Frame, or the sum over a sequence."""
     if isinstance(sample, Frame):
         try:
-            return int(sample[table].nrows)
+            return int(sample[table].n_rows)
         except KeyError as exc:
             raise _no_table(sample, table) from exc
     if isinstance(sample, (tuple, list)):
         return sum(_record_nrows(item, table) for item in sample)
     raise TypeError(
         f"{type(sample).__name__} is not a Frame or a sequence of Frames; "
-        f"packing reads frame[{table!r}].nrows"
+        f"packing reads frame[{table!r}].n_rows"
     )
 
 

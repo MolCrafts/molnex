@@ -87,20 +87,22 @@ def make_cubic_lattice(n_side: int = 3, spacing: float = 3.0) -> tuple[torch.Ten
 
 def make_tiny_potential():
     """A 4-species PiNet potential small enough for eager unit tests."""
-    from molzoo.pinet import PiNetPotential
+    from molzoo.pinet import PiNetPotential, PiNetSpec
 
     torch.manual_seed(0)
     return (
         PiNetPotential(
-            atom_types=[1, 6, 7, 8],
-            r_max=4.0,
-            n_basis=3,
-            pp_nodes=[8, 8],
-            pi_nodes=[8, 8],
-            ii_nodes=[8, 8],
-            depth=2,
-            rank=3,
-            hidden_dim=16,
+            PiNetSpec(
+                atomic_numbers=[1, 6, 7, 8],
+                r_max=4.0,
+                n_basis=3,
+                pp_nodes=[8, 8],
+                pi_nodes=[8, 8],
+                ii_nodes=[8, 8],
+                depth=2,
+                rank=3,
+                out_nodes=[16],
+            ),
             # What is derived is fixed at construction (the one op torch.compile
             # needs); an MD force field cannot ask for it per call.
             wrt=("atoms.pos",),

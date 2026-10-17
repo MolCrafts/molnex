@@ -65,6 +65,11 @@ _NO_MIXING_RULE = (
 )
 
 
+#: How close a phase must be to 0 or π to read as cvff's sign, rad — the same
+#: tolerance the OPLS-manifold check uses for its phases.
+_PHASE_TOL = 1e-6
+
+
 def _resolved_smearing(smearing: float | None) -> float:
     """The Ewald smearing σ of a record whose Coulomb term ran a lattice sum.
 
@@ -300,26 +305,56 @@ class LammpsAdapter(BackendAdapter):
         }
 
     def _impropers_periodic(self, ir: PotentialIR) -> dict[str, Any]:
+        """Periodic impropers as LAMMPS ``improper_style cvff``.
+
+        cvff is ``K[1 + d cos(nχ)]``: one term, with a sign ``d = ±1`` where the IR
+        has a phase. So ``k[1 + cos(nχ − γ)]`` maps exactly when a type has one
+        non-zero term and ``γ ∈ {0, π}`` (``d = +1`` / ``−1``); any other row has no
+        cvff spelling and is refused — it used to be recorded as cvff regardless.
+
+        Raises:
+            UnsupportedTermError: A type with more than one non-zero term, or a
+                phase other than 0 or π.
+        """
         assert ir.impropers_periodic is not None
         bag = ir.impropers_periodic
         n_types, n_terms = bag.k.shape
         periods = self.as_int_rows(bag.periodicity)
         params: list[dict[str, Any]] = []
         for t in range(n_types):
-            terms = [
+            live = [m for m in range(n_terms) if float(bag.k[t, m].item()) != 0.0]
+            if len(live) > 1:
+                raise UnsupportedTermError(
+                    "improper_periodic",
+                    f"type {t + 1} has {len(live)} non-zero terms; cvff holds one",
+                )
+            if not live:
+                params.append({"type_index": t + 1, "K": 0.0, "d": 1, "n": periods[t][0]})
+                continue
+            m = live[0]
+            phase = math.remainder(float(bag.phase[t, m].item()), 2.0 * math.pi)
+            if abs(phase) < _PHASE_TOL:
+                sign = 1
+            elif abs(abs(phase) - math.pi) < _PHASE_TOL:
+                sign = -1
+            else:
+                raise UnsupportedTermError(
+                    "improper_periodic",
+                    f"type {t + 1} has phase {phase:.6g} rad; cvff takes only 0 or π",
+                )
+            params.append(
                 {
-                    "periodicity": periods[t][m],
-                    "k": float(bag.k[t, m].item()),
-                    "phase": float(bag.phase[t, m].item()),
+                    "type_index": t + 1,
+                    "K": float(bag.k[t, m].item()),
+                    "d": sign,
+                    "n": periods[t][m],
                 }
-                for m in range(n_terms)
-            ]
-            params.append({"type_index": t + 1, "terms": terms})
+            )
         return {
             "type": "improper_style cvff",
             "style": "cvff",
             "category": "improper",
-            "case": TranslationCase.DECOMPOSE.value,
+            "case": TranslationCase.FORM_REPARAMETERIZE.value,
             "parameters": params,
         }
 

@@ -17,15 +17,3 @@
 ::: molrep.interaction
 
 ::: molrep.interaction.product
-
-::: molrep.interaction.aggregation
-
-::: molrep.interaction.contraction
-
-## Readout
-
-::: molrep.readout
-
-::: molrep.readout.pooling
-
-::: molrep.readout.product

@@ -963,10 +963,10 @@ class TestPotentials:
         assert torch.allclose(forces.detach(), expected, atol=1e-10, rtol=0.0)
 
     def test_forward_is_the_same_op_composed_outside(self) -> None:
-        """``wrt`` at construction and ``Derivative(pots, wrt=...)`` are one code path."""
+        """``wrt`` at construction and ``Derivative(pots.energy, wrt=...)`` are one code path."""
         batch = _two_atom_bond_batch()
         inside = _bond_potentials(wrt=FORCES)(batch.clone())
-        outside = Derivative(_bond_potentials(), wrt=FORCES)(batch.clone())
+        outside = Derivative(_bond_potentials().energy, wrt=FORCES)(batch.clone())
         assert torch.equal(inside[FORCES_KEY], outside[FORCES_KEY])
         assert torch.equal(inside[ENERGY_KEY], outside[ENERGY_KEY])
 
@@ -1007,8 +1007,8 @@ class TestPotentials:
         integrates electrostatics-only forces.
         """
         pots = ForceField().def_pairstyle(_EdgeSpring()).to_potentials()
-        reference = Derivative(pots, wrt=FORCES)(_edge_batch())[FORCES_KEY]
-        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)(_edge_batch())
+        reference = Derivative(pots.energy, wrt=FORCES)(_edge_batch())[FORCES_KEY]
+        npt = Derivative(pots.energy, wrt=FORCES_AND_VIRIAL)(_edge_batch())
         assert torch.allclose(npt[FORCES_KEY], reference, atol=1e-10, rtol=0.0)
         assert npt[VIRIAL_KEY].shape == (1, 3, 3)
         assert npt[VIRIAL_KEY].abs().sum().item() > 0.0
@@ -2318,7 +2318,7 @@ class TestPotentials:
         pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
 
-        forces = Derivative(potentials, wrt=FORCES_AND_VIRIAL)(
+        forces = Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL)(
             _coulomb_batch(positions, cell, pair_index, shifts)
         )[FORCES_KEY].detach()
 
@@ -2356,7 +2356,7 @@ class TestPotentials:
         pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
 
-        virial = Derivative(potentials, wrt=FORCES_AND_VIRIAL)(
+        virial = Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL)(
             _coulomb_batch(positions, cell, pair_index, shifts)
         )[VIRIAL_KEY][0].detach()
 
@@ -2500,7 +2500,7 @@ class TestPotentials:
             atol=1e-10,
             rtol=0.0,
         )
-        forces = Derivative(potentials, wrt=FORCES)
+        forces = Derivative(potentials.energy, wrt=FORCES)
         assert torch.allclose(
             forces(implied)[FORCES_KEY].detach(),
             forces(stored)[FORCES_KEY].detach(),
@@ -2508,7 +2508,7 @@ class TestPotentials:
             rtol=0.0,
         )
         with pytest.raises(ValueError, match="shifts"):
-            Derivative(potentials, wrt=FORCES_AND_VIRIAL)(implied)
+            Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL)(implied)
 
     @pytest.mark.slow
     def test_cartesian_proper_tables_trace_as_one_graph(self) -> None:
@@ -2623,7 +2623,7 @@ class TestPotentials:
         # exclusion-table work, not a concession.
         step_batch = _coulomb_batch(positions, cell, pair_index, shifts)
         potentials.bind_topology(step_batch)
-        step = Compiler.explain(Derivative(potentials, wrt=FORCES_AND_VIRIAL), step_batch)
+        step = Compiler.explain(Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL), step_batch)
         assert step.graph_break_count > 0
         strays = _strays_outside_the_force_seam(step.break_sites)
         assert strays == [], (
@@ -2654,7 +2654,9 @@ class TestPotentials:
         potentials.bind_topology(step_batch)
         potentials.calc_energy(step_batch)
         with torch.no_grad():
-            inference = Compiler.explain(Derivative(potentials, wrt=FORCES_AND_VIRIAL), step_batch)
+            inference = Compiler.explain(
+                Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL), step_batch
+            )
         assert (inference.graph_count, inference.graph_break_count) == (1, 0), (
             f"the periodic Coulomb NPT step ({calculator}) must be one graph in inference; "
             f"break sites: {inference.break_sites}"
@@ -2679,7 +2681,9 @@ class TestPotentials:
         """
         positions = torch.tensor(LJ_BOUNDARY_POSITIONS, dtype=DTYPE)
         potentials = _lj_boundary_potentials()
-        forces = Derivative(potentials, wrt=FORCES)(_lj_boundary_batch(positions))[FORCES_KEY]
+        forces = Derivative(potentials.energy, wrt=FORCES)(_lj_boundary_batch(positions))[
+            FORCES_KEY
+        ]
 
         def energy_at(stepped: torch.Tensor) -> float:
             return float(_lj_boundary_potentials().calc_energy(_lj_boundary_batch(stepped)))
@@ -2769,7 +2773,7 @@ class TestPotentials:
         pair_index, shifts = _coulomb_edges()
         positions = torch.tensor(COULOMB_POSITIONS, dtype=DTYPE)
         batch = _coulomb_batch(positions, cell, pair_index, shifts)
-        npt = Derivative(potentials, wrt=FORCES_AND_VIRIAL)
+        npt = Derivative(potentials.energy, wrt=FORCES_AND_VIRIAL)
 
         viewed = npt(TensorFrame.from_tensordict(batch))
         expected = npt(_coulomb_batch(positions, cell, pair_index, shifts))
@@ -2986,7 +2990,6 @@ def _polar_forcefield() -> tuple[ForceField, nn.Module]:
         ATOMIC_ENERGIES,
         ATOMIC_NUMBERS,
         TINY_POLAR_KWARGS,
-        polar_kwargs,
     )
 
     spec = MACEPolarSpec(
@@ -2995,7 +2998,7 @@ def _polar_forcefield() -> tuple[ForceField, nn.Module]:
         **TINY_POLAR_KWARGS,
     )
     torch.manual_seed(0)
-    model = MacePolar(**polar_kwargs(spec)).eval()
+    model = MacePolar(spec).eval()
     forcefield = ForceField("mace-polar", units="metal")
     forcefield.def_pairstyle(model)
     return forcefield, model
@@ -3033,12 +3036,12 @@ def _polar_batch(pos: torch.Tensor, cell: torch.Tensor) -> TensorDict:
 
 
 class TestPotentialsMlip:
-    """``bind_cell`` delegation, the ``call_energy`` policy and the compiled routes.
+    """``bind_cell`` delegation, the mlip ``energy`` branch and the compiled routes.
 
     ``Potentials`` owns one line of ``bind_cell``: a protocol-guarded hand-over
     to the mlip. It keeps no compiled state — the composed op is what a
-    caller compiles — and its ``mlip`` branch of ``calc_energy`` has exactly
-    one policy, ``protocol.call_energy``.
+    caller compiles — and its ``mlip`` branch of ``calc_energy`` calls the
+    mlip's ``energy`` seam, never its ``forward``.
     """
 
     @pytest.fixture
@@ -3091,36 +3094,27 @@ class TestPotentialsMlip:
         assert bound == [cell.data_ptr()]
         assert isinstance(pots, CellBound)
 
-    def test_calc_energy_routes_through_call_energy(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """One policy for the mlip branch.
+    def test_calc_energy_calls_the_mlip_energy_seam(self) -> None:
+        """The mlip branch hands the batch to ``mlip.energy``, never to ``mlip.forward``.
 
-        Which entry of an mlip evaluates the energy is ``protocol.call_energy``'s
-        decision alone; re-implementing that probe here is how the two copies
-        drift.
+        ``forward`` of a potential is an op of its own; reaching it from the
+        container would derive twice.
         """
-        import molpot.forcefield.potentials as module
-
-        calls: list[object] = []
-        real = module.call_energy
-
-        def counting(model: object, system: TensorDict) -> TensorDict:
-            calls.append(model)
-            return real(model, system)
 
         class _PosSpring(nn.Module):
-            """Energy read off ``atoms.pos`` only."""
+            """Energy read off ``atoms.pos`` only; ``forward`` must stay unreached."""
 
             def energy(self, system: TensorDict) -> TensorDict:
                 system[ENERGY_KEY] = 0.5 * system["atoms", "pos"].pow(2).sum().reshape(1)
                 return system
 
-        monkeypatch.setattr(module, "call_energy", counting)
-        mlip = _PosSpring()
-        pots = ForceField().def_pairstyle(mlip).to_potentials()
+            def forward(self, system: TensorDict) -> TensorDict:
+                raise AssertionError("the container must call energy, not forward")
+
+        pots = ForceField().def_pairstyle(_PosSpring()).to_potentials()
         batch = _edge_batch()
 
         energy = pots.calc_energy(batch)
-        assert calls == [mlip]
         assert energy is batch[ENERGY_KEY]
 
     @pytest.mark.slow
@@ -3166,7 +3160,7 @@ class TestPotentialsMlip:
         lj.calc_energy(lj_batch)
         for wrt in (FORCES, FORCES_AND_VIRIAL):
             with torch.no_grad():
-                summary = Compiler.explain(Derivative(lj, wrt=wrt), lj_batch)
+                summary = Compiler.explain(Derivative(lj.energy, wrt=wrt), lj_batch)
             assert (summary.graph_count, summary.graph_break_count) == (1, 0), (
                 f"the lj/cut op wrt={wrt} must trace as one graph; "
                 f"break sites: {summary.break_sites}"
@@ -3185,7 +3179,7 @@ class TestPotentialsMlip:
         coulomb.calc_energy(periodic)
         for wrt in (FORCES, FORCES_AND_VIRIAL):
             with torch.no_grad():
-                summary = Compiler.explain(Derivative(coulomb, wrt=wrt), periodic)
+                summary = Compiler.explain(Derivative(coulomb.energy, wrt=wrt), periodic)
             assert (summary.graph_count, summary.graph_break_count) == (1, 0), (
                 f"the periodic Coulomb op wrt={wrt} must trace as one graph; "
                 f"break sites: {summary.break_sites}"
@@ -3198,7 +3192,7 @@ class TestPotentialsMlip:
         ``bind_cell -> one eager call -> Compiler()(op)`` is the caller's
         composition. After it, the compiled NPT op over the cell-bound Polar
         mlip matches eager to 1e-10 in fp64 (reduction order only), the
-        flat ``energy_core`` and the whole op are one dynamo graph each in
+        mlip's own op and the whole NPT op are one dynamo graph each in
         inference, and the op traced with grad enabled still breaks —
         attached outputs leak the leaves until pytorch/pytorch#196653 — and
         every break must be that leaf in ``molix/autograd/variables.py``.
@@ -3227,7 +3221,7 @@ class TestPotentialsMlip:
 
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
-        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)
+        npt = Derivative(pots.energy, wrt=FORCES_AND_VIRIAL)
         keys = (ENERGY_KEY, FORCES_KEY, VIRIAL_KEY)
         # MD inference is measured under no_grad; the grad-enabled route is
         # asserted after this block, once buffer donation is known to be off.
@@ -3267,29 +3261,19 @@ class TestPotentialsMlip:
             pots.bind_cell(within)
             assert bool(torch.isfinite(pots.calc_energy(_polar_batch(pos, within))).all())
 
-        probe = _polar_batch(pos, cell)
-        flat = Compiler.explain(
-            mlip.energy_core,
-            pos,
-            probe["atoms", "Z"],
-            probe["pairs", "pair_index"],
-            probe["atoms", "batch"],
-            1,
-            # ``energy_core`` is the mlip's own flat seam, so its keyword is the
-            # ML spelling; the values come from the chemistry namespace.
-            edge_diff=probe["pairs", "pair_diff"],
-            cell=cell.unsqueeze(0),
-        )
-        assert (flat.graph_count, flat.graph_break_count) == (1, 0)
+        # The mlip's own op (built with ``wrt=()``: the energy) is one graph too.
+        with torch.no_grad():
+            own = Compiler.explain(mlip, _polar_batch(pos, cell))
+        assert (own.graph_count, own.graph_break_count) == (1, 0), own.break_sites
 
-        # Polar is the mlip ``call_energy`` branch and never reaches F29. The
+        # Polar is the mlip ``energy`` branch and never reaches F29. The
         # (1, 0) is wrap identity (``_frame_view``) of the reused work TensorDict
         # for compiled MD ``op(work)``: a fresh wrap would break at
         # ``TypedTensorDict.__setattr__``. bind/cell already sit outside the
         # explained ``energy()`` graph. Not an F29-skip green, and not MD
         # ``bind_work`` vouching F29.
         step_pots = forcefield.to_potentials()
-        step = Derivative(step_pots, wrt=FORCES_AND_VIRIAL)
+        step = Derivative(step_pots.energy, wrt=FORCES_AND_VIRIAL)
         step_batch = _polar_batch(pos, cell)
         with torch.no_grad():
             step(step_batch)
@@ -3309,7 +3293,7 @@ class TestPotentialsMlip:
         columns are marked before the region (``mark_leaves``). The frame:
         ``Potentials._frame_view`` is wrap identity for compiled MD
         ``op(work)`` — a reused TensorDict does not wrap inside the graph.
-        Polar is the mlip ``call_energy`` branch and never reaches F29. A batch
+        Polar is the mlip ``energy`` branch and never reaches F29. A batch
         it has never wrapped pays that host work inside the region: the
         typed-view wrap breaks at tensordict's ``TypedTensorDict.__setattr__``
         ("mapping proxy affected by dictionary mutation"), the resumed trace
@@ -3333,7 +3317,7 @@ class TestPotentialsMlip:
         cell = torch.eye(3, dtype=DTYPE) * POLAR_CELL_EDGE
         pots.bind_cell(cell)
         pots.calc_energy(_polar_batch(pos, cell))
-        npt = Derivative(pots, wrt=FORCES_AND_VIRIAL)
+        npt = Derivative(pots.energy, wrt=FORCES_AND_VIRIAL)
         keys = (ENERGY_KEY, FORCES_KEY, VIRIAL_KEY)
         with torch.no_grad():
             eager_out = npt(_polar_batch(pos, cell))
@@ -3344,7 +3328,7 @@ class TestPotentialsMlip:
         assert torch._functorch.config.donated_buffer is False
         # The same work object: ``_frame_view`` is wrap identity, so the
         # explained ``energy()`` graph does not wrap inside the region. Polar
-        # never reaches F29 (mlip ``call_energy``).
+        # never reaches F29 (mlip ``energy``).
         batch = _polar_batch(pos, cell)
         with torch.no_grad():
             npt(batch)

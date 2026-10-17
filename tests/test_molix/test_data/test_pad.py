@@ -422,9 +422,9 @@ class TestHessianPairsCap:
         in any denominator computed over the whole column.
         """
         cap = 16
-        padded = MoleculePadder(
-            max_atoms=32, max_pairs=64, cutoff=CUTOFF, max_hessian_pairs=cap
-        )(self._with_hessian_pairs(5))
+        padded = MoleculePadder(max_atoms=32, max_pairs=64, cutoff=CUTOFF, max_hessian_pairs=cap)(
+            self._with_hessian_pairs(5)
+        )
         block = padded["hessian_pairs", "block"]
         assert block.shape == (cap, 9)
         assert padded["hessian_pairs", "mask"].tolist() == [True] * 5 + [False] * (cap - 5)

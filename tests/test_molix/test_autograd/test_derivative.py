@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molix.autograd import Derivative
+from molix.autograd import Derivative, Potential
 from molix.schema import (
     ATOMIC_ENERGY_KEY,
     ENERGY_KEY,
@@ -573,30 +573,31 @@ class TestDerivative:
             rtol=0.0,
         )
 
-    def test_a_potential_is_differentiated_through_its_energy_seam(self) -> None:
-        """An object with an ``energy(frame)`` method is derived through it, not ``forward``.
+    def test_an_op_over_a_potentials_energy_matches_its_forward(self) -> None:
+        """``Derivative(pot.energy, wrt=...)`` and ``pot.forward`` are one code path.
 
-        ``forward`` of such an object is an op of its own; nesting an op over
-        it would put a second leaf between the energy and the outer variable
-        and hand the outer op a gradient of nothing.
+        The op calls exactly what it is handed; a potential is passed as its
+        ``energy`` method, never as the object, whose ``forward`` is an op of
+        its own.
         """
         toy = Quadratic()
 
-        class Potential(nn.Module):
+        class _Potential(Potential):
             def __init__(self) -> None:
                 super().__init__()
                 self.toy = toy
-                self.own = Derivative(self.energy, wrt=FORCES)
+                self._derivative = Derivative(self.energy, wrt=FORCES)
 
             def energy(self, frame: TensorDict) -> TensorDict:
                 return self.toy(frame)
 
-            def forward(self, frame: TensorDict) -> TensorDict:
-                return self.own(frame)
-
-        frame = Derivative(Potential(), wrt=FORCES)(quadratic_frame())
-        assert toy.calls == 1
-        torch.testing.assert_close(frame[FORCES_KEY], _expected_forces(), atol=EXACT_ATOL, rtol=0.0)
+        pot = _Potential()
+        outside = Derivative(pot.energy, wrt=FORCES)(quadratic_frame())
+        inside = pot(quadratic_frame())
+        assert toy.calls == 2
+        torch.testing.assert_close(
+            outside[FORCES_KEY], inside[FORCES_KEY], atol=EXACT_ATOL, rtol=0.0
+        )
 
     def test_a_non_callable_energy_is_refused(self) -> None:
         with pytest.raises(TypeError, match="callable"):
@@ -691,3 +692,63 @@ class TestDerivative:
 
         assert expected.abs().item() > 0.0
         torch.testing.assert_close(spring.k.grad, expected, atol=EXACT_ATOL, rtol=0.0)
+
+
+class _Gained(nn.Module):
+    """``E_g = gain · s Σ_{i∈g} w_i ‖r_i‖²`` with ``gain`` a keyword argument of the energy.
+
+    What a training step hands in when it predicted the parameters once and
+    differentiates the energy against the geometry with them.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(1.0, dtype=torch.float64))
+        self.seen: list[torch.Tensor] = []
+
+    def forward(self, frame: TensorDict, *, gain: torch.Tensor) -> TensorDict:
+        self.seen.append(gain)
+        pos = frame["atoms", "pos"]
+        atomic = gain * self.scale * frame["atoms", "weight"] * (pos * pos).sum(dim=-1)
+        energy = torch.zeros(frame["graphs"].batch_size[0], dtype=pos.dtype)
+        frame[ENERGY_KEY] = energy.index_add(0, frame["atoms", "batch"], atomic)
+        return frame
+
+
+class TestDerivativeEnergyKwargs:
+    """``op(frame, **kwargs)`` is ``energy(frame, **kwargs)``; the derivative stays on ``wrt``."""
+
+    def test_kwargs_reach_the_energy_and_scale_the_forces(self) -> None:
+        toy = _Gained()
+        gain = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+
+        frame = Derivative(toy, wrt=FORCES)(quadratic_frame(), gain=gain)
+
+        assert toy.seen == [gain]
+        torch.testing.assert_close(
+            frame[FORCES_KEY], 2.0 * _expected_forces(), atol=EXACT_ATOL, rtol=0.0
+        )
+
+    def test_the_forces_keep_the_graph_the_kwargs_carry(self) -> None:
+        """A force loss reaches the tables the step predicted outside the op."""
+        gain = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+        frame = Derivative(_Gained(), wrt=FORCES)(quadratic_frame(), gain=gain)
+
+        frame[FORCES_KEY].pow(2).sum().backward()
+
+        # F = -2 gain s w r, so Σ F² = 4 gain² Σ (s w r)²: d/dgain = 8 gain Σ r² at s = w = 1.
+        pos = quadratic_frame()[POS_KEY]
+        torch.testing.assert_close(
+            gain.grad, 8.0 * gain.detach() * (pos * pos).sum(), atol=EXACT_ATOL, rtol=0.0
+        )
+
+    def test_energy_only_hands_the_kwargs_on_too(self) -> None:
+        toy = _Gained()
+        gain = torch.tensor(3.0, dtype=torch.float64)
+
+        frame = Derivative(toy)(quadratic_frame(), gain=gain)
+
+        assert toy.seen == [gain]
+        torch.testing.assert_close(
+            frame[ENERGY_KEY].sum(), 3.0 * (quadratic_frame()[POS_KEY] ** 2).sum()
+        )

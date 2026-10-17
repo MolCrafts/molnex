@@ -95,6 +95,33 @@ class TestLJParameterHead:
         with pytest.raises(ValueError, match="init_epsilon"):
             LJParameterHead(feature_dim=16, init_epsilon=2.0)
 
+    def test_relaxed_contact_has_a_slope_once_epsilon_leaves_the_floor(self):
+        """A 2.4 Å pair is where a relaxed nonbonded contact sits.
+
+        At the floor (epsilon ~1e-3, sigma 1 Å) both channels are flat:
+        ``∂E/∂σ ∝ ε`` and ``(σ/r)¹²`` is ~0, so the bias gradient is noise.
+        Epsilon 0.05 kcal/mol and sigma 1.5 Å sit on the slope of
+        ``4ε[(σ/r)¹² − (σ/r)⁶]``. One 0.8 Å contact at that init is hundreds
+        of kcal/mol, not the ~1e5 wall of epsilon 0.5 and sigma 2.5.
+        """
+        features = torch.zeros(1, 16)
+
+        def energy(head: LJParameterHead, distance: float) -> torch.Tensor:
+            predicted = head(features)
+            ratio = predicted["sigma"][0] / distance
+            sixth = ratio**6
+            return 4.0 * predicted["epsilon"][0] * (sixth * sixth - sixth)
+
+        floor = LJParameterHead(feature_dim=16)
+        learnable = LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5)
+        energy(floor, 2.4).backward()
+        energy(learnable, 2.4).backward()
+        floor_bias = floor.mlp[-1].bias.grad.abs().sum()
+        learnable_bias = learnable.mlp[-1].bias.grad.abs().sum()
+        assert learnable_bias > 100.0 * floor_bias
+        clash = energy(LJParameterHead(feature_dim=16, init_epsilon=0.05, init_sigma=1.5), 0.8)
+        assert clash.abs() < 1000.0
+
 
 # ---------------------------------------------------------------------------
 # RepulsionParameterHead

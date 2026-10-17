@@ -1,54 +1,26 @@
-"""Unit tests for molzoo.pinet.encoder.PiNet."""
+"""Unit tests for molzoo.pinet.encoder.PiNetEncoder."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from molrep.utils.equivariance import random_rotation_matrix, rotate_vectors
-from molzoo.pinet import PiNet
+from molzoo.pinet import PiNetEncoder, PiNetSpec
 from tests.conftest import (
-    make_graph_batch,
     permute_graph,
+    random_rotation_matrix,
     rotate_graph,
+    rotate_vectors,
     translate_graph,
 )
+from tests.test_molzoo.test_pinet.conftest import TINY
+
+ATOL = 1e-10
 
 
-def _graph():
-    pos = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [1.1, 0.1, 0.0],
-            [0.3, 1.2, 0.2],
-            [1.4, 1.1, -0.1],
-        ],
-        dtype=torch.float32,
-    )
-    z = torch.tensor([1, 6, 7, 8], dtype=torch.long)
-    edge_index = torch.tensor(
-        [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
-        dtype=torch.long,
-    )
-    batch = torch.zeros(4, dtype=torch.long)
-    return make_graph_batch(pos, z, edge_index, batch)
-
-
-def _encoder(rank: int = 3, weighted: bool = False) -> PiNet:
+def _encoder(rank: int = 3, **overrides) -> PiNetEncoder:
     torch.manual_seed(0)
-    enc = PiNet(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=rank,
-        weighted=weighted,
-    )
-    enc.eval()
-    return enc
+    return PiNetEncoder(PiNetSpec(**{**TINY, "rank": rank, **overrides})).eval()
 
 
 def _rotate_p3(p3: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
@@ -57,79 +29,51 @@ def _rotate_p3(p3: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     return rotate_vectors(flat, r).reshape(n, layers, channels, comps).permute(0, 1, 3, 2)
 
 
-@pytest.mark.parametrize("rank", [1, 3, 5])
-def test_rank_output_shapes(rank):
-    enc = _encoder(rank=rank)
-    out = enc(_graph())
-    assert out["atoms", "node_features"].shape == (4, 2, 8)
-    assert out["pairs", "i1_features"].shape == (8, 2, 8 * (rank // 2 + 1))
-    if rank >= 3:
-        assert out["atoms", "p3_features"].shape == (4, 2, 3, 8)
-        assert out["pairs", "i3_features"].shape == (8, 2, 3, 8)
-    if rank >= 5:
-        assert out["atoms", "p5_features"].shape == (4, 2, 5, 8)
-        assert out["pairs", "i5_features"].shape == (8, 2, 5, 8)
+class TestPiNetEncoder:
+    @pytest.mark.parametrize("rank", [1, 3, 5])
+    def test_written_shapes_follow_the_rank(self, rank, cluster):
+        out = _encoder(rank)(cluster)
+        assert out["atoms", "node_features"].shape == (4, 2, 8)
+        assert out["atoms", "p1_block_outputs"].shape == (4, 2, 8)
+        assert out["pairs", "i1_features"].shape == (12, 2, 8 * (rank // 2 + 1))
+        assert ("p3_features" in out["atoms"].keys()) == (rank >= 3)
+        assert ("p5_features" in out["atoms"].keys()) == (rank >= 5)
+        if rank == 5:
+            assert out["atoms", "p5_features"].shape == (4, 2, 5, 8)
+            assert out["pairs", "i5_features"].shape == (12, 2, 5, 8)
 
+    def test_emit_off_drops_only_the_property_tracks(self, cluster):
+        lean = _encoder(5, emit_property_features=False)(cluster.clone())
+        full = _encoder(5)(cluster.clone())
+        for key in ("node_features", "p1_block_outputs"):
+            assert torch.equal(lean["atoms", key], full["atoms", key])
+        assert not {"p3_features", "p5_features"} & set(lean["atoms"].keys())
+        assert not {"i1_features", "i3_features", "i5_features"} & set(lean["pairs"].keys())
 
-@pytest.mark.parametrize("rank", [1, 3, 5])
-def test_emit_property_features_off_drops_only_property_tracks(rank):
-    """Opting out skips the property-head tracks; scalar outputs are unchanged."""
-    torch.manual_seed(0)
-    lean = PiNet(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=rank,
-        emit_property_features=False,
-    )
-    lean.eval()
-    full = _encoder(rank=rank)  # same seed/architecture, emission on
+    def test_translation_invariance(self, cluster):
+        enc = _encoder(5)
+        ref = enc(cluster.clone())["atoms", "node_features"]
+        got = enc(translate_graph(cluster, torch.tensor([10.0, -3.0, 0.5], dtype=torch.float64)))
+        torch.testing.assert_close(got["atoms", "node_features"], ref, atol=ATOL, rtol=0)
 
-    out_lean = lean(_graph())
-    out_full = full(_graph())
+    def test_p3_rotation_equivariance(self, cluster):
+        enc = _encoder(3)
+        torch.manual_seed(2)
+        r = random_rotation_matrix(dtype=torch.float64)
+        ref = enc(cluster.clone())["atoms", "p3_features"]
+        got = enc(rotate_graph(cluster, r))["atoms", "p3_features"]
+        torch.testing.assert_close(got, _rotate_p3(ref, r), atol=ATOL, rtol=0)
 
-    # The contract keys survive and are bit-identical to the emitting encoder.
-    for key in ("node_features", "p1_block_outputs"):
-        assert torch.equal(out_lean["atoms", key], out_full["atoms", key])
+    def test_permutation_equivariance(self, cluster):
+        enc = _encoder(3)
+        perm = torch.tensor([2, 0, 3, 1])
+        ref = enc(cluster.clone())["atoms", "node_features"]
+        got = enc(permute_graph(cluster, perm))["atoms", "node_features"]
+        torch.testing.assert_close(got, ref[perm], atol=ATOL, rtol=0)
 
-    # Only the property-head tracks are gone.
-    assert "i1_features" not in out_lean["pairs"].keys()
-    for key in ("p3_features", "p5_features"):
-        assert key not in out_lean["atoms"].keys()
-    for key in ("i3_features", "i5_features"):
-        assert key not in out_lean["pairs"].keys()
-
-
-def test_translation_invariance():
-    enc = _encoder(rank=5)
-    g = _graph()
-    shifted = translate_graph(g, torch.tensor([10.0, -3.0, 0.5]))
-    with torch.no_grad():
-        ref = enc(g.clone())["atoms", "node_features"]
-        got = enc(shifted)["atoms", "node_features"]
-    torch.testing.assert_close(ref, got, atol=1e-5, rtol=1e-5)
-
-
-def test_p3_rotation_equivariance():
-    enc = _encoder(rank=3)
-    g = _graph()
-    torch.manual_seed(2)
-    r = random_rotation_matrix()
-    with torch.no_grad():
-        ref = enc(g.clone())["atoms", "p3_features"]
-        got = enc(rotate_graph(g, r))["atoms", "p3_features"]
-    torch.testing.assert_close(_rotate_p3(ref, r), got, atol=1e-4, rtol=1e-4)
-
-
-def test_permutation_equivariance():
-    enc = _encoder(rank=3)
-    g = _graph()
-    perm = torch.tensor([2, 0, 3, 1], dtype=torch.long)
-    with torch.no_grad():
-        ref = enc(g.clone())["atoms", "node_features"]
-        got = enc(permute_graph(g, perm))["atoms", "node_features"]
-    torch.testing.assert_close(ref[perm], got, atol=1e-5, rtol=1e-5)
+    def test_node_attrs_index_the_sorted_table(self):
+        enc = _encoder(1)
+        attrs = enc.node_attrs(torch.tensor([8, 1]), torch.float64)
+        torch.testing.assert_close(
+            attrs, torch.tensor([[0, 0, 0, 1], [1, 0, 0, 0]], dtype=torch.float64)
+        )

@@ -3,7 +3,7 @@
 ``graphs.total_charge`` ``(B,)`` is the S5 total-charge constraint of a charge
 model: the net charge, in elementary charges ``e``, that a graph's per-atom
 partial charges must sum to. Since a0-02 the
-:class:`~molpot.forcefield.parameterizer.Parameterizer` is *fail-closed* on it
+Class-I charge model (:class:`molzoo.rondo.Rondo`) is *fail-closed* on it
 — a charge model never assumes neutrality, because equilibrating an ion as a
 neutral molecule shifts every partial charge by a constant with nothing in the
 run record to say so.

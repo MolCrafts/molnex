@@ -32,7 +32,7 @@ from tensordict import TensorDict
 
 from molix.config import config
 from molpot.composition import Sonata
-from molzoo import Allegro
+from molzoo.allegro import AllegroEncoder, AllegroSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,7 +103,7 @@ def _make_batch_fp64(
 
 @pytest.fixture(scope="module")
 def sonata_pipeline() -> Sonata:
-    """Float64 Sonata pipeline: Allegro(l_max=2, expose_tensor_track=True)
+    """Float64 Sonata pipeline: AllegroEncoder(l_max=2, expose_tensor_track=True)
     → PermMultipoleHead(charge + dipole + quadrupole) → EwaldMultipoleEnergy.
 
     No short-range head — the integration suite asserts on the
@@ -113,19 +113,21 @@ def sonata_pipeline() -> Sonata:
     config["ftype"] = torch.float64
     try:
         torch.manual_seed(0)
-        encoder = Allegro(
-            num_elements=10,
-            num_scalar_features=16,
-            num_tensor_features=4,
-            r_max=5.0,
-            num_bessel=8,
-            num_layers=2,
-            l_max=2,
-            type_embed_dim=16,
-            latent_mlp_depth=1,
-            latent_mlp_width=32,
-            avg_num_neighbors=12.0,
-            expose_tensor_track=True,
+        encoder = AllegroEncoder(
+            AllegroSpec(
+                atomic_numbers=[1, 6, 7, 8],
+                num_scalar_features=16,
+                num_tensor_features=4,
+                r_max=5.0,
+                num_bessels=8,
+                num_layers=2,
+                l_max=2,
+                radial_chemical_embed_dim=16,
+                allegro_mlp_hidden_layers_depth=1,
+                allegro_mlp_hidden_layers_width=32,
+                avg_num_neighbors=12.0,
+                expose_tensor_track=True,
+            )
         )
         sonata = Sonata.from_encoder(
             encoder,

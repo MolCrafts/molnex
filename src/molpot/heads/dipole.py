@@ -26,7 +26,9 @@ def _charge_neutralize(
     pre = scatter_sum(charges, batch, dim_size=num_graphs)
     if total_charge is None:
         total_charge = torch.zeros_like(pre)
-    correction = (pre - total_charge.view_as(pre)) / _graph_counts(batch, num_graphs)
+    correction = (pre - total_charge.view_as(pre)) / _graph_counts(
+        batch, num_graphs, dtype=charges.dtype
+    )
     charges = charges - correction[batch]
     post = scatter_sum(charges, batch, dim_size=num_graphs)
     return charges, pre, post
@@ -74,8 +76,12 @@ class DipoleHead(nn.Module):
         vector_dipole: bool = True,
         charge_neutrality: bool = True,
         regularization: bool = True,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         variant = variant.lower()
         self.variant = variant
         self.vector_dipole = vector_dipole
@@ -91,9 +97,9 @@ class DipoleHead(nn.Module):
 
         if self.uses_ac:
             self.charge_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1, dtype=config.ftype),
+                nn.Linear(hidden_dim, 1, dtype=dtype),
             )
         if self.uses_ad or self.uses_os:
             if node_vector_dim is None:
@@ -102,21 +108,21 @@ class DipoleHead(nn.Module):
                 node_vector_dim,
                 1,
                 bias=False,
-                dtype=config.ftype,
+                dtype=dtype,
             )
         if self.uses_bc:
             if edge_scalar_dim is None or edge_vector_dim is None:
                 raise ValueError("edge_scalar_dim and edge_vector_dim required for BC variant.")
             self.bond_scalar_mlp = nn.Sequential(
-                nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
+                nn.Linear(edge_scalar_dim, hidden_dim, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1, dtype=config.ftype),
+                nn.Linear(hidden_dim, 1, dtype=dtype),
             )
             self.bond_vector_mlp = nn.Linear(
                 edge_vector_dim,
                 1,
                 bias=False,
-                dtype=config.ftype,
+                dtype=dtype,
             )
 
     def forward(

@@ -144,16 +144,17 @@ Pydantic `Report` is the serialisable result.
 
 ```python
 from molix.profiler import Profiler, ProfilerConfig, ProfileSweep
+from molzoo.pinet import PiNetPotential, PiNetSpec
 
 sweep = ProfileSweep(
-    "mace-scaling",
-    model_class=MACE,
+    "pinet-scaling",
+    model_class=PiNetPotential,
     dataloader_class=DataLoader,
-    model_kwargs={"cutoff": 5.0},
+    model_kwargs={"wrt": ("atoms.pos",)},
     dataloader_kwargs={"dataset": dataset, "shuffle": False},
     parameters={"precision": "fp32", "device": "cuda:0"},
 ).grid(
-    model={"num_layers": [2, 4]},
+    model={"spec": [PiNetSpec(depth=2), PiNetSpec(depth=4)]},
     data={"batch_size": [1, 16]},
 )
 

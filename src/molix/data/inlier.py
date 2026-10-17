@@ -9,6 +9,7 @@ should not count, so they share one column rather than one code path each.
 
 from __future__ import annotations
 
+import torch
 from tensordict import TensorDict, TensorDictBase
 
 from molix.data.task import BatchTask
@@ -89,7 +90,7 @@ class ForceInlierWeight(BatchTask):
                 f"{type(self).__name__} needs atoms.forces to bound; batch has "
                 f"{sorted(atoms.keys())}"
             )
-        reference = atoms["forces"]
+        reference: torch.Tensor = atoms["forces"]
         weight = (reference.norm(dim=-1) <= self.threshold).to(dtype=reference.dtype)
         if "mask" in atoms.keys():
             weight = weight * atoms["mask"].to(dtype=weight.dtype)

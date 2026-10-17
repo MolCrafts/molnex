@@ -117,3 +117,21 @@ class TestChemGraphBlock:
         h_atom_out, h_bond_out = block(h_atom, h_bond, empty, empty)
         assert h_atom_out.shape == (3, atom_dim)
         assert h_bond_out.shape == (0, bond_dim)
+
+    def test_update_does_not_depend_on_the_scale_of_the_streams(self):
+        """Pre-norm: a hop's update is a function of the normalized streams only.
+
+        Scaling ``h_atom`` and ``h_bond`` by 1000 leaves ``out − h_atom`` unchanged,
+        so the residual stream cannot compound across hops.
+        """
+        torch.manual_seed(3)
+        block = ChemGraphBlock(atom_dim=8, bond_dim=8).double()
+        h_atom = torch.randn(4, 8, dtype=torch.float64)
+        h_bond = torch.randn(3, 8, dtype=torch.float64)
+        atomi = torch.tensor([0, 0, 0], dtype=torch.long)
+        atomj = torch.tensor([1, 2, 3], dtype=torch.long)
+        out, bond = block(h_atom, h_bond, atomi, atomj)
+        out_big, bond_big = block(1e3 * h_atom, 1e3 * h_bond, atomi, atomj)
+        # Not exact: LayerNorm's eps (1e-5) is felt by the unit-scale input only.
+        assert torch.allclose(out - h_atom, out_big - 1e3 * h_atom, atol=1e-4)
+        assert torch.allclose(bond, bond_big, atol=1e-4)

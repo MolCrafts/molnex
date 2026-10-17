@@ -24,7 +24,8 @@ Surfaces, in the order a sample travels:
 * **Collate** — :func:`collate_molecules` turns samples into the nested batch,
   :class:`MoleculePadder` gives it a static shape, :class:`BatchTask` is a
   post-collate transform, and :class:`FrameCollator` composes the three.
-* **Loader** — :class:`DataModule` wraps it all in a ``torch.utils.data.DataLoader``.
+* **Loader** — :class:`DataModule` wraps it all in a ``torch.utils.data.DataLoader``;
+  :class:`JointDataModule` runs several of them in lockstep, one batch of each per step.
 
 Acquiring the data — download, parse, preprocess, cache — is MolHub's, not this
 package's. The batch container itself is :class:`molix.frame.TensorFrame`, and
@@ -43,9 +44,13 @@ from molix.data.dataset import BaseDataset, SubsetDataset
 from molix.data.frame_dataset import FrameDataset
 from molix.data.group_split import group_split_indices
 from molix.data.inlier import ForceInlierWeight
+from molix.data.joint import JointDataModule
 from molix.data.mixture import DataMixture
 from molix.data.pad import MoleculePadder
+from molix.data.prepared import PreparedMmap, PreparedRow, PreparedRows
 from molix.data.profile import ProfileIndex
+from molix.data.relation import PairRelation
+from molix.data.resident import ResidentValidation
 from molix.data.residual import EnergyResidual
 from molix.data.sampler import (
     BatchPlanShard,
@@ -56,6 +61,8 @@ from molix.data.sampler import (
 )
 from molix.data.task import BatchTask
 from molix.data.valence_columns import (
+    IMPROPER_ROWS_PER_CENTRE,
+    cyclic_impropers,
     stack_angle_index,
     stack_improper_index,
     stack_proper_index,
@@ -73,17 +80,25 @@ __all__ = [
     "ForceInlierWeight",
     "FrameCollator",
     "FrameDataset",
+    "JointDataModule",
     "MoleculeCollator",
     "MoleculePadder",
+    "PreparedMmap",
+    "PreparedRow",
+    "PreparedRows",
+    "ResidentValidation",
     "SubsetDataset",
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",
+    "PairRelation",
     "ProfileIndex",
     "TotalCharge",
     "bond_index_from_columns",
     "collate_molecules",
     "group_split_indices",
+    "IMPROPER_ROWS_PER_CENTRE",
+    "cyclic_impropers",
     "stack_angle_index",
     "stack_improper_index",
     "stack_proper_index",

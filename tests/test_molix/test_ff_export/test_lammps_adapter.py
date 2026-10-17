@@ -14,6 +14,7 @@ from molpot.ir import (
     AngleBag,
     BondBag,
     ChargeBag,
+    ImproperPeriodicBag,
     LJBag,
     NonbondedMethodRecord,
     NonbondedScaling,
@@ -116,6 +117,38 @@ class TestLammpsAdapter:
         assert dih["style"] == "fourier"
         assert dih["parameters"][0]["terms"][0]["periodicity"] == 1
         assert dih["parameters"][0]["terms"][0]["k"] == 0.4
+
+    @staticmethod
+    def _improper_record(k, periodicity, phase):
+        ir = PotentialIR(
+            impropers_periodic=ImproperPeriodicBag(
+                k=torch.tensor(k, dtype=torch.float64),
+                periodicity=torch.tensor(periodicity),
+                phase=torch.tensor(phase, dtype=torch.float64),
+            )
+        )
+        spec = LammpsAdapter().translate(ir)
+        return next(f for f in spec.forces if f["category"] == "improper")
+
+    def test_periodic_improper_is_cvff_with_its_phase_as_a_sign(self):
+        """``k[1 + cos(nχ − γ)]`` is cvff ``K[1 + d cos(nχ)]``: γ = 0 → d = +1, γ = π → d = −1."""
+        rec = self._improper_record([[1.1], [2.0]], [[2], [2]], [[math.pi], [0.0]])
+        assert rec["style"] == "cvff"
+        assert rec["parameters"] == [
+            {"type_index": 1, "K": 1.1, "d": -1, "n": 2},
+            {"type_index": 2, "K": 2.0, "d": 1, "n": 2},
+        ]
+
+    def test_a_zero_barrier_term_does_not_count(self):
+        rec = self._improper_record([[1.1, 0.0]], [[2, 1]], [[0.0, 0.7]])
+        assert rec["parameters"] == [{"type_index": 1, "K": 1.1, "d": 1, "n": 2}]
+
+    def test_a_periodic_improper_cvff_cannot_hold_is_refused(self):
+        """cvff is one term with a ±1 sign; anything else was written anyway."""
+        with pytest.raises(UnsupportedTermError, match="improper_periodic"):
+            self._improper_record([[1.1]], [[2]], [[0.5]])
+        with pytest.raises(UnsupportedTermError, match="improper_periodic"):
+            self._improper_record([[1.1, 0.3]], [[2, 1]], [[0.0, 0.0]])
 
     def test_compiler_name_lammps(self):
         ir = PotentialIR(bonds=BondBag(k=torch.tensor([100.0]), r0=torch.tensor([1.0])))

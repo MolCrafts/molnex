@@ -1,8 +1,8 @@
 """:mod:`torch.compile` integration for MolNex.
 
 :class:`Compiler` configures ``torch.compile`` once and applies it to a module
-*or any other callable* — the compile seam on a potential is often a flat bound
-method (an ``energy_core``), not an :class:`~torch.nn.Module`, and the call
+*or any other callable* — a compile seam may be a bound method (a potential's
+``energy``), not only an :class:`~torch.nn.Module`, and the call
 returns the same type it was handed. :meth:`Compiler.explain` is the companion
 measurement: one call yields graph count, graph-break count, break reasons and
 the **source location** of each break, as a molnex-owned
@@ -36,7 +36,7 @@ Two regimes (see ``docs/molix/explanation/throughput-and-compilation.md``):
   ``aten.index_add`` an extern ATen kernel, without which inductor's fused
   atomic scatter silently adds a padded-lane contribution to every scatter
   target (14.24 eV on the Polar PEO box). :class:`Compiler` and
-  :class:`molix.export.Exporter` call it for you; a direct ``torch.compile``
+  :func:`molix.export.aoti.package` calls it for you; a direct ``torch.compile``
   caller must call it first.
 """
 
@@ -87,7 +87,7 @@ def register_inductor_fallbacks() -> None:
     **When to call it.** Before the first inductor lowering in the process:
     inductor caches its decomposition table behind ``lru_cache``, so the entries
     must be dropped *and* those caches cleared before a compile fills them in.
-    :meth:`Compiler.__call__` and :meth:`molix.export.Exporter._package` call
+    :meth:`Compiler.__call__` and :func:`molix.export.aoti.package` call
     this, so molnex's own compile and AOTI-package seams are covered; code that
     calls ``torch.compile`` / ``torch._inductor.aoti_compile_and_package``
     directly must call it itself, first.
@@ -203,7 +203,7 @@ class Compiler:
         model = Compiler()(model)                  # default inductor
         model = Compiler(cuda_graphs=True)(model)  # CUDA-graph force preset
         model = Compiler(mode="max-autotune")(model)
-        core = Compiler(fullgraph=True)(pots.energy_core)  # bound method
+        energy = Compiler(fullgraph=True)(pots.energy)  # bound method
 
     :meth:`explain` is the measurement counterpart and is a ``@staticmethod``:
     it reports on dynamo's default configuration, independent of any instance.

@@ -59,6 +59,13 @@ class TestScatterSum:
         assert tuple(out.shape) == (4, 3)
         assert out.device.type == "meta"
 
+    def test_native_dim_size_is_symbolic(self) -> None:
+        """An ``int`` here pins an exported program's atom count to the example's."""
+        if getattr(torch.ops.molix, "scatter_sum", None) is None:
+            pytest.skip("molix::scatter_sum not registered")
+        dim_size = torch.ops.molix.scatter_sum.default._schema.arguments[2]
+        assert isinstance(dim_size.real_type, torch.SymIntType)
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")
 class TestScatterSumCuda:

@@ -81,8 +81,12 @@ class ChargeResponseHead(nn.Module):
         hidden_dim: int = 64,
         epsilon: float = 0.01,
         sigma: dict[int, float] | None = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         variant = variant.lower()
         if variant.endswith("_iso"):
             variant = variant[:-4]
@@ -96,21 +100,21 @@ class ChargeResponseHead(nn.Module):
         self.epsilon = float(epsilon)
 
         self.atom_diag_mlp = nn.Sequential(
-            nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(node_scalar_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
         self.edge_scalar_mlp = nn.Sequential(
-            nn.Linear(edge_scalar_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(edge_scalar_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
-        self.edge_vector_mlp = nn.Linear(edge_vector_dim, 1, dtype=config.ftype)
+        self.edge_vector_mlp = nn.Linear(edge_vector_dim, 1, dtype=dtype)
         if self.iso:
             self.iso_mlp = nn.Sequential(
-                nn.Linear(node_scalar_dim, hidden_dim, dtype=config.ftype),
+                nn.Linear(node_scalar_dim, hidden_dim, dtype=dtype),
                 nn.SiLU(),
-                nn.Linear(hidden_dim, 1, dtype=config.ftype),
+                nn.Linear(hidden_dim, 1, dtype=dtype),
             )
 
         _default_sigma = {1: 0.312, 6: 0.730, 7: 0.709, 8: 0.661, 16: 1.048, 17: 1.016}
@@ -122,7 +126,7 @@ class ChargeResponseHead(nn.Module):
             persistent=False,
         )
         self.atom_types: torch.Tensor
-        self.sigma_raw = nn.Parameter(torch.tensor(init_sigma, dtype=config.ftype))
+        self.sigma_raw = nn.Parameter(torch.tensor(init_sigma, dtype=dtype))
 
     # -- public forward -------------------------------------------------------
 

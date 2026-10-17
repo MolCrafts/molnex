@@ -16,7 +16,7 @@ from molix.data.frame_dataset import FrameDataset
 def _geom(z: list[int], *, molecule_id: str, energy: float = 0.0) -> Frame:
     n = len(z)
     atoms = Block()
-    atoms["number"] = np.array(z, dtype=np.int64)
+    atoms["atomic_number"] = np.array(z, dtype=np.uint64)
     atoms["x"] = np.arange(n, dtype=np.float64)
     atoms["y"] = np.zeros(n, dtype=np.float64)
     atoms["z"] = np.zeros(n, dtype=np.float64)

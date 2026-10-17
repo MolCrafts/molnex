@@ -153,26 +153,11 @@ energy and `--case periodic` (8 waters plus Na⁺ and Cl⁻ in a 12 Å cube, swi
 Lennard-Jones and Ewald-split Coulomb) to 9.9e-9. It drives a real `lmp` binary
 and exits 77 — ctest's SKIP — without one.
 
-This path is independent of `pair_style molnex` (AOTI neural potentials). That
-one is `molix.engine.export_for_lammps`, which takes an optional `manifest=` and
-writes `<name>.manifest.json` beside the `.pt2` and its `meta.json`:
-
-```python
-from molix.engine import export_for_lammps
-
-export_for_lammps(
-    model,
-    "export/",
-    species=[1, 6],
-    cutoff=5.0,
-    receptive_field_layers=3,
-    manifest=ff.manifest(profile="A0").to_dict(),
-)
-```
-
-The manifest travels as a plain mapping — `molix.engine` never imports molpot —
-and is written verbatim. `meta.json` is byte-identical whether or not one is
-passed, and the C++ side reads only its `lammps` block.
+This path is independent of neural-potential deployment (`molix.deploy` and
+`molix.export.aoti`, run in LAMMPS by `pair_style molnex`). A provenance
+manifest for such a package is the caller's own file: write
+`ff.manifest(profile="A0").to_dict()` as JSON beside the package. No engine
+reads it.
 
 ## Compile to a ForceSpec
 

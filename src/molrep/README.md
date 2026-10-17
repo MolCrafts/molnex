@@ -1,6 +1,6 @@
 # molrep
 
-Molecular representation learning components (Embedding / Interaction / Readout), built on pure PyTorch modules.
+Generic molecular representation components (embeddings, irreps helpers, chemistry perception), built on pure PyTorch modules. A block that serves one model lives in that model's `molzoo` package.
 
 ## Input Conventions
 
@@ -33,5 +33,5 @@ print(h.shape)  # (5, 128)
 ## Modules
 
 - `embedding/`: Node, radial, angular, and cutoff embeddings
-- `interaction/`: Equivariant linear, tensor product, symmetric contraction, aggregation
-- `readout/`: Pooling, ProductHead, ScalarHead
+- `interaction/`: Irreps-string helpers (`product.py`)
+- `heads/`: Scalar / type heads over node features

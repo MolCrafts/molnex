@@ -135,6 +135,31 @@ class TestEarlyStopPlateau:
             EarlyStop(patience=patience)
 
 
+class TestEarlyStopRegression:
+    """A run that leaves its best by an order of magnitude, twice."""
+
+    def test_two_evals_past_ten_times_the_best_stop_the_run(self) -> None:
+        trainer = _trainer(
+            hooks=[
+                _Metric([1.0, 1.2, 20.0, 30.0]),
+                EarlyStop(patience=50, regression_factor=10.0, regression_patience=2),
+            ]
+        )
+        trainer.train(_Data(), max_epochs=10)
+        assert trainer.stop_reason is not None
+        assert "more than 10x" in trainer.stop_reason
+
+    def test_one_spike_does_not_stop_the_run(self) -> None:
+        trainer = _trainer(
+            hooks=[
+                _Metric([1.0, 50.0, 1.1, 1.1]),
+                EarlyStop(patience=10, regression_factor=10.0, regression_patience=2),
+            ]
+        )
+        trainer.train(_Data(), max_epochs=4)
+        assert trainer.stop_reason is None
+
+
 class TestEarlyStopTimeBudget:
     """``max_seconds`` — ending before something else does it less gently."""
 

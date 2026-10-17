@@ -64,7 +64,7 @@ ForceDict = dict[str, torch.Tensor]
 class PotentialLike(Protocol):
     """Internal ``pos -> dict`` provider bound on an integrator.
 
-    Not a public type and not :class:`molpy.ForceField`. Neighbour-list
+    Not a public type and not :class:`molpy.ff.forcefield.ForceField`. Neighbour-list
     cadence lives on :class:`~molix.md.driver.MD.compute_force`, not here.
     """
 
@@ -135,7 +135,7 @@ class Integrator(nn.Module):
 
         Args:
             force: Internal ``pos -> dict`` provider (MD adapter or an
-                unnamed test helper). Not a :class:`molpy.ForceField`.
+                unnamed test helper). Not a :class:`molpy.ff.forcefield.ForceField`.
 
         Returns:
             ``self``.

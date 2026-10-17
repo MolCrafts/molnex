@@ -44,7 +44,7 @@ Check that all components are importable:
 import molix
 import molrep
 import molpot
-import molzoo
+import molzoo.mace
 
 print("MolNex ecosystem installed successfully.")
 ```

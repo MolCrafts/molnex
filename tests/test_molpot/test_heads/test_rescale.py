@@ -44,15 +44,16 @@ class TestPerSpeciesScaleShift:
         expected = torch.tensor([10.0, 21.0, 4.0])
         torch.testing.assert_close(m(x, Z), expected)
 
-    def test_trainable_flag(self):
-        m = PerSpeciesScaleShift(
-            num_species=3,
-            scales=[1.0, 1.0, 1.0],
-            shifts=[0.0, 0.0, 0.0],
-            trainable=True,
-        )
+    def test_trainable_flags_are_independent(self):
+        m = PerSpeciesScaleShift(num_species=3, scales_trainable=True)
         assert isinstance(m.scales, torch.nn.Parameter)
-        assert isinstance(m.shifts, torch.nn.Parameter)
+        assert not isinstance(m.shifts, torch.nn.Parameter)
+
+    def test_float64_tables_promote_the_output(self):
+        m = PerSpeciesScaleShift(num_species=2, scales=[2.0, 3.0], dtype=torch.float64)
+        out = m(torch.ones(2, dtype=torch.float32), torch.tensor([0, 1]))
+        assert out.dtype == torch.float64
+        torch.testing.assert_close(out, torch.tensor([2.0, 3.0], dtype=torch.float64))
 
     def test_wrong_length_raises(self):
         with pytest.raises(ValueError, match="length 5"):

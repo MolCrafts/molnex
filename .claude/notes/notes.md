@@ -65,19 +65,19 @@ src/<pkg>/<area>/<module>.py
   the source file still hosts multiple public types during migration).
 - Cross-package integration tests go under `tests/regression/` or an explicit
   `test_*_integration.py` name — never as a substitute for unit mirrors.
-- Gate: `python scripts/check_test_mirror.py --strict-pinet`.
+- Gate: `python scripts/check_test_mirror.py --strict-spine` (renamed from
+  `--strict-pinet` 2026-10-15; `SPINE` covers the whole model zoo).
 
-**PiNet spine layout (landed):**
+**PiNet spine layout (superseded 2026-10-15, chain `zoo-unify`):** the
+`molrep/interaction/pinet/` subpackage is gone; the PiNN layers live with the
+model in `molzoo/pinet/layers.py` (PI/IP, PIX/Scale/Dot, `ResUpdate`,
+`GCBlock`, `OutLayer`), molrep keeps only the generic
+`embedding/mlp.py::FFLayer`, and `molzoo/pinet/` is
+`{spec,encoder,layers,potential,properties}.py` in the MACE shape
+(`PiNetPotential(Potential, PiNetEncoder)`, flat keys). Edge geometry has one
+owner, `molrep/embedding/geometry.py`.
 
-```
-src/molrep/interaction/pinet/{ff,message,residual,blocks}.py
-src/molzoo/pinet/{spec,geometry,encoder,potential,properties}.py
-tests/test_molrep/test_interaction/test_pinet/...
-tests/test_molzoo/test_pinet/...
-tests/test_molix/test_data/test_pad.py
-```
-
-**Status.** active (PiNet spine done; full-repo mirror is incremental).
+**Status.** active (model spine done; full-repo mirror is incremental).
 
 ---
 
@@ -94,11 +94,11 @@ lattice remainder by `v ↦ v (I + ε_sym)ᵀ`; symmetrised gradient; must follo
 op owns every leaf (`molix.autograd.leaf`), rebuilds `pair_diff` / `pair_dist`
 once from the perturbed columns (`shifts` = `edges.shifts` or `pair_diff −
 Δpos`, detached), one `torch.autograd.grad`, restores the caller's objects,
-detaches `of` / `atoms.energy` iff grad is off; a potential handed in is
-differentiated through its `energy` seam. Every potential (`MacePotential`
+detaches `of` / `atoms.energy` iff grad is off; a potential is handed in as
+`pot.energy`, never as the object. Every potential (`MacePotential`
 family, `PiNetPotential`, `Potentials`) exposes `energy(frame)` and takes
 `wrt=()` at construction; `forward` is the op built in `__init__`. `MD`
-composes `Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))` at
+composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` at
 `bind_work`, evaluates it once eagerly and applies `set_compiler`'s compiler
 to it. Deleted: `DerivativeHead`, `ForceReadout` / `EnergyReadout`,
 `StressDerivation`, `compile_core` / `CoreCompilable`, `compute_forces`,
@@ -107,8 +107,8 @@ to it. Deleted: `DerivativeHead`, `ForceReadout` / `EnergyReadout`,
 (D-c), `Potentials`' `pos=` overrides and `Mapping` input. Measured (torch
 2.15 nightly CPU): op inference 1 graph / 0 breaks for `("atoms.pos",)` and
 `("atoms.pos", "graphs.strain")`; training breaks once at
-`molix/autograd/variables.py::leaf` (pytorch#196653). Residue: `molix.engine`
-adapters keep their own leaf (`molix.autograd.leaf`) because the partitioned
+`molix/autograd/variables.py::leaf` (pytorch#196653). Residue: the
+`molix.deploy.SiteEnergyAdapter` keeps its own leaf (`molix.autograd.leaf`) because the partitioned
 `local_mask` energy is not frame-in/frame-out; molzoo specs still name
 `grad_force_pass` (auditor 📝).
 
@@ -146,8 +146,7 @@ may still *mention* molrs as a dependency of molpy.
 <!-- mol:note:topic:native-op-rebuild -->
 ## Native op lib — arch tag + always rebuild (2026-08-31)
 
-**Context.** Custom autograd Functions need `torch::autograd::_wrap_outputs` from
-`libtorch_python`, which is not in `${TORCH_LIBRARIES}`. Multi-arch HPC needs
+**Context.** Multi-arch HPC needs
 both `x86_64` and `aarch64` artifacts in the same tree. A stale
 `libmolnex_opLib.aarch64.so` (wrong torch ABI) silently disabled native
 neighbor ops and MD fell back to `bin=0.0`. Login-node `maturin` then overwrote
@@ -156,8 +155,13 @@ after the molnex op rebuilt. Probe without GCC 14 `libstdc++` on
 `LD_LIBRARY_PATH` failed with `CXXABI_1.3.15`.
 
 **Rule**: CMake `OUTPUT_NAME = molnex_opLib.${CMAKE_SYSTEM_PROCESSOR}`; loader
-loads only the arch-tagged path (no untagged fallback). Always link
-`torch_python` (`--no-as-needed` on Linux). **Every `.aarch64` env/torch
+loads only the arch-tagged path (no untagged fallback). The library links
+LibTorch only — no Python, no `torch_python` (2026-10-16: the old reason,
+`_wrap_outputs`, lives in `libtorch_cpu` in torch 2.14+; a Python-linked library
+cannot be loaded by molnex's C++ deployment runtime, which loads it for every
+package that calls `molix::*`). It exports `molnex_op_library_requirement()`
+= `molix_ops==<n>`, bumped with any schema change in `molix_library.cpp`.
+**Every `.aarch64` env/torch
 change rebuilds ALL native libs together on GH200 — never reuse a stale
 `.so`, never rebuild molnex op without also re-asserting molrs aarch64.**
 
@@ -167,14 +171,17 @@ change rebuilds ALL native libs together on GH200 — never reuse a stale
    untagged: login rustc emits x86-64 into the same path. Keep
    `_lib.abi3.so.aarch64` / `_lib.abi3.so.x86_64` copies. Never run
    molrs maturin on the login node if GH200 still needs that tree.
-2. `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's
+2. `libmolnex_opLib.aarch64.so` from `csrc/molix` (out of source, `build/csrc-aarch64/molix/`;
+   `src/molix/op/` until 2026-10-16) against **this** interpreter's
    torch. Export `TORCH_CUDA_ARCH_LIST=9.0` (PyTorch cmake ignores
    `CMAKE_CUDA_ARCHITECTURES`). GH200 CUDA arch is `90`, not the cache's `75`.
 3. Runtime `LD_LIBRARY_PATH` = GCC 14.3 `lib64` + `torch/lib` + CUDA `lib64`
    **before** `python` starts (uv CPython is linked to system libstdc++).
 
-Recipe: `.scratch/polar_npt/rebuild_op.sbatch` (molrs + op) and step 4b of
-`upgrade_aarch64.sbatch`. Missing/ABI-mismatched `.so` is an environment
+Recipe: `.jobs/op-rebuild-aarch64.sbatch` (2026-10-15: cmake against
+`.venv-aarch64`'s torch, CUDA arch 90, then a load + CUDA `scatter_sum`
+check; the earlier "ABI mismatch" was only the missing GCC 14 `lib64` on the
+runtime `LD_LIBRARY_PATH`). The older `.scratch/polar_npt/rebuild_op.sbatch` is gone. Missing/ABI-mismatched `.so` is an environment
 error for MD, not a reason to skip the rebuild.
 
 **Supersedes**: "warn and continue with pure-Python NeighborList" as the GH200
@@ -182,8 +189,40 @@ workflow; "rebuild only molnex op, leave molrs".
 
 ---
 
+<!-- mol:note:topic:cue-kernels-only -->
+## cuEquivariance on its kernels — no fallback on CUDA (2026-10-15, operator rule)
+
+**Rule.** On CUDA molnex never runs cuEquivariance's pure-PyTorch path: every
+cue operation is built through `molrep.cueq`, which pins the kernel method
+(`Linear` / `FullyConnectedTensorProduct` → `fused_tp`; `ChannelWiseTensorProduct`
+/ `SymmetricContraction` / `SphericalHarmonics` / `SegmentedPolynomial` →
+`uniform_1d`). There is no `use_fallback` parameter or spec field anywhere and
+no `method="naive"`. On CPU cuEquivariance swaps in its own naive path — that
+is accepted; there are **no runtime checks** (no device guards, no warning
+interception) and CPU tests stay on CPU. `.double()` works: the four ops with a
+`dtype` argument rebuild their kernel submodules on a dtype change.
+
+**Why it mattered beyond speed.** Under `use_fallback=None` cue's `Linear`
+already ran `naive` — 27 sites in molnex executed the PyTorch path by default.
+
+**Open debt.** `skip_tp` (one-hot `89x0e` operand, density blocks) was pinned
+to `naive` because `fused_tp` is ~19x slower there (33 vs 1.7 ms at 193
+atoms); it now runs `fused_tp`. Candidate fix: express it as an
+`indexed_linear` per-species map. Done 2026-10-16 as `ElementLinear` (one
+`indexed_linear_B` per path on CUDA) and replaced on 2026-10-17 by a per-atom
+gather on every device: the kernel cannot be captured into a CUDA graph (see
+the GH200 verification paragraph of the 2026-10-16 zoo-unify entry).
+
+**Related finding (same day).** MACE checkpoints' symmetric-contraction
+weights live in MACE's Clebsch-Gordan phase convention, which matches
+`cue.O3` for every coupling among `l <= 1` and differs in sign beyond
+(`molzoo.mace.coupling.MaceO3`). MACE-POLAR-1-L, the one product emitting
+`2e`, was wrong by 0.25 eV/Å under `cue.O3`; with `MaceO3` and the module's
+own float64 projection (the checkpoint's projection is dropped by
+`CheckpointRemap`) it agrees with the official model to 1e-7 eV/Å.
+
 <!-- mol:note:topic:cueq-use-fallback -->
-## cuEq `use_fallback` split by force backend (2026-08-08)
+## cuEq `use_fallback` split by force backend (2026-08-08) — SUPERSEDED by `cue-kernels-only`
 
 **Context.** Hardcoding the pure-torch path abandoned fused kernels even when
 forces used autograd; conversely `MACEMatpes` shipped `use_fallback=True` as
@@ -1414,17 +1453,26 @@ unit-granularity planning is the real lever), digest-core revision 180332f
 
 <!-- mol:note:topic:lammps-iface-post-chain -->
 
-**`Contract::fixed_graph` stays declared-but-unimplemented.** The 01-meta rule
-was "implement or remove by schema bump before merge". Resolution: **KEEP**.
-The binding consumer is the operator's espaloma-style learnable-classical-FF
-roadmap (`.claude/notes/learnable-classical-ff.md`): a parameterized Class-I
-force field runs on the **fixed covalent topology**, not a per-step cutoff
-graph, so its LAMMPS impl consumes `bond_index`-shaped inputs with no neighbor
-rebuild — a different runtime-contract family by construction. Until that impl
-lands, `registry.cpp`'s exhaustive switch rejects `fixed_graph` loudly (tested:
-`registry_rejects_fixed_graph`); removing the enum value would force a schema
-round-trip for a consumer already on the roadmap. Implementation arrives as its
-own spec chain (`lammps-iface-fixed-graph`), not as a side effect.
+**Runtime / engine split (2026-10-15).** `interface/` is two layers, one-way:
+`interface/runtime/` (`molnex_runtime`, LibTorch only) ← `interface/lammps/`.
+The runtime owns everything about the model — `Metadata` (the versioned
+`DeployMetadata` `{name}.json`, model units, no LAMMPS unit table),
+`ModelArtifact::open` (format → loader; `AotiArtifact` is the only format,
+ONNX etc. would be siblings), `OpLibraries` (`dlopen` of `lib<name>.so` from
+`MOLNEX_OP_LIBRARY_PATH`, requirement checked through the library's exported
+`molnex_op_library_requirement()`, never closed because the registrations are
+process-wide), `SiteEnergyExec` (the calling convention; three outputs, CPU
+float64). The LAMMPS layer owns everything about LAMMPS, including the unit
+conversion: `pair_molnex` maps the model energy unit onto a LAMMPS style
+(eV → metal, kcal/mol → real) and calls `utils::get_conversion_factor`;
+`CutoffGraphImpl` refuses a non-angstrom length. The stub in
+`test_contract_impl` is a `ModelArtifact`, not an `Exec`: the `Exec` /
+`DynamicExec` hierarchy, `read_model_outputs`, `MetaSchema`, `LammpsContract`
+and `ModelRunner` were removed with the split. `update_weights` /
+`constant_names` are `AotiArtifact`-only (constants are an AOTI notion).
+The earlier `Contract::fixed_graph` / `registry.cpp` note is obsolete — both
+were deleted before this split; a fixed-topology impl for a learned Class-I
+field would be a second `ContractImpl` beside `CutoffGraphImpl`.
 
 **C++ toolchain for `interface/`.** `interface/.clang-format` = Google base at
 its native 80 columns, `SortIncludes: Never` (include order is deliberate:
@@ -2013,3 +2061,269 @@ count caches) still owe a move to MolHub, and since the Class-I retarget
 `load_omol25_fairchem_4m` — which the FAIRChem-protocol script does use — shares
 `_official_source`, `_measured_counts`, `_fit_e0_subsample` and the two cache
 paths with them, so the cut is a refactor, not a deletion.
+
+## The model zoo has one shape: spec → encoder → potential (2026-10-15)
+
+<!-- mol:note:topic:zoo-unify -->
+
+**Decision (operator, chain `zoo-unify`).** MACE, Allegro and PiNet2 share
+MACE's shape: a torch-free `spec.py`; an `encoder.py` body that exposes
+primitives and whose `forward(td)` is the encoder contract; a `potential.py`
+product that **subclasses** the body (flat checkpoint keys) with
+`atomic_energy` / `energy_core` (flat, compilable) / `energy(batch)` /
+`forward = Derivative(energy, wrt)`; and, where official weights exist,
+`checkpoint.py` key tables + an archive reader behind
+`.load(path, format="official")` (that product surface was superseded on
+2026-10-16 by the two-method convention in the follow-up below). Public names
+changed without aliases:
+`PiNet` → `PiNetEncoder`, `Allegro` → `AllegroEncoder` / `AllegroPotential`.
+
+- **Model-specific blocks live with the model** (operator ruling, same day,
+  superseding a first pass that had put them in molrep under generic names):
+  `molzoo/pinet/layers.py` (PI/IP, PIX/Scale/Dot, `compute_d5`, `ResUpdate`,
+  `GCBlock`, `OutLayer`), `molzoo/allegro/layers.py` (`ProductTypeEmbedding`,
+  `WeightedChannels`, `Contracter`). molrep keeps only generic components:
+  `FFLayer`, `ScalarMLPFunction`, `SincBesselRBF`, cutoffs, spherical harmonics
+  (cuEquivariance), edge geometry (`molrep.embedding.geometry`). One owner each
+  for activation lookup (`molix.nn.activation_from_name`) and the
+  official-checkpoint machinery (`molzoo.checkpoint`).
+- **Allegro = mainline nequip-allegro 0.8.3**, loads `.nequip.zip` packages
+  without importing nequip / allegro / e3nn (exact-global allowlist +
+  `torch.package` storages). The previous port could not load any official
+  model: no two-body MLP, raw-Z embeddings, fixed non-persistent Bessel
+  weights, irrep-major env weights, fused-per-output TP paths with `randn`
+  init, linear readout, SH-only irreps. Parity: the two small packages are
+  bit-level (≤ 1.5e-13 eV/atom, ≤ 1.3e-13 eV/Å, virial ≤ 2e-13, periodic case
+  with 24 self-images); Allegro-OAM-L:0.1 (fp32 package, evaluated in fp64) at
+  fp32 rounding (5e-7 eV/atom, 4e-5 eV/Å). cue O3 SH and CG equal e3nn's
+  (CG factor 1 exactly). Oracle venv + assets (out of tree):
+  `molcrafts/.build-alloc/allegro-oracle/` (`assets/` is what
+  `MOLNEX_ALLEGRO_WEIGHTS_DIR` points at; `REPORT.md` is the reconciliation).
+- **PiNet2: no PiNN (TensorFlow) checkpoint loading** (operator ruling).
+  `out_activation` defaults to `None` — PiNN's `OutLayer` is linear (Keras
+  `Dense` default); molnex had hard-coded `tanh`, so a model trained before
+  2026-10-15 reproduces only with `out_activation="tanh"`.
+- `pairs.shifts` is written by the MD bind path but read by no model; every
+  model reads the imaged `pairs.pair_diff` value with the gradient through
+  `atoms.pos`.
+- **GH200 (jobs 3870277 / 3870345, fused cuEq kernels).** Allegro
+  (`uniform_1d`), PiNet2 rank 3 and MACE-MatPES (`use_fallback=False`):
+  `energy_core` and inference `forward` each 1 graph / 0 breaks;
+  `Compiler(cuda_graphs=True)` vs eager ≤ 2e-13 eV/Å; 24-atom cluster
+  8–20 ms eager → 0.4–0.5 ms. The CUDA-graph op must run under
+  `torch.no_grad()` (with grad on, the attached forces leak the leaf and
+  fullgraph refuses — the documented training-trace break).
+- **TF32 is not safe for Allegro-OAM-L.** Under TF32 matmuls (`"high"`)
+  OAM-L's periodic golden is off by 4e-3 eV/atom and 0.1 eV/Å; at
+  `"highest"` the fused kernel sits at fp32 noise (≤ 2.3e-6 eV/atom,
+  ≤ 1.2e-4 eV/Å) and equals the naive kernel; fp64 is 5e-7 / 4e-5 (the
+  goldens are fp32). **Operator ruling 2026-10-15:** molix no longer sets the
+  fp32 matmul policy at all (the `fp32` preset used to force `"high"`);
+  `set_precision(mode)` takes no `matmul_precision`, PyTorch's default stands.
+- **One reader pattern, no security gating** (operator ruling, same day):
+  `molzoo.checkpoint.OfficialArchive` — `read(path) -> (state, config)`,
+  unpickling through the single `StubUnpickler` policy (torch / stdlib / numpy /
+  cuEquivariance resolved, everything else stubbed). `MaceArchive` and
+  `NequipPackage` subclass it; MACE's `trusted=` flag and the tensor-only-first
+  attempt, and Allegro's exact allowlist, are gone.
+- **cuEquivariance only** (operator ruling, same day): `molrep.embedding.angular.
+  SphericalHarmonics` wraps `cuet.SphericalHarmonics` (equal to the old
+  pure-torch monomial table to 4e-16, double backward supported); the
+  pure-torch version existed only for functorch, which the force path no
+  longer uses. Docs and comments do not name e3nn.
+- **GH200 re-check after the second round (jobs 3871556 / 3871557):** aarch64
+  op rebuilt and loading; Allegro / PiNet2 / MACE on cuet SH: 1 graph / 0
+  breaks, CUDA graphs = eager (≤ 2e-13 eV/Å), force-training double backward
+  finite; OAM-L fp32 at PyTorch's default matmul precision 7.7e-7 eV/atom,
+  3.7e-6 eV/Å against the fp32 goldens.
+
+
+**Follow-up (2026-10-16, operator ruling): one potential, two methods.** The
+product surface above (`atomic_energy` / `energy_core` / `energy(batch)` /
+`.load(path, format="official")`) is gone. A potential has exactly two public
+methods and no layer between them. `energy(frame) -> frame` is the one method
+a model writes: it reads `atoms.pos` / `atoms.Z` / `pairs.pair_index`, the
+optional `pairs.pair_diff` / `atoms.mask` and (MACE) `graphs.{total_charge,
+total_spin, cell}` straight off the frame, writes `atoms.energy` and
+`graphs.energy`, takes `B = frame["graphs"].batch_size[0]` (so the `graphs`
+namespace is required and the `atoms.batch.max().item()` host-sync fallback is
+deleted) and derives, detaches and validates nothing. `forward =
+Derivative(self.energy, wrt)` is built as the last line of `__init__`. The
+operator's words for why: single responsibility, clear boundaries, no double
+forward, fully typed, no meta methods and no dynamic copies. A first proposal
+that put a `site_energy` tensor layer under `energy` and read the frame through
+a `Geometry.from_frame` view object was rejected as convoluted and as an access
+wrapper — the tensor-level work *is* the body of `energy`, composed from the
+encoder primitives. Landed:
+
+- `molix.autograd.Potential(nn.Module, abc.ABC)` is the base of every
+  potential (`src/molix/autograd/potential.py`): abstract `energy`, provided
+  `forward`, `derivative` property. `Derivative.__init__` no longer duck-types
+  (`getattr(energy, "energy")` is gone): it takes a `Callable[[frame], frame]`,
+  spelled `Derivative(pot.energy, wrt=…)`.
+  `molix/core/steps/base.py::_mark_leaves` dispatches on
+  `isinstance(model, Derivative | Potential)`. molpot's classical `Potentials`
+  subclasses `Potential` too.
+- Products take **typed spec objects** and the defaults live on the spec only:
+  `MaceMatpes(MACEMatpesSpec(...), *, wrt=(), energy_dtype=torch.float64,
+  input_dtype=None)` (likewise `MaceOmol` / `MaceOff` / `MaceLes` /
+  `MacePolar`; `MACELesSpec` is new, `PolarHeadSpec` is folded into
+  `MACEPolarSpec`), `AllegroPotential(AllegroSpec(...), *, wrt=())`,
+  `PiNetPotential(PiNetSpec(), *, wrt=())`. Specs are
+  `ConfigDict(extra="forbid")` with validators instead of
+  `getattr(spec, …, default)`. `configure_input_dtype` became the
+  `input_dtype` constructor kwarg, cast at the top of `energy`, so the batch
+  and compiled paths agree (the old `MacePotential.energy_core` skipped the
+  cast — a bug).
+- Official loading is typed: `MaceMatpes.load(path, *, config=None, wrt=(),
+  energy_dtype=…, input_dtype=None)` → `MaceArchive.read(path, config) ->
+  (state, MaceOfficialConfig)` (pydantic, `extra="ignore"`, only the fields
+  that are read) → `MACEMatpesSpec.from_official(cfg)` (torch-free, holds the
+  rejection rules, testable without weights) → `CheckpointRemap(matpes_keys,
+  skip=MACE_SKIP).load(model, state)`. `CheckpointRemap(table, *,
+  on_unexpected, skip=())` replaces the `ClassVar _keys / _unexpected` tails;
+  the key tables are module-level constants in `molzoo/mace/checkpoint.py`.
+  Allegro: `NequipPackage.read(path) -> (state, AllegroSpec)` normalises the
+  layout once in the reader (`.w3j` dropped there);
+  `AllegroPotential.load(path, *, wrt=(), tp_method=None)`.
+- **Eager subpackage imports.** `molzoo/__init__.py` is a docstring; the
+  `_LAZY` + `__getattr__` + `__dir__` tables of `molzoo/__init__` and
+  `mace/__init__` are deleted with the two lazy-import probe tests and the
+  subprocess gate. `from molzoo import X` no longer appears in the tree:
+  `from molzoo.mace import MaceMatpes`, `from molzoo.allegro import …`.
+- **MACE-only blocks live in `molzoo/mace`**: `layers.py` (conv mixin,
+  `RadialMLP`, `GatedNonlinearity`, `ElementLinear`, the interactions,
+  `EquivariantProductBasis`), `heads.py` (`JointFeature*`, the readouts), the
+  Polar blocks inside `polar.py`. `molrep/readout/`, `molrep/utils/`,
+  `molrep/interaction/polar/` and every MACE / research interaction module are
+  deleted; molrep keeps `embedding/*`, `interaction/product.py`, `cueq.py`,
+  `heads/`, `chem/`, `condensation/`, `perception/`, `analysis/`. The research
+  `MACE` encoder (`molzoo/mace/research.py`; not compile-clean, the sole user
+  of ~700 lines of molrep) is deleted; `MACEEncoder.forward(td)` writes
+  `atoms.node_features (N, L, F)`, the `0e` block of each layer. The rotation
+  test helpers moved to `tests/conftest.py`.
+- `molzoo/encoder.py::ElementTable` mixin owns `validate_elements` /
+  `_validate_once` for the three encoders — the eager precondition spent on
+  the first forward and folded out under tracing.
+- `molpot.derivation.protocol` is deleted (`call_energy`, `PotentialModule`,
+  `write_energy`, `ensure_graphs`, `absorb_model_output`, `write_forces`, and
+  finally the re-export shim): `energy` writes the `molix.schema` keys
+  directly, and an existing `graphs` namespace needs no ensuring.
+  `hessian.py` and `forcefield/potentials.py` import `molix.schema`.
+
+Follow-ups not done this round: `_mark_leaves` still carries the
+`physics(batch)` Class-I hook through `getattr`; `molix/data/dataset.py` and
+`molix/data/prepared.py` each keep a `__getattr__`; `Sonata` and `Rondo` are
+not yet on `Potential`; the three
+`test_potential.py::test_forces_match_central_differences` tests compare
+`h = 1e-5` central differences at an absolute tolerance that sits at the
+finite-difference truncation floor — make it relative. Hot-path changes (MACE
+element index / reshape removal, Allegro env fusion): see the paragraph below.
+
+**Hot paths (2026-10-16, after the convention landed; every change checked
+against an fp64 seed-0 reference captured before editing, <= 2e-14 relative).**
+
+- MACE (`molzoo/mace/{layers,encoder,potential,polar}.py`): the per-layer
+  `_reshape` (per-irrep `(N, mul*d)` -> `(N, d, mul)`, cat on `d`) followed by
+  `EquivariantProductBasis`'s `flatten(1)` was an identity copy in `ir_mul`
+  layout and is gone - interactions return the `(N, target.dim)` message.
+  `ElementIndex(index, index32)` is built once per `energy` call by
+  `MACEEncoder.element_index(Z)` and threaded through
+  `layer_features(elements=)` into `ElementLinear` (the per-atom gather of
+  the element's weight block, every device; see the GH200 paragraph below for
+  the `indexed_linear_B` kernel it replaced) and the products (no per-layer
+  one-hot `argmax`; the element-agnostic `% 1` fold is decided at
+  construction). `OneHotLinear`
+  (`F.embedding(index, weight.view(C, F)) * c`, same `weight` key and cue
+  segment layout) replaces the one-hot matmuls of `node_embedding` and the
+  residual `source_embedding` / `target_embedding`; MatPES / OMol stay
+  bit-identical, Polar differs by `x * (1/n)` vs `x / n` rounding
+  (`_field_norms_inv` non-persistent buffer; `field_feature_norms` key kept).
+  Polar: `vectors.roll(-1, dims=1)` for `[y, z, x]`, the dead `clone()` and
+  `new_zeros` are gone, `local_electron_energy` runs only when enabled. The
+  `ElementLinear` per-call weight transpose stays: removing it changes the
+  checkpoint tensor layout. Compile: encoder / MatPES / OMol / Polar `forward`
+  1 graph, 0 breaks.
+- Allegro (`molzoo/allegro/{encoder,layers}.py`): `WeightedChannels` is one
+  `molrep.cueq.SegmentedPolynomial` (`uniform_1d`, `math_dtype=config.ftype`)
+  built from `cue.SegmentedTensorProduct.from_subscripts(",u,u")` - basis
+  segments `()` per SH component, weight segments `(u,)` per irrep
+  (irrep-major, so the channel-major `(E, u*R)` latent output is transposed
+  per call, a copy `R/D` the size of the message it replaces), one path per
+  component. The in-loop environment sum calls it with
+  `output_indices={0: source}` / `output_shapes={0: N}`, so the `(E, D*u)`
+  message is never materialised and there is no Python scatter; the per-edge
+  first-layer call uses the same instance without output indices (one
+  implementation). `SphericalHarmonics(normalize=False)` on unit vectors from
+  the lengths already in hand; `source` is made contiguous once per
+  `layer_features`; `__init__` asserts every layer's schedule starts with `0e`
+  (the `tensor[:, :u]` scalar slice relies on it). Official-package parity
+  unchanged (<= 1.5e-13 eV/atom incl. the periodic case); forces/virial differ
+  from the reference by <= 2.1e-15 relative (cue `scatter_add_` summation
+  order). The per-layer `torch.cat(scalars + [tensor[:, :u]])` was measured
+  and left alone: 0 breaks before and after, and inductor fuses the cat into
+  the consuming GEMM. The fused kernel is verified on GH200 (below).
+
+**GH200 verification (2026-10-17; jobs 3945974, 3972523, 3978328, 3978557,
+3978849;
+`benchmarks/run_gh200_hot_paths.sbatch` -> `verify_gh200_hot_paths.py`, fp64,
+`.venv-aarch64`, native ops from `build/csrc-aarch64`).**
+
+- Allegro: the fused `WeightedChannels` env sum (`uniform_1d`,
+  `output_indices`) equals the scatter form to 1.4e-14 (fp64) / 7.6e-6
+  (fp32); tiny, the two small official packages and OAM-L match their goldens
+  on CUDA eager; `Compiler(cuda_graphs=True)` = eager; explain 1 graph / 0
+  breaks. The OAM-L periodic virial under CUDA graphs sits at 2.4e-13 eV
+  against the script's 2.0e-13 gate - fp32 package replay noise, not a defect;
+  the gate is the number to move if it recurs.
+- MACE: MatPES / OMol / Polar CUDA eager vs the CPU reference
+  (`benchmarks/_gh200_verify/step7_ref.pt`) <= 4.8e-14 relative; explain 1
+  graph / 0 breaks for the three `forward`s (Polar on the periodic path) and
+  `MACEEncoder.forward`.
+- `ElementLinear` (job 3972523, every check in a fresh process): cue 0.12.0's
+  `indexed_linear_B` fails inside a bare `torch.cuda.graph` capture on its own
+  (`cudaErrorStreamCaptureInvalidated`; under `set_sync_debug_mode("warn")`
+  the eager call shows one host sync), so `Compiler(cuda_graphs=True)` could
+  not record MatPES. The per-atom gather (`index_select` of the element's
+  `(u, w)` block per path, the former CPU path) records and replays to 0.0 eV
+  (MatPES) / 4.5e-13 eV (OMol; the same as eager's own replay noise), is
+  1.1-1.3x slower forward and 1-2x faster forward + input gradient, and holds
+  `u*w` floats per atom and path (first MACE-MP `skip_tp`, 4096 atoms, 89
+  elements, fp32: 0.79 vs 0.45 GiB peak forward). It is now the only
+  implementation (`ElementIndex` is `index` / `index32`; the fake-op
+  registrations for the cue kernels are gone; spec A6 updated). Re-check when
+  cue ships a capture-safe grouped linear. A fresh-process OMol run with the
+  kernel passed under `Compiler(cuda_graphs=True)` without explanation (the
+  harness did not then assert that a graph was recorded; it does now through
+  `cudagraph_trees.get_manager`).
+- Polar periodic under CUDA graphs failed one op later:
+  `aten._linalg_check_errors` from `torch.linalg.inv(cell)` in
+  `molpot.potentials.gto.kspace.reciprocal_basis` - now `inv_ex` on CUDA, the
+  pattern of `elec/lib/kvectors.py` / `mesh_interpolator.py` /
+  `forcefield/pair_terms.py`. The non-periodic Polar path stays outside CUDA
+  graphs and compiles with 34 graphs / 33 breaks: `molpot/potentials/gto/
+  hartree.py:130-164` reads `.item()` for its cache key (pre-existing, topic
+  `compile-no-graph-breaks`; the periodic path is the tested seam).
+- Job 3978328 (after the gather landed): 76 checks pass - every
+  `Compiler(cuda_graphs=True)` parity now also asserts that inductor recorded
+  a graph; MatPES replays to 0.0 eV, OMol to 4.5e-13 eV, the Allegro packages
+  to <= 1.6e-14 eV. Its two failures were the non-periodic Polar path (explain
+  34 / 33 and the data-dependent guard under capture, both the hartree pair
+  cache above); the script now reports that path as SKIP with the reason and
+  checks the periodic Polar seam under CUDA graphs instead.
+- Job 3978557 (periodic Polar, `inv_ex`): inductor records the graph, explain
+  1 / 0, per-atom energies replay to 0.0 eV; the graph-level k-space Hartree
+  term differs by 2.3e-12 eV and the forces by 1.3e-12 eV/A - the
+  reciprocal-space sum reordered by inductor (every per-atom term is exact),
+  not a defect. The script gates that one force comparison at
+  `TOL_GRAPH_F_KSPACE = 5e-12` with the reason; the short-range seams keep
+  2e-13.
+- Job 3978849, the final run of `verify_gh200_hot_paths.py` on this state: 80
+  checks pass, 0 fail, 2 skipped (the non-periodic Polar path, by design);
+  every CUDA-graph parity recorded a graph; the periodic Polar force replay
+  came in at 1.7e-12 eV/A.
+- The slow compile tests cannot run on the node: they are CPU tests and cue's
+  aarch64 wheel has no CPU kernels (job 3945974 parts 2/3); the sbatch runs
+  the verification script only.
+
+**Status.** active.

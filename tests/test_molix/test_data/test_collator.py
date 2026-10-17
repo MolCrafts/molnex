@@ -93,3 +93,29 @@ def test_frame_collator_pickles_without_last_batch() -> None:
     assert clone._graph_schema == schema
     out = clone(_two_water())
     assert out["atoms"].batch_size[0] == 16
+
+
+class _Tagging:
+    """A ``Prepare``: tags every frame of a record with the record's size."""
+
+    def __init__(self) -> None:
+        self.records: list[int] = []
+
+    def execute_record(self, frames):
+        self.records.append(len(frames))
+        for sample in frames:
+            sample.meta["tag"] = float(len(frames))
+        return tuple(frames)
+
+
+def test_prepare_runs_execute_record_once_per_sample() -> None:
+    """A single frame and a multi-frame record are each one ``execute_record`` call."""
+    prepare = _Tagging()
+    collator = FrameCollator(collator=MoleculeCollator(), prepare=prepare)
+    single = frame(Z=[1], pos=[[0.0, 0.0, 0.0]])
+    pair = (frame(Z=[1], pos=[[0.0, 0.0, 0.0]]), frame(Z=[1], pos=[[1.0, 0.0, 0.0]]))
+
+    batch = collator([single, pair])
+
+    assert prepare.records == [1, 2]
+    assert batch["graphs", "tag"].tolist() == [1.0, 2.0, 2.0]

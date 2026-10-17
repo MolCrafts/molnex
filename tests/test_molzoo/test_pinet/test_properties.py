@@ -1,63 +1,76 @@
-"""Smoke tests for PiNetDipole / PiNetPolarizability façades.
-
-Detailed head physics lives under tests/test_molpot/test_heads/; these only
-assert the zoo façade still wires the encoder → head path after the package split.
-"""
+"""Unit tests for molzoo.pinet.properties."""
 
 from __future__ import annotations
 
+import pytest
 import torch
 
-from molzoo.pinet import PiNet, PiNetDipole, PiNetPolarizability
-from tests.conftest import make_graph_batch
+from molzoo.pinet import PiNetDipole, PiNetPolarizability, PiNetSpec
+from tests.conftest import random_rotation_matrix, rotate_graph, rotate_vectors, translate_graph
+from tests.test_molzoo.test_pinet.conftest import TINY
+
+ATOL = 1e-10
 
 
-def _graph():
-    pos = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [1.1, 0.0, 0.0],
-            [0.2, 1.0, 0.1],
-            [1.0, 1.1, -0.1],
-        ],
-        dtype=torch.float32,
-    )
-    z = torch.tensor([1, 6, 7, 8], dtype=torch.long)
-    edge_index = torch.tensor(
-        [[0, 1], [1, 0], [0, 2], [2, 0], [1, 3], [3, 1], [2, 3], [3, 2]],
-        dtype=torch.long,
-    )
-    batch = torch.zeros(4, dtype=torch.long)
-    return make_graph_batch(
-        pos,
-        z,
-        edge_index,
-        batch,
-        graphs={"total_charge": torch.tensor([0.0], dtype=torch.float32)},
-    )
+def _dipole(variant: str) -> PiNetDipole:
+    torch.manual_seed(4)
+    return PiNetDipole(PiNetSpec(**TINY, rank=3), variant=variant)
 
 
-def _encoder() -> PiNet:
-    torch.manual_seed(0)
-    return PiNet(
-        atom_types=[1, 6, 7, 8],
-        r_max=4.0,
-        n_basis=3,
-        pp_nodes=[8, 8],
-        pi_nodes=[8, 8],
-        ii_nodes=[8, 8],
-        depth=2,
-        rank=3,
-    )
+def _polar(variant: str) -> PiNetPolarizability:
+    torch.manual_seed(4)
+    return PiNetPolarizability(PiNetSpec(**TINY, rank=3), variant=variant)
 
 
-def test_dipole_ac_runs():
-    model = PiNetDipole(encoder=_encoder(), variant="ac")
-    out = model(_graph())
-    assert "dipole" in out["graphs"].keys()
+class TestPiNetDipole:
+    def test_ac_charges_are_projected_to_the_total_charge(self, cluster):
+        out = _dipole("ac")(cluster)
+        torch.testing.assert_close(
+            out["graphs", "charge_sum_post_proj"],
+            torch.zeros(1, dtype=torch.float64),
+            atol=1e-12,
+            rtol=0,
+        )
+
+    def test_ac_dipole_is_translation_invariant(self, cluster):
+        model = _dipole("ac")
+        ref = model(cluster.clone())["graphs", "molecular_dipole"]
+        shift = torch.tensor([5.0, -2.0, 1.0], dtype=torch.float64)
+        got = model(translate_graph(cluster, shift))["graphs", "molecular_dipole"]
+        torch.testing.assert_close(got, ref, atol=ATOL, rtol=0)
+
+    def test_ad_dipole_rotates_with_the_molecule(self, cluster):
+        model = _dipole("ad")
+        torch.manual_seed(5)
+        r = random_rotation_matrix(dtype=torch.float64)
+        ref = model(cluster.clone())["graphs", "molecular_dipole"]
+        got = model(rotate_graph(cluster, r))["graphs", "molecular_dipole"]
+        torch.testing.assert_close(got, rotate_vectors(ref, r), atol=ATOL, rtol=0)
+
+    def test_bc_writes_bond_charges_and_the_penalty(self, cluster):
+        out = _dipole("bc")(cluster)
+        assert out["pairs", "bond_charges"].shape == (12,)
+        assert out["bond_charge_l2"].ndim == 0
 
 
-def test_polarizability_localchi_runs():
-    model = PiNetPolarizability(encoder=_encoder(), variant="localchi", atom_types=[1, 6, 7, 8])
-    out = model(_graph())
-    assert "alpha" in out["graphs"].keys()
+class TestPiNetPolarizability:
+    def test_localchi_is_symmetric_and_charge_conserving(self, cluster):
+        out = _polar("localchi")(cluster)
+        chi = out["graphs", "chi"]
+        torch.testing.assert_close(chi, chi.transpose(-1, -2), atol=ATOL, rtol=0)
+        torch.testing.assert_close(chi.sum(-1), torch.zeros_like(chi.sum(-1)), atol=1e-9, rtol=0)
+        assert out["graphs", "alpha"].shape == (1, 3, 3)
+
+    def test_alpha_rotates_as_a_rank_two_tensor(self, cluster):
+        model = _polar("localchi")
+        torch.manual_seed(7)
+        r = random_rotation_matrix(dtype=torch.float64)
+        ref = model(cluster.clone())["graphs", "alpha"]
+        got = model(rotate_graph(cluster, r))["graphs", "alpha"]
+        torch.testing.assert_close(got, r @ ref @ r.T, atol=1e-9, rtol=0)
+
+    @pytest.mark.parametrize("variant", ["etainv_iso", "eem", "acks2", "local"])
+    def test_every_response_variant_runs(self, variant, cluster):
+        out = _polar(variant)(cluster)
+        assert out["graphs", "alpha"].shape == (1, 3, 3)
+        assert out["graphs", "chi"].shape == (1, 4, 4)

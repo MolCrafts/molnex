@@ -100,3 +100,33 @@ class TestAsTensorFrame:
     def test_anything_else_is_refused_naming_the_contract(self):
         with pytest.raises(TypeError, match=r"collate_molecules"):
             as_tensor_frame([_atoms_only_batch()])  # type: ignore[arg-type]
+
+
+class TestBesideLabels:
+    def test_the_write_moves_to_its_target_and_the_label_comes_back(self):
+        from molix.frame import beside_labels
+
+        batch = collate_molecules([frame(Z=[1], pos=[[0.0, 0.0, 0.0]], energy=5.0)])
+        label = batch["graphs", "energy"].clone()
+
+        def body() -> str:
+            batch["graphs", "energy"] = batch["graphs", "energy"] * 0 + 7.0
+            return "ran"
+
+        assert (
+            beside_labels(batch, {("graphs", "energy"): ("graphs", "energy_pred")}, body) == "ran"
+        )
+        assert torch.equal(batch["graphs", "energy"], label)
+        assert batch["graphs", "energy_pred"].tolist() == [7.0]
+
+    def test_a_write_with_no_label_stays_where_it_was_written(self):
+        from molix.frame import beside_labels
+
+        batch = collate_molecules([frame(Z=[1], pos=[[0.0, 0.0, 0.0]])])
+        beside_labels(
+            batch,
+            {("graphs", "energy"): ("graphs", "energy_pred")},
+            lambda: batch.set(("graphs", "energy"), torch.tensor([3.0])),
+        )
+        assert batch["graphs", "energy"].tolist() == [3.0]
+        assert batch["graphs", "energy_pred"].tolist() == [3.0]

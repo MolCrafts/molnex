@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from molpot.potentials import ImproperHarmonic
+from molpot.potentials.impropers import ImproperHarmonic
 
 
 def _planar_pos() -> torch.Tensor:

@@ -62,7 +62,7 @@ class TestCompiler:
 
     @pytest.mark.slow
     def test_compiles_a_bound_method_and_a_plain_function(self):
-        """The compile seam is a flat callable — a bound ``energy_core``, not a module."""
+        """The compile seam is a flat callable — a bound ``energy``, not a module."""
 
         class _Affine:
             def __init__(self, w: torch.Tensor) -> None:

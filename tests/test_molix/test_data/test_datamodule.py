@@ -10,10 +10,14 @@ from torch.utils.data import DataLoader
 
 from molix.data import FrameCollator, MoleculeCollator, MoleculePadder, TokenBudgetBatchSampler
 from molix.data import datamodule as _datamodule
+from molix.data.charge import TotalCharge
 from molix.data.datamodule import DataModule
 from molix.data.dataset import BaseDataset
+from molix.data.prepared import PreparedRow, PreparedRows
+from molix.data.profile import ProfileIndex
 from molix.frame import TensorFrame
 from tests.conftest import frame
+from tests.test_molix.test_data.conftest import record
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -707,3 +711,55 @@ class TestCollationRoute:
 
         assert loader_dataset is plain
         assert isinstance(collate_fn, _datamodule._CollateFn)
+
+
+class _Named:
+    """A batch task with a name and a call count."""
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        self.n = 0
+
+    def execute(self, batch):
+        self.n += 1
+        return batch
+
+
+class TestCollateOfPreparedRows:
+    """The collate skips exactly the tasks the prepared rows were captured with."""
+
+    def test_captured_task_ids_come_from_the_dataset(self) -> None:
+        samples = _make_samples(4)
+        dm = DataModule(samples[:2], samples[2:], batch_size=2, pin_memory=False)
+        rows = PreparedRows(samples[:2], prepare=None, tasks=(_Named("nl"),), store=None)
+        assert dm._make_collate_fn(rows).captured == frozenset({"nl"})
+        assert dm._make_collate_fn(samples[:2]).captured == frozenset()
+
+    def test_the_tasks_rows_were_captured_with_are_skipped_and_the_rest_run(self) -> None:
+        captured = _Named("captured")
+        batch_task = _Named("batch")
+        collate = _datamodule._CollateFn(
+            FrameCollator(collator=MoleculeCollator()),
+            [captured, batch_task, TotalCharge(), ProfileIndex()],
+            dtype=torch.float32,
+            captured=("captured",),
+        )
+        sample = record(0.0, frames=2)
+        raw = collate([sample])
+        assert (captured.n, batch_task.n) == (1, 1)
+        prepared = PreparedRow.capture(sample, prepare=None, tasks=(captured,))
+        assert captured.n == 2
+        batch = collate([prepared])
+        assert (captured.n, batch_task.n) == (2, 2)
+        assert batch["graphs", "total_charge"].tolist() == [0.0, 0.0]
+        assert batch["graphs", "profile"].tolist() == raw["graphs", "profile"].tolist()
+
+    def test_a_task_the_rows_lack_runs_at_collate(self) -> None:
+        task = _Named("pairs")
+        collate = _datamodule._CollateFn(
+            FrameCollator(collator=MoleculeCollator()),
+            [task, TotalCharge(), ProfileIndex()],
+            dtype=torch.float32,
+        )
+        collate([PreparedRow.capture(record(0.0, frames=2), prepare=None, tasks=())])
+        assert task.n == 1

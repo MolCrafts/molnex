@@ -1,295 +1,90 @@
-"""Official MACE checkpoint → molnex ``state_dict``: one key remap for both families.
+"""Official MACE checkpoint key tables (cuEquivariance dialect → molnex names).
 
-Loading an official checkpoint is a **dialect translation**: the same numbers
-under the names upstream's module tree gave them. This module owns that and
-nothing else — no unit conversion (both sides use eV, eV/Å, Å), no
-architecture inference, no saving direction.
+The checkpoints these tables read are already in *cuEquivariance* layout
+(``cueq`` in key names). That conversion (MACE's official cuEquivariance
+converter) is an offline step run out of tree; molnex never imports
+``mace-torch``. The remap machinery itself is
+:class:`molzoo.checkpoint.CheckpointRemap`; each product's ``load`` builds it
+over its family's table, with :data:`MACE_SKIP` as the ``skip`` tuple.
 
-The checkpoints it reads are already in *cuEquivariance* layout (``cueq`` in
-key names). That conversion (``mace.cli.convert_e3nn_cueq``) is an offline step
-run out of tree; molnex never imports ``mace-torch``.
+Each table maps an official key (or key prefix) to a molnex name; ``None``
+drops the entry — it is rebuilt from the spec (``r_max``, the cutoff scalars,
+the Z-indexed ``E0`` table) or is a non-persistent constant. Longest prefix
+wins, so an exact key overrides its enclosing prefix. Anything unlisted maps
+through unchanged (``interactions.*``, ``products.*``, ``readouts.*``,
+``scale_shift.*``).
 
-:class:`CheckpointRemap` is three ideas:
-
-1. skip the entries cuEquivariance rebuilds anyway — symbolic graph constants
-   (``".graph.c" in key``) and irrep masks (``key.endswith("output_mask")``);
-2. rename by **longest matching prefix**, with ``None`` meaning "drop" (the
-   value is rebuilt from a constructor argument, or is not persistent);
-3. normalize scalar ranks and cuEq Linear's optional singleton shared-weight
-   axis — never an arbitrary equal-numel reshape, never a CG basis conversion.
-
-The only genuine difference between the two shipped families is what an
-unhoused key means, and that is the single knob ``on_unexpected``: MatPES
-raises (a homeless key means the mapping is stale), OMol returns the list (that
-family ships auxiliary heads this port does not model).
-
-**Strictness is not on that knob.** Under both policies an ``nn.Parameter``
-the checkpoint does not fill, or a genuine shape disagreement, raises: a
-silently dropped tensor produces a model that runs, looks sane and is quietly
-wrong. "Learnable" therefore means membership in ``model.named_parameters()``
-and never a ``.weight`` / ``.bias`` name pattern — that shortcut once excused
-``bessel.freqs``, kept molnex's analytic values over the checkpoint's, and put
-a 2.2e-7 Å⁻¹ offset straight into the energy parity residual
-(``src/molzoo/specs/mace_omol.md`` §7.1).
-
-Both lists returned by :meth:`CheckpointRemap.load` are sorted, so a diff of
-two loader reports cannot move on dict ordering alone.
+The only genuine difference between the shipped families is what an unhoused
+key means — MatPES and MACE-OFF raise (a homeless key means the table is
+stale), OMol and Polar return the list (those families ship auxiliary heads
+this port does not model) — which each product states as the
+``on_unexpected`` it passes.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
     Networks for Fast and Accurate Force Fields" NeurIPS 2022.
     https://arxiv.org/abs/2206.07697
-    Batatia et al. "A foundation model for atomistic materials chemistry"
-    (MACE-MP-0). https://arxiv.org/abs/2401.00096
     Kaplan et al. "A foundational potential energy surface dataset for
     materials" (MatPES). https://arxiv.org/abs/2503.04070
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Literal
+#: Substrings of checkpoint keys that carry nothing learned and that the
+#: modules rebuild from their irreps: cuEquivariance's symbolic graph
+#: constants, irrep masks and symmetric-contraction projections. A
+#: checkpoint's projection is not merely redundant: it belongs to the
+#: polynomial the converter built, which need not be the module's (a float32
+#: coupling computation keeps near-zero paths the float64 one prunes), and
+#: loading it beside a different polynomial returns a wrong ``l >= 2`` output.
+MACE_SKIP: tuple[str, ...] = (".graph.c", "output_mask", ".symmetric_contractions.projection")
 
-import torch
-from torch import nn
-
-#: Official cueq key (or key prefix) → molnex name for the MACE-MatPES family.
-#: ``None`` drops the entry: either it is rebuilt from the constructor
-#: arguments (``r_max``, the cutoff scalars, the Z-indexed ``E0`` table) or it
-#: is a non-persistent constant. Longest prefix wins, so an exact key overrides
-#: its enclosing prefix. Anything unlisted maps through unchanged
-#: (``interactions.*``, ``products.*``, ``readouts.*``, ``scale_shift.*``).
-matpes_keys: dict[str, str | None] = {
+#: Entries every family shares. The Bessel frequencies are MACE's fitted
+#: values (Å⁻¹): without that entry the key is merely unexpected and
+#: ``bessel.freqs`` keeps its analytic ``nπ/r_max`` init — the official OMol
+#: values sit ~2.2e-7 Å⁻¹ away, straight in the energy parity residual.
+_common: dict[str, str | None] = {
     "node_embedding.linear.": "node_embedding.",
     "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
     "radial_embedding.bessel_fn.": None,
-    "radial_embedding.distance_transform.": "distance_transform.",
     "radial_embedding.cutoff_fn.": None,
+    "atomic_energies_fn.": None,
+    "atomic_numbers": "z_table",
+    "r_max": None,
+    "num_interactions": None,
+}
+
+#: MACE-MatPES: the common table plus the Agnesi transform and the ZBL term.
+matpes_keys: dict[str, str | None] = {
+    **_common,
+    "radial_embedding.distance_transform.": "distance_transform.",
     "pair_repulsion_fn.p": None,  # exponent is a plain int on ZBLRepulsion
     "pair_repulsion_fn.": "pair_repulsion.",
-    "atomic_energies_fn.": None,
-    "atomic_numbers": "z_table",
-    "r_max": None,
-    "num_interactions": None,
 }
 
-#: Official cueq key (or key prefix) → molnex name for the MACE-OMOL family,
-#: mirroring :data:`matpes_keys`. ``None`` drops the entry (rebuilt from
-#: the constructor arguments or a non-persistent constant). Longest prefix
-#: wins; anything unlisted maps through unchanged (``interactions.*``,
-#: ``products.*``, ``joint_embedding.*``, ``scale_shift.*``).
+#: MACE-OFF: the common table; mace >= 0.3.17 stores the neighbour divisor as
+#: a buffer per block, which the reader already took into the spec.
+off_keys: dict[str, str | None] = {
+    **_common,
+    **{f"interactions.{i}.avg_num_neighbors": None for i in range(16)},
+}
+
+#: MACE-LES: MACE-OFF plus one latent-charge readout per layer.
+les_keys: dict[str, str | None] = {**off_keys, "les_readouts.": "charge_readouts."}
+
+#: MACE-OMol: the common table plus the embedding readout and the single
+#: final readout molnex holds where the official checkpoint numbers a
+#: one-entry ``readouts`` list.
 omol_keys: dict[str, str | None] = {
-    "node_embedding.linear.": "node_embedding.",
+    **_common,
     "embedding_readout.linear.": "embedding_readout.",
     "readouts.0.": "readout.",
-    # MACE's fitted Bessel frequencies (Å⁻¹). Without this entry the key is
-    # simply unexpected and `bessel.freqs` keeps its analytic n*pi/r_max init —
-    # the official OMOL values sit ~2.2e-7 Å⁻¹ away, which was landing straight
-    # in the reported energy parity residual (module docstring, §"Strictness").
-    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
-    "radial_embedding.bessel_fn.": None,
-    "radial_embedding.cutoff_fn.": None,
-    "atomic_energies_fn.": None,  # handled at construction (Z-indexed)
-    "atomic_numbers": "z_table",
-    "r_max": None,
-    "num_interactions": None,
 }
 
-
-class CheckpointRemap:
-    """Translate official MACE checkpoint keys into molnex ``state_dict`` keys.
-
-    Product classes hold a table as ``_keys`` and call this from
-    :meth:`MaceMatpes.load` / :meth:`MaceOmol.load` / :meth:`MacePolar.load`.
-
-    The prefix search order — longest first, so an exact key wins over the
-    prefix that encloses it — is computed once here rather than kept as a
-    second module-level constant beside the table, which is what the two flat
-    loaders did.
-
-    A complete, runnable use of this surface — a synthetic checkpoint written in
-    the official dialect, read back, and checked against hard-coded energy /
-    force goldens, including both ``on_unexpected`` policies — is
-    ``regressions/mace-subpackage-restructure-05-checkpoint.py``.
-
-    Args:
-        table: Official cueq key (or key prefix) → molnex name. ``None`` drops
-            the entry. Keys absent from the table pass through unchanged.
-        on_unexpected: What :meth:`load` does with a renamed key that has no
-            home in the target model. ``"raise"`` (the default — the stricter
-            behaviour is the default) refuses before touching the model;
-            ``"return"`` hands the list back to the caller, which is what the
-            OMol family needs because its checkpoints carry auxiliary heads
-            this port deliberately does not model.
-
-    Raises:
-        ValueError: If ``on_unexpected`` is neither ``"raise"`` nor
-            ``"return"``. A typo must not degrade into the lax branch.
-    """
-
-    def __init__(
-        self,
-        table: Mapping[str, str | None],
-        *,
-        on_unexpected: Literal["raise", "return"] = "raise",
-    ) -> None:
-        if on_unexpected not in ("raise", "return"):
-            raise ValueError(f'on_unexpected must be "raise" or "return", got {on_unexpected!r}')
-        self._table: dict[str, str | None] = dict(table)
-        #: Prefixes longest-first: an exact key beats the prefix enclosing it.
-        self._prefixes: tuple[str, ...] = tuple(sorted(self._table, key=len, reverse=True))
-        self._on_unexpected = on_unexpected
-
-    def rename(self, official_state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Translate checkpoint keys, dropping what the model rebuilds itself.
-
-        Pure: ``official_state`` is not modified, no model is consulted, and
-        the tensors are passed through by reference — nothing is copied, cast
-        or converted, so every value keeps the units it had upstream (the two
-        sides agree: energies in eV, isolated-atom references in eV/atom,
-        forces in eV/Å, lengths in Å, Bessel frequencies in Å⁻¹).
-
-        Dropped entries are the cuEquivariance symbolic graph constants
-        (``".graph.c" in key``) and irrep masks (``output_mask``), which the
-        modules rebuild and which carry nothing learned, plus every key whose
-        table entry is ``None``.
-
-        Args:
-            official_state: ``state_dict`` of the cueq-converted official model
-                (converted by ``mace.cli.convert_e3nn_cueq``, run out of tree —
-                molnex never imports ``mace-torch``).
-
-        Returns:
-            A new dict of molnex key → the same tensor objects.
-        """
-        renamed: dict[str, torch.Tensor] = {}
-        for key, value in official_state.items():
-            if ".graph.c" in key or key.endswith("output_mask"):
-                continue
-            new_key: str | None = key
-            for prefix in self._prefixes:
-                if key.startswith(prefix):
-                    replacement = self._table[prefix]
-                    new_key = None if replacement is None else replacement + key[len(prefix) :]
-                    break
-            if new_key is not None:
-                if new_key in renamed:
-                    raise RuntimeError(f"checkpoint key collision at {new_key!r} (from {key!r})")
-                renamed[new_key] = value
-        return renamed
-
-    def load(
-        self, model: nn.Module, official_state: Mapping[str, torch.Tensor]
-    ) -> tuple[list[str], list[str]]:
-        """Load an official checkpoint into ``model``, strictly.
-
-        Preflight names, shapes and parameter coverage before writing tensors.
-        Only scalar rank differences and cuEq Linear's singleton shared-weight
-        axis may be reshaped; equal numel alone does not establish a layout.
-
-        "Learnable" is defined as membership in ``model.named_parameters()``.
-        Never a ``.weight`` / ``.bias`` name heuristic — that shortcut once
-        excused the ``nn.Parameter`` ``bessel.freqs`` from this very check; the
-        module docstring tells that story.
-
-        Args:
-            model: Target model, already constructed with the checkpoint's
-                hyper-parameters.
-            official_state: ``state_dict`` of the cueq-converted official model.
-
-        Returns:
-            ``(missing_buffers, unexpected)``: the non-learnable entries the
-            checkpoint did not provide (typically the graph constants cueq
-            rebuilds) and the renamed keys with no home in ``model``. Both
-            lists are **sorted** — a deterministic normalisation, so two runs
-            differ only when the checkpoint does. Under ``on_unexpected =
-            "raise"`` the second list is always empty.
-
-        Raises:
-            RuntimeError: If a renamed key has no home in ``model`` and the
-                policy is ``"raise"``; if a checkpoint tensor disagrees in
-                shape/layout with the model's (the model was built from the wrong
-                config); or — under **either** policy — if any
-                ``nn.Parameter`` of ``model`` is left unfilled, which would
-                silently keep whatever the constructor gave it (random for a
-                linear weight, the analytic ``nπ/r_max`` for ``bessel.freqs``).
-        """
-        renamed = self.rename(official_state)
-        # ``_extra_state`` is a module's own metadata (``get_extra_state``),
-        # not a tensor: ``AtomicReferenceEnergy`` carries its ``scheme`` and
-        # ``units`` there. An upstream checkpoint has no such key, and the
-        # model's own must be left as constructed — so it takes no part in the
-        # name, shape or coverage preflight below, all of which speak tensors.
-        renamed = {k: v for k, v in renamed.items() if not _is_extra_state(k)}
-        own = {k: v for k, v in model.state_dict().items() if not _is_extra_state(k)}
-
-        unexpected = sorted(set(renamed) - set(own))
-        if unexpected and self._on_unexpected == "raise":
-            raise RuntimeError(
-                f"checkpoint keys with no home in {type(model).__name__}: {unexpected}"
-            )
-
-        mismatched: list[str] = []
-        import cuequivariance_torch as cuet
-
-        modules = dict(model.named_modules())
-        for key, value in renamed.items():
-            if key not in own:
-                continue  # reported through ``unexpected``
-            want = own[key].shape
-            if value.shape == want:
-                continue
-            # MACE stores some frozen scalars as (1,) where molnex holds a 0-d
-            # buffer; identical content, different rank.
-            owner, _, leaf = key.rpartition(".")
-            shared_linear_axis = (
-                leaf == "weight"
-                and isinstance(modules.get(owner), cuet.Linear)
-                and (
-                    (value.ndim == 1 and tuple(want) == (1, value.numel()))
-                    or (len(want) == 1 and tuple(value.shape) == (1, own[key].numel()))
-                )
-            )
-            if value.numel() == own[key].numel() == 1 or shared_linear_axis:
-                renamed[key] = value.reshape(want)
-            else:
-                mismatched.append(f"{key}: checkpoint {tuple(value.shape)} vs model {tuple(want)}")
-        if mismatched:
-            raise RuntimeError(
-                "shape mismatch — model built with the wrong config? "
-                + ", ".join(sorted(mismatched))
-            )
-
-        parameters = {name for name, _ in model.named_parameters()}
-        unfilled = sorted(parameters - set(renamed))
-        if unfilled:
-            raise RuntimeError(f"parameters not covered by the checkpoint: {unfilled}")
-        missing, _ = model.load_state_dict(renamed, strict=False)
-        return sorted(set(missing) - parameters - {k for k in missing if _is_extra_state(k)}), (
-            unexpected
-        )
-
-
-def _is_extra_state(key: str) -> bool:
-    """Whether *key* is a module's ``get_extra_state`` slot rather than a tensor.
-
-    ``torch.nn.Module`` appends this fixed suffix for any module that defines
-    :meth:`~torch.nn.Module.get_extra_state`; the value is whatever that method
-    returns (a ``dict`` for :class:`~molpot.heads.energy.AtomicReferenceEnergy`),
-    so every tensor-shaped check has to step around it.
-    """
-    return key.endswith("_extra_state")
-
-
+#: MACE-POLAR: the common table, the k-space constants both GTO blocks
+#: rebuild, and the biased linears molnex nests one level deeper.
 polar_keys: dict[str, str | None] = {
-    "node_embedding.linear.": "node_embedding.",
-    "radial_embedding.bessel_fn.bessel_weights": "bessel.freqs",
-    "radial_embedding.bessel_fn.": None,
-    "radial_embedding.cutoff_fn.": None,
-    "atomic_energies_fn.": None,
-    "atomic_numbers": "z_table",
-    "r_max": None,
-    "num_interactions": None,
+    **_common,
     "kspace_cutoff": None,
     "field_feature_norms": None,
     "electric_potential_descriptor.": None,
@@ -297,8 +92,11 @@ polar_keys: dict[str, str | None] = {
     "external_field_contribution.": None,
     "local_electron_energy.linear_up_q.weight": "local_electron_energy.linear_up_q.linear.weight",
     "local_electron_energy.linear_up_v.weight": "local_electron_energy.linear_up_v.linear.weight",
+    **{
+        f"field_dependent_charges_maps.{i}.readout.{name}.weight": (
+            f"field_dependent_charges_maps.{i}.readout.{name}.linear.weight"
+        )
+        for i in range(4)
+        for name in ("linear_mid", "linear_2")
+    },
 }
-for _i in range(4):
-    _p = f"field_dependent_charges_maps.{_i}.readout"
-    polar_keys[f"{_p}.linear_mid.weight"] = f"{_p}.linear_mid.linear.weight"
-    polar_keys[f"{_p}.linear_2.weight"] = f"{_p}.linear_2.linear.weight"

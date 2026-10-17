@@ -14,8 +14,8 @@ import pytest
 import torch
 
 from molix import config
+from molrep import cueq
 from molrep.embedding.angular import SphericalHarmonics
-from molrep.interaction.linear import EquivariantLinear
 
 
 @pytest.fixture
@@ -36,7 +36,12 @@ def test_force_loss_reaches_linear_weights(fp64: None) -> None:
     """g = ∂E/∂x with create_graph; backprop g² must hit cuet.Linear weights."""
     torch.manual_seed(0)
     sh = SphericalHarmonics(l_max=2, normalize=False)
-    linear = EquivariantLinear(irreps_in="1x0e+1x1o+1x2e", irreps_out="4x0e+4x1o+4x2e")
+    linear = cueq.Linear(
+        cue.Irreps("O3", "1x0e+1x1o+1x2e"),
+        cue.Irreps("O3", "4x0e+4x1o+4x2e"),
+        layout=cue.ir_mul,
+        dtype=torch.float64,
+    )
     pos = torch.randn(8, 3, dtype=torch.float64, requires_grad=True)
     energy = linear(sh(pos)).pow(2).sum()
     force = torch.autograd.grad(energy, pos, create_graph=True)[0]

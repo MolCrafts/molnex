@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
-from molrep.chem.embed import AtomChemEmbedding, BondChemEmbedding
+from molrep.chem.embed import (
+    AtomChemEmbedding,
+    BondChemEmbedding,
+    DiscreteChannel,
+    DiscreteChannels,
+)
 from molrep.embedding.node import JointEmbedding
+
+#: cuEquivariance fixes its precision at construction: build at fp64.
+pytestmark = pytest.mark.usefixtures("fp64")
 
 
 class TestAtomChemEmbedding:
@@ -127,3 +136,79 @@ class TestBondChemEmbedding:
         prev = torch.zeros(0, bond_dim)
         out = bond_emb(h, empty, empty, h_bond=prev)
         assert out.shape == (0, bond_dim)
+
+
+class TestDiscreteChannels:
+    """One embedding table per declared integer column, summed into a stream."""
+
+    def test_no_channels_add_nothing(self):
+        assert DiscreteChannels((), dim=4)() is None
+
+    def test_a_per_graph_column_is_broadcast_by_the_batch_index(self):
+        torch.manual_seed(0)
+        channels = DiscreteChannels(
+            (DiscreteChannel(name="total_charge", num_classes=11, offset=5, per="graph"),), dim=4
+        )
+        total_charge = torch.tensor([-1.0, 2.0])
+        batch = torch.tensor([0, 0, 1])
+        out = channels(batch=batch, total_charge=total_charge)
+        table = channels.tables["total_charge"].weight
+        torch.testing.assert_close(out, table[torch.tensor([4, 4, 7])])
+
+    def test_the_offset_maps_the_most_negative_value_to_row_zero(self):
+        channels = DiscreteChannels(
+            (DiscreteChannel(name="formal_charge", num_classes=5, offset=2),), dim=3
+        )
+        out = channels(formal_charge=torch.tensor([-2]))
+        torch.testing.assert_close(out[0], channels.tables["formal_charge"].weight[0])
+
+    def test_an_out_of_range_value_clamps_to_the_edge_class(self):
+        channels = DiscreteChannels((DiscreteChannel(name="min_ring_size", num_classes=9),), dim=3)
+        out = channels(min_ring_size=torch.tensor([12]))
+        torch.testing.assert_close(out[0], channels.tables["min_ring_size"].weight[8])
+
+    def test_two_channels_are_summed(self):
+        torch.manual_seed(0)
+        channels = DiscreteChannels(
+            (
+                DiscreteChannel(name="a", num_classes=3),
+                DiscreteChannel(name="b", num_classes=3),
+            ),
+            dim=4,
+        )
+        out = channels(a=torch.tensor([1]), b=torch.tensor([2]))
+        want = channels.tables["a"].weight[1] + channels.tables["b"].weight[2]
+        torch.testing.assert_close(out[0], want)
+
+    def test_a_duplicate_channel_name_is_refused(self):
+        with pytest.raises(ValueError, match="unique"):
+            DiscreteChannels(
+                (
+                    DiscreteChannel(name="a", num_classes=3),
+                    DiscreteChannel(name="a", num_classes=3),
+                ),
+                dim=4,
+            )
+
+
+class TestEmbeddingExtra:
+    """The channel sum is added to the seed, on atoms and on bonds alike."""
+
+    def test_atom_extra_is_added_to_the_seed(self, atom_dim: int):
+        emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
+        z = torch.tensor([6, 8], dtype=torch.long)
+        extra = torch.randn(2, atom_dim)
+        torch.testing.assert_close(emb(z, extra=extra), emb(z) + extra)
+
+    def test_bond_extra_keeps_endpoint_symmetry(self, atom_dim: int, bond_dim: int):
+        torch.manual_seed(0)
+        atom_emb = AtomChemEmbedding(atom_dim=atom_dim, num_elements=20)
+        bond_emb = BondChemEmbedding(atom_dim=atom_dim, bond_dim=bond_dim)
+        h = atom_emb(torch.tensor([6, 8, 1], dtype=torch.long))
+        atomi = torch.tensor([0, 0], dtype=torch.long)
+        atomj = torch.tensor([1, 2], dtype=torch.long)
+        extra = torch.randn(2, bond_dim)
+        forward = bond_emb(h, atomi, atomj, extra=extra)
+        reverse = bond_emb(h, atomj, atomi, extra=extra)
+        torch.testing.assert_close(forward, reverse)
+        torch.testing.assert_close(forward, bond_emb(h, atomi, atomj) + extra)

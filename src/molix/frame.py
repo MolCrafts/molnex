@@ -19,12 +19,15 @@ and the view every reader in molnex addresses.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, NotRequired
+from collections.abc import Callable, Mapping
+from typing import Any, NotRequired, TypeVar
 
 from tensordict import TensorDict, TensorDictBase, TypedTensorDict
 
 __all__ = ["TensorFrame", "as_tensor_frame"]
+
+
+T = TypeVar("T")
 
 
 class TensorFrame(TypedTensorDict):
@@ -143,3 +146,35 @@ def as_tensor_frame(system: TensorDictBase | Mapping[str, Any]) -> TensorFrame:
         f"/ impropers) — but this is a {type(system).__name__}. Collate the frames with "
         "molix.data.collate_molecules and pass the batch it returns."
     )
+
+
+def beside_labels(
+    frame: TensorDictBase,
+    moves: Mapping[tuple[str, str], tuple[str, str]],
+    body: Callable[[], T],
+) -> T:
+    """Run *body*, which writes label columns, and leave its writes beside the labels.
+
+    A model's ``energy`` writes ``graphs.energy`` and its derivative op
+    ``atoms.forces`` — the columns a training batch holds its DFT labels on.
+    *moves* maps each such column to where the prediction belongs
+    (``ENERGY_KEY → ENERGY_PRED_KEY``): the label is taken before *body*,
+    *body*'s write is copied to the target after it, and the label is put
+    back. A column that had no label keeps *body*'s write where it was.
+
+    Args:
+        frame: The batch *body* writes into.
+        moves: Written column → where the prediction goes.
+        body: The forward to run; its return value is handed back.
+
+    Returns:
+        Whatever *body* returned.
+    """
+    labels = {key: frame.get(key, None) for key in moves}
+    result = body()
+    for key, target in moves.items():
+        frame[target] = frame[key]
+        label = labels[key]
+        if label is not None:
+            frame[key] = label
+    return result

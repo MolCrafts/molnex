@@ -1,4 +1,4 @@
-"""Training-loop intervention hooks: ``GradClipHook``, ``ActivationCheckpointingHook``.
+"""Training-loop intervention hooks: grad clipping, LR warmup, activation checkpointing.
 
 Per the io-hooks-refactor scalar-vs-training split, this module
 houses hooks that *modify* the training loop (gradient clipping,
@@ -57,6 +57,65 @@ class GradClipHook(ScalarHook):
             norm_type=self.norm_type,
         )
         state["train"]["grad_norm"] = total_norm.detach()
+
+
+class LinearWarmupHook(ScalarHook):
+    """Ramp every param group's learning rate linearly over the first *steps*.
+
+    At optimizer step ``t < steps`` the rate is ``base * factor(t)`` with
+    ``factor(t) = start_factor + (1 - start_factor) * t / steps``; at ``t ==
+    steps`` it is back to ``base`` and the hook is a no-op from then on. The
+    ramp is applied **incrementally** — each step multiplies the group's
+    *current* rate by ``factor(t) / factor(t - 1)`` — so a reduction another
+    scheduler makes mid-warmup (``ReduceLROnPlateau`` at an epoch end) is kept
+    and scaled, not overwritten by a value the hook remembered. The same
+    telescoping makes a resume exact: a checkpoint written after step ``t - 1``
+    carries ``base * factor(t - 1)``, and the first call at ``t`` applies the
+    next ratio; one restored past *steps* is left alone.
+
+    ``state["train"]["lr"]`` is published on every call (a Python float read,
+    no device sync), so a ``Log`` column follows the rate for the whole run.
+
+    Args:
+        steps: Optimizer steps the ramp spans. ``> 0``.
+        start_factor: Fraction of the base rate at step 0, in ``(0, 1]``.
+
+    Raises:
+        ValueError: ``steps <= 0`` or ``start_factor`` outside ``(0, 1]``.
+    """
+
+    scalar_keys = (("train", "lr"),)
+
+    def __init__(self, steps: int, *, start_factor: float = 0.01) -> None:
+        if steps <= 0:
+            raise ValueError(f"LinearWarmupHook: steps must be > 0, got {steps}")
+        if not 0.0 < start_factor <= 1.0:
+            raise ValueError(
+                f"LinearWarmupHook: start_factor must be in (0, 1], got {start_factor}"
+            )
+        self.steps = int(steps)
+        self.start_factor = float(start_factor)
+        # The optimizer step whose ratio has been applied; with gradient
+        # accumulation ``on_train_batch_start`` fires more than once per step.
+        self._applied: int | None = None
+
+    def factor(self, step: int) -> float:
+        """The multiplier at optimizer step *step*: ``start_factor`` at 0, 1 from *steps* on."""
+        if step >= self.steps:
+            return 1.0
+        return self.start_factor + (1.0 - self.start_factor) * step / self.steps
+
+    def on_train_batch_start(self, trainer, state, batch) -> None:
+        """Apply this step's ratio to every param group once; publish the rate."""
+        del batch
+        step = int(state.global_step)
+        if step <= self.steps and step != self._applied:
+            previous = 1.0 if step == 0 else self.factor(step - 1)
+            ratio = self.factor(step) / previous
+            for group in trainer.optimizer.param_groups:
+                group["lr"] = group["lr"] * ratio
+            self._applied = step
+        state["train"]["lr"] = float(trainer.optimizer.param_groups[0]["lr"])
 
 
 class ActivationCheckpointingHook(BaseHook):

@@ -9,18 +9,12 @@ Embeddings:
   - CosineCutoff: Cosine-based cutoff envelope
   - PolynomialCutoff: Polynomial-based cutoff envelope
 
-Interactions:
-  - ConvTP: Tensor product convolution
-  - RadialWeightMLP: Radial-to-TP-weight MLP
-  - SymmetricContraction: Multi-body basis construction
-  - EquivariantLinear: SO(3)-equivariant linear
-  - ElementUpdate: Element-specific residual
-  - MessageAggregation: Scatter-sum aggregation
+Interactions (``molrep.interaction``):
+  - irreps_from_l_max / sh_irreps_from_l_max: irreps-string helpers; the
+    message-passing blocks live with their model (``molzoo.mace.layers``)
 
-Readout:
-  - ProductHead: Multi-body basis → scalar features
+Heads (``molrep.heads``):
   - ScalarHead: Pooling + MLP for scalar prediction
-  - masked_sum_pooling / masked_mean_pooling
 """
 
 from molrep.embedding import (
@@ -31,8 +25,6 @@ from molrep.embedding import (
     SphericalHarmonics,
 )
 from molrep.heads.scalar import ScalarHead
-from molrep.readout.pooling import masked_mean_pooling, masked_sum_pooling
-from molrep.readout.product import ProductHead
 
 __all__ = [
     "JointEmbedding",
@@ -41,7 +33,4 @@ __all__ = [
     "CosineCutoff",
     "PolynomialCutoff",
     "ScalarHead",
-    "ProductHead",
-    "masked_sum_pooling",
-    "masked_mean_pooling",
 ]

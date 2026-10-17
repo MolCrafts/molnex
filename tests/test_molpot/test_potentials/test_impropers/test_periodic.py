@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from molpot.potentials import ImproperPeriodic
+from molpot.potentials.impropers import ImproperPeriodic
 
 
 def _cis_pos() -> torch.Tensor:

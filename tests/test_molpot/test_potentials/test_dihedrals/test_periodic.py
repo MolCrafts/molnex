@@ -12,7 +12,7 @@ import math
 import pytest
 import torch
 
-from molpot.potentials import ProperTorsionPeriodic
+from molpot.potentials.dihedrals import ProperTorsionPeriodic
 
 # ---------------------------------------------------------------------------
 # Geometry fixtures — known dihedral angles

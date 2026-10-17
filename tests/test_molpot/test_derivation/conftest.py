@@ -16,8 +16,6 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molpot.derivation.protocol import write_energy
-
 
 class KernelToyPotential(nn.Module):
     """``E = s · Σ‖pos‖²`` written onto the batch; counts energy-core calls.
@@ -43,11 +41,9 @@ class KernelToyPotential(nn.Module):
         n_graphs = int(batch["graphs"].batch_size[0])
         energy = torch.zeros(n_graphs, dtype=pos.dtype, device=pos.device)
         energy = energy.index_add(0, atom_batch, atom_energy)
-        write_energy(
-            batch,
-            energy,
-            atomic_energy=atom_energy if self.write_atomic else None,
-        )
+        batch["graphs", "energy"] = energy
+        if self.write_atomic:
+            batch["atoms", "energy"] = atom_energy
         return batch
 
     def total_energy(self, pos: torch.Tensor) -> torch.Tensor:

@@ -11,16 +11,18 @@ Reference:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
 from molpot.charge.problem import ChargeEquilibrationProblem
-from molpot.forcefield.container import ForceField
 from molpot.ir.scaling import NonbondedScaling
 from molpot.manifest import ElectrostaticsRecord, SolverRecord
+
+if TYPE_CHECKING:
+    from molpot.forcefield.container import ForceField
 
 __all__ = ["AtomicChargeModel"]
 
@@ -83,8 +85,6 @@ class AtomicChargeModel(nn.Module):
         """Copy-on-write ForceField with ``atoms["charge"]`` (and keep other atom params)."""
         q = self.charges(atom_features, batch, total_charge=total_charge)
         atoms = dict(forcefield.params("atoms") or {})
-        atoms["charge"] = q
-        # alias for heads that use "charge"
         atoms["charge"] = q
         return forcefield.with_params(atoms=atoms)
 

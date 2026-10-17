@@ -10,7 +10,7 @@ per-atom ``forces`` (and optionally ``initial_charges``, ``dipoles``, …).
 
 This parser is intentionally narrow:
 
-* depends on ``numpy`` + Python stdlib only (no ASE, no e3nn);
+* depends on ``numpy`` + Python stdlib only (no ASE);
 * requires ``species:S:1`` and ``pos:R:3``;
 * promotes ``forces:R:3`` to :attr:`ExtxyzFrame.forces` when present;
 * stores every other real-valued ``Properties`` column under

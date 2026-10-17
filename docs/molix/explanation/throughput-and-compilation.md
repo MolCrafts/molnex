@@ -8,7 +8,7 @@ fp32.
 
 ## The workload
 
-- **Model**: `molzoo.PiNetPotential` — a PiNet2 encoder (`depth=5` GC blocks,
+- **Model**: `molzoo.pinet.PiNetPotential` — a PiNet2 encoder (`depth=5` GC blocks,
   `rank=3`, `hidden_dim=64`, atom types H/C/N/O) with an energy head. **Forces
   are derived with functorch** (`torch.func.grad` of the energy w.r.t. positions,
   in `_forward_functorch`) — no double-backward barrier, but it means each step
@@ -167,7 +167,7 @@ Inside MolNex, the winning combo is the named `cuda_graphs` preset — use
 `trainer.compile(cuda_graphs=True)` (or `molix.compile.Compiler.CUDA_GRAPH_PRESET`)
 instead of spelling out the four flags, so the config can't drift.
 
-A model that derives forces is the same object: `Derivative(model,
+A model that derives forces is the same object: `Derivative(model.energy,
 wrt=("atoms.pos",))` or `PiNetPotential(..., wrt=("atoms.pos",))` — one
 `nn.Module`, compiled with the same `Compiler(...)(model)` /
 `trainer.compile(...)` and handed to `Trainer(...)` like any other. There is
@@ -209,7 +209,7 @@ combo is **~130 steps/s** (≈10x eager's ~12, ≈4–5x plain compile's ~25–3
 The sweep above is PiNet: **pure torch**, so dynamo has nothing exotic to trace.
 MACE runs cuEquivariance fused kernels, which are custom `autograd.Function`s —
 a plausible reason for dynamo to break the graph and for `fullgraph=True` to
-fail outright. Measured on `molzoo.MACEMatpes` with official
+fail outright. Measured on `molzoo.mace.MaceMatpes` with official
 `mace-matpes-r2scan-0` weights, 193-atom periodic water box (17344 edges), one
 GH200, compiling `_compute_energy` with `autograd.grad` taken *outside* the
 compiled region:
@@ -265,13 +265,14 @@ too. Everything else in `DefaultTrainStep.on_train_batch` stays eager Python
 around the call: the accumulation window, `GradScaler`, the
 `on_after_backward` hooks, the optimizer and the LR scheduler. The autocast
 context wraps the compiled call from *outside* — dynamo guards on the autocast
-state and captures the ops under it, and the `config[...]` read that resolves
-it never enters the trace. `Trainer.smoke` warms up the same attribute `train`
+state and captures the ops under it, and the `trainer.autocast` read that
+resolves it (`Trainer(autocast=torch.bfloat16)`) stays in eager Python, never
+in the trace. `Trainer.smoke` warms up the same attribute `train`
 runs, so the smoke pass compiles exactly the training graph (and, through
 `eval_step.on_eval_batch`, the eval graph).
 
 ```python
-model = Derivative(MaceMatpes(...), wrt=("atoms.pos",))       # or MaceMatpes(..., wrt=...)
+model = Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))  # or MaceMatpes(..., wrt=...)
 trainer = Trainer(model, energy_force_mse(...), optimizer_factory, ...)
 trainer.compile()                   # inductor — one graph, zero breaks on stock torch
 trainer.compile(cuda_graphs=True)   # padded fixed shapes: the fastest force-training config

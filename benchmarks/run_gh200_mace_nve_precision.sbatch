@@ -42,7 +42,7 @@ REPO="${SLURM_SUBMIT_DIR:?submit from the repo root}"
 PY=/nobackup/proj/disk/teoroo/personal/jicli594/work/.aarch64/bin/python
 WD=/nobackup/proj/disk/teoroo/personal/jicli594/work/mace-nve/scratch/precision-matrix
 WEIGHTS=/home/jicli594/work/mace_models
-BUILD="src/molix/op/build-gh200-${SLURM_JOB_ID:-$$}"
+BUILD="build/csrc-gh200-${SLURM_JOB_ID:-$$}"
 cd "$REPO"
 mkdir -p "$WD"
 
@@ -64,14 +64,11 @@ export PATH="/software/sse2/el9_gh200/manual/CUDA/13.0.3_580.126.20/bin:${PATH:-
 
 "$PY" -c "import torch, platform; print('arch', platform.machine(), 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
-if "$PY" -c "import molix.op" 2>/dev/null; then
-  echo "=== molix.op already importable; skip cmake ==="
-else
-  echo "=== building molnex_op in $BUILD ==="
-  cmake -S src/molix/op -B "$BUILD" -DMOLNEX_OP_ENABLE_CUDA=ON \
-    -DCMAKE_PREFIX_PATH="$("$PY" -c 'import torch; print(torch.utils.cmake_prefix_path)')"
-  cmake --build "$BUILD" -j
-fi
+echo "=== building molnex_op in $BUILD ==="
+cmake -S csrc -B "$BUILD" -DMOLNEX_OP_ENABLE_CUDA=ON \
+  -DCMAKE_PREFIX_PATH="$("$PY" -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+cmake --build "$BUILD" -j
+export MOLNEX_OP_LIBRARY_PATH="$PWD/$BUILD"
 
 # Map ARM → run_nve precision flags
 case "$ARM" in

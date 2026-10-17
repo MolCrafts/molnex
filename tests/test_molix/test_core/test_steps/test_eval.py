@@ -85,13 +85,19 @@ def _batch() -> dict[str, dict[str, torch.Tensor]]:
     return {"atoms": {"pos": pos}}
 
 
-def _make_trainer(*, loss_fn: LossFn | None, eval_step: object | None = None) -> Trainer:
+def _make_trainer(
+    *,
+    loss_fn: LossFn | None,
+    eval_step: object | None = None,
+    autocast: torch.dtype | None = None,
+) -> Trainer:
     torch.manual_seed(0)
     return Trainer(
         model=_StubModel(),
         loss_fn=loss_fn,
         optimizer_factory=lambda params: torch.optim.SGD(params, lr=0.1),
         eval_step=eval_step,
+        autocast=autocast,
     )
 
 
@@ -175,7 +181,7 @@ class TestDefaultEvalStep:
 
         assert len(recording.calls) == 1
         assert all(got is want for got, want in zip(recording.calls[0], (trainer, state, batch)))
-        assert outputs["loss"] is recording.results[0][0]
+        assert torch.equal(outputs["loss"], recording.results[0][0])
         assert outputs["predictions"] is recording.results[0][1]
 
     def test_forward_loss_marks_the_leaves_before_the_traced_body(self) -> None:
@@ -238,17 +244,14 @@ class TestDefaultEvalStep:
 
         step.on_eval_batch(trainer, TrainState(), _batch())
 
-        assert step.autocast_flags == [bool(config["use_amp"])]
         assert step.autocast_flags == [False]
 
     def test_seam_runs_inside_autocast_with_amp(self) -> None:
         step = _SpyEvalStep()
-        trainer = _make_trainer(loss_fn=_RecordingLoss(), eval_step=step)
-        trainer.set_precision("bf16-mixed")
+        trainer = _make_trainer(loss_fn=_RecordingLoss(), eval_step=step, autocast=torch.bfloat16)
 
         step.on_eval_batch(trainer, TrainState(), _batch())
 
-        assert step.autocast_flags == [bool(config["use_amp"])]
         assert step.autocast_flags == [True]
 
     def test_seam_sees_the_configured_grad_context(self) -> None:
@@ -260,3 +263,59 @@ class TestDefaultEvalStep:
 
         assert len(step.calls) == 1
         assert outputs["loss"].requires_grad is False
+
+
+class TestEvalReleasesTheGraph:
+    """Evaluation keeps no graph: what the step wrote onto the batch comes back detached."""
+
+    def _trainer(self, step: DefaultEvalStep) -> Trainer:
+        torch.manual_seed(0)
+        return Trainer(
+            model=Derivative(_Energy(), wrt=("atoms.pos",)),
+            loss_fn=_force_square_loss,
+            optimizer_factory=lambda params: torch.optim.SGD(params, lr=0.1),
+            eval_step=step,
+        )
+
+    def test_the_batch_and_the_loss_come_back_detached_with_grad_on(self) -> None:
+        # With grad on the op keeps the energy graph (create_graph) and the
+        # forces it writes carry it; a resident validation batch would hold it
+        # through training.
+        step = DefaultEvalStep()
+        batch = _frame()
+
+        outputs = step.on_eval_batch(self._trainer(step), TrainState(), batch)
+
+        assert outputs["loss"].grad_fn is None
+        assert not batch["atoms", "pos"].requires_grad
+        assert not batch["atoms", "forces"].requires_grad
+        assert not batch["graphs", "energy"].requires_grad
+        assert not any(
+            value.requires_grad for value in batch.values(include_nested=True, leaves_only=True)
+        )
+        assert outputs["predictions"] is batch
+
+    def test_release_replaces_attached_leaves_and_keeps_the_rest(self) -> None:
+        from molix.core.steps.eval import release
+
+        weight = torch.ones(2, requires_grad=True)
+        plain = torch.arange(4.0)[:2]  # a view: detach_() would refuse it
+        batch = TensorDict(
+            {
+                "a": TensorDict({"x": weight * 2.0, "v": plain}, batch_size=[2]),
+                "b": TensorDict({"leaf": torch.zeros(1, requires_grad=True)}, batch_size=[1]),
+            },
+            batch_size=[],
+        )
+        predictions = {"x": batch["a", "x"], "nested": {"y": weight * 3.0}, "note": "kept"}
+
+        release(batch)
+        release(predictions)
+
+        assert not any(
+            value.requires_grad for value in batch.values(include_nested=True, leaves_only=True)
+        )
+        assert batch["a", "v"] is plain
+        assert not predictions["x"].requires_grad
+        assert not predictions["nested"]["y"].requires_grad
+        assert predictions["note"] == "kept"

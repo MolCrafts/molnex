@@ -122,9 +122,12 @@ class TestCondenser:
         assert result.type_system.get(0).label == "[#6;D1]"
 
     def test_write_smarts_keys_then_def_type(self):
-        from molpy import BondType, ForceField
-        from molpy.core.atomistic import Atomistic
-        from molpy.io import write_smarts
+        from molpy import Atomistic
+        from molpy.ff.forcefield import BondType, ForceField
+        from molpy.perceive import SmartsPattern
+
+        def write_smarts(mol, handle):
+            return str(SmartsPattern.from_environment(mol, handle))
 
         mol = Atomistic()
         atoms = [mol.def_atom({"element": el}) for el in ("C", "C", "O")]
@@ -132,7 +135,7 @@ class TestCondenser:
         mol.def_bond(atoms[1], atoms[2])
         envs = [
             [
-                tuple(sorted((write_smarts(mol, b.itom), write_smarts(mol, b.jtom))))
+                tuple(sorted((write_smarts(mol, b.itom.handle), write_smarts(mol, b.jtom.handle))))
                 for b in mol.bonds
             ]
         ]
@@ -142,13 +145,11 @@ class TestCondenser:
             environments=envs,
         )
         ff = ForceField("t", "real")
-        ff.def_atomstyle("full")
-        ff.def_bondstyle("harmonic")
-        astyle = ff.get_style("atom", "full")
-        bstyle = ff.get_style("bond", "harmonic")
+        astyle = ff.def_style("atom", "full")
+        bstyle = ff.def_style("bond", "harmonic")
         for rec in result.type_system.records():
             si, sj = envs[0][int(result.assignment.row_indices[rec.support_ids[0]])]
             ai = astyle.get_type_by_name(si) or astyle.def_type(si)
             aj = astyle.get_type_by_name(sj) or astyle.def_type(sj)
-            bstyle.def_type(ai, aj, name=rec.label, k=rec.prototype["k"], r0=rec.prototype["r0"])
+            bstyle.def_type(rec.label, ai, aj, k=rec.prototype["k"], r0=rec.prototype["r0"])
         assert len(list(ff.get_types(BondType))) == 2

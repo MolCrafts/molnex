@@ -11,13 +11,15 @@ Provides embedding and feature extraction modules:
 from .angular import SphericalHarmonics
 from .covalent import covalent_radii
 from .cutoff import CosineCutoff, HalfCosineCutoff, PolynomialCutoff, TanhCutoff
-from .mlp import MomentNormalizedMLP, normalize2mom
-from .node import JointEmbedding, JointFeatureEmbedding, JointFeatureSpec
+from .geometry import edge_lengths, edge_vectors
+from .mlp import FFLayer, MomentNormalizedMLP, ScalarMLPFunction, normalize2mom
+from .node import JointEmbedding
 from .radial import (
     AgnesiTransform,
     BesselRBF,
     GaussianBasis,
     PolynomialBasis,
+    SincBesselRBF,
 )
 from .support import ChemicalSupportIndex
 
@@ -26,16 +28,19 @@ __all__ = [
     "BesselRBF",
     "ChemicalSupportIndex",
     "covalent_radii",
+    "edge_lengths",
+    "edge_vectors",
+    "FFLayer",
     "MomentNormalizedMLP",
     "normalize2mom",
     "CosineCutoff",
     "GaussianBasis",
     "HalfCosineCutoff",
     "JointEmbedding",
-    "JointFeatureEmbedding",
-    "JointFeatureSpec",
     "PolynomialBasis",
     "PolynomialCutoff",
+    "ScalarMLPFunction",
+    "SincBesselRBF",
     "SphericalHarmonics",
     "TanhCutoff",
 ]

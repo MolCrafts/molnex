@@ -9,6 +9,7 @@ from tensordict import TensorDict
 
 from molix.data import collate_molecules
 from molix.ff_export import LammpsAdapter, LammpsWriter
+from molix.ff_export.exceptions import UnsupportedTermError
 from molix.frame import TensorFrame
 from molpot.forcefield import ForceField
 from molpot.ir import ExclusionScales, NonbondedScaling
@@ -161,7 +162,49 @@ def _charges_only_forcefield() -> ForceField:
     )
 
 
+def _improper_system(k: float) -> tuple[ForceField, TensorDict]:
+    """A planar centre with one periodic improper of force constant *k*."""
+    ff = (
+        ForceField(name="OPLS", units="real")
+        .def_atomstyle("full")
+        .def_bondstyle("harmonic")
+        .def_improperstyle("periodic")
+        .with_params(
+            # One row per bond of the system below, as ``assign_types`` reads them.
+            bonds={
+                "k": torch.tensor([200.0, 200.0, 200.0], dtype=torch.float64),
+                "r0": torch.tensor([1.2, 1.4, 1.4], dtype=torch.float64),
+            },
+            impropers={
+                "k": torch.tensor([[k]], dtype=torch.float64),
+                "periodicity": torch.tensor([[2]]),
+                "phase": torch.tensor([[np.pi]], dtype=torch.float64),
+            },
+        )
+    )
+    system = collate_molecules(
+        [
+            frame(
+                Z=(6, 8, 7, 6),
+                pos=((0.0, 0.0, 0.0), (1.2, 0.0, 0.0), (-0.7, 1.2, 0.0), (-0.7, -1.2, 0.0)),
+                bonds=([0, 0, 0], [1, 2, 3]),
+                terms={"impropers": {"atomi": [0], "atomj": [1], "atomk": [2], "atoml": [3]}},
+            )
+        ]
+    )
+    return ff, system
+
+
 class TestLammpsWriter:
+    def test_write_settings_refuses_impropers_the_deck_would_omit(self, tmp_path):
+        """No improper section is written, so a field whose impropers carry energy
+        is refused; it used to export a deck without them (ledger F25)."""
+        ff, system = _improper_system(k=2.5)
+        with pytest.raises(UnsupportedTermError, match="improper"):
+            LammpsWriter().write_settings(
+                tmp_path / "s.ff", ff, system, types=ff.assign_types(system)
+            )
+
     def test_write_settings_bond_coeff(self, tmp_path):
         ff, system = _two_atom_system()
         types = ff.assign_types(system)

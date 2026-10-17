@@ -26,11 +26,13 @@ class LJParameterHead(nn.Module):
         min_sigma: Minimum sigma floor.
         max_sigma: Maximum sigma ceiling.
         init_epsilon: Epsilon at init. ``None`` → ``min_epsilon`` (zero well
-            depth). A near-floor well keeps ``E_LJ ≈ 0`` without being
-            degenerate.
-        init_sigma: Sigma at init (Å). A moderate value (~1 Å) keeps
-            ``dE/dε = (σ/r)¹² − 2(σ/r)⁶`` of order 1 on close contacts, so
-            the head has a gradient while ``ε(σ/r)¹²`` stays negligible.
+            depth). That floor keeps ``E_LJ ≈ 0`` on a clash, and it also
+            kills ``∂E/∂σ``, which is proportional to epsilon.
+        init_sigma: Sigma at init (Å). ``1`` Å keeps
+            ``∂E/∂ε = 4[(σ/r)¹² − (σ/r)⁶]`` of order 1 on an ~0.8 Å contact
+            and negligible on a relaxed pair (``r ≳ 2`` Å). A head that must
+            learn from equilibrium geometries passes a larger sigma together
+            with an epsilon off the floor.
     """
 
     def __init__(
@@ -43,8 +45,12 @@ class LJParameterHead(nn.Module):
         max_sigma: float = 5.0,
         init_epsilon: float | None = None,
         init_sigma: float = 1.0,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         if max_epsilon <= min_epsilon:
             raise ValueError(f"max_epsilon {max_epsilon} must exceed min_epsilon {min_epsilon}")
         if max_sigma <= min_sigma:
@@ -62,9 +68,9 @@ class LJParameterHead(nn.Module):
         if not min_sigma <= self.init_sigma <= max_sigma:
             raise ValueError(f"init_sigma {self.init_sigma} must lie in [{min_sigma}, {max_sigma}]")
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(feature_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2, dtype=config.ftype),
+            nn.Linear(hidden_dim, 2, dtype=dtype),
         )
         self._init_zero_energy()
 
@@ -133,14 +139,18 @@ class RepulsionParameterHead(nn.Module):
         hidden_dim: int = 64,
         min_eps: float = 1e-4,
         min_lam: float = 1e-4,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(feature_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2, dtype=config.ftype),
+            nn.Linear(hidden_dim, 2, dtype=dtype),
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
@@ -176,14 +186,18 @@ class ChargeTransferParameterHead(nn.Module):
         hidden_dim: int = 64,
         min_eps: float = 1e-4,
         min_lam: float = 1e-4,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.min_eps = min_eps
         self.min_lam = min_lam
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(feature_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 2, dtype=config.ftype),
+            nn.Linear(hidden_dim, 2, dtype=dtype),
         )
 
     def forward(self, node_features: torch.Tensor, **kwargs) -> dict[str, torch.Tensor]:
@@ -219,13 +233,17 @@ class ChargeHead(nn.Module):
         feature_dim: int,
         hidden_dim: int = 64,
         total_charge: float = 0.0,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.total_charge = total_charge
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(feature_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def forward(
@@ -280,15 +298,19 @@ class TSScalingHead(nn.Module):
         alpha_free: torch.Tensor,
         r_star_free: torch.Tensor,
         hidden_dim: int = 64,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = (
+            config.ftype if dtype is None else dtype
+        )  # transitional: goes with molix.config (2c)
         self.register_buffer("c6_free", c6_free)
         self.register_buffer("alpha_free", alpha_free)
         self.register_buffer("r_star_free", r_star_free)
         self.mlp = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, dtype=config.ftype),
+            nn.Linear(feature_dim, hidden_dim, dtype=dtype),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1, dtype=config.ftype),
+            nn.Linear(hidden_dim, 1, dtype=dtype),
         )
 
     def forward(

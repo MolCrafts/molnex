@@ -36,7 +36,7 @@ from molpot import Polarization
 from molpot.composition import Sonata, SonataSpec
 from molpot.heads import EdgeEnergyHead, PermMultipoleHead
 from molpot.potentials import EwaldMultipoleEnergy
-from molzoo import Allegro
+from molzoo.allegro import AllegroEncoder, AllegroSpec
 
 torch.manual_seed(0)
 
@@ -46,35 +46,37 @@ torch.manual_seed(0)
 # ---------------------------------------------------------------------------
 
 
-def _make_encoder(*, expose_tensor_track: bool = True, l_max: int = 2) -> Allegro:
-    return Allegro(
-        num_elements=10,
-        num_scalar_features=16,
-        num_tensor_features=4,
-        r_max=5.0,
-        num_bessel=8,
-        num_layers=2,
-        l_max=l_max,
-        type_embed_dim=16,
-        latent_mlp_depth=1,
-        latent_mlp_width=32,
-        avg_num_neighbors=12.0,
-        expose_tensor_track=expose_tensor_track,
+def _make_encoder(*, expose_tensor_track: bool = True, l_max: int = 2) -> AllegroEncoder:
+    return AllegroEncoder(
+        AllegroSpec(
+            atomic_numbers=[1, 6, 7, 8],
+            num_scalar_features=16,
+            num_tensor_features=4,
+            r_max=5.0,
+            num_bessels=8,
+            num_layers=2,
+            l_max=l_max,
+            radial_chemical_embed_dim=16,
+            allegro_mlp_hidden_layers_depth=1,
+            allegro_mlp_hidden_layers_width=32,
+            avg_num_neighbors=12.0,
+            expose_tensor_track=expose_tensor_track,
+        )
     )
 
 
 @pytest.fixture
-def encoder() -> Allegro:
+def encoder() -> AllegroEncoder:
     return _make_encoder()
 
 
 @pytest.fixture
-def encoder_no_tensor_track() -> Allegro:
+def encoder_no_tensor_track() -> AllegroEncoder:
     return _make_encoder(expose_tensor_track=False)
 
 
 @pytest.fixture
-def encoder_lmax1() -> Allegro:
+def encoder_lmax1() -> AllegroEncoder:
     return _make_encoder(l_max=1)
 
 
@@ -139,7 +141,7 @@ def batch_with_cell() -> TensorDict:
     return _make_batch(with_cell=True)
 
 
-def _short_range_head(encoder: Allegro) -> EdgeEnergyHead:
+def _short_range_head(encoder: AllegroEncoder) -> EdgeEnergyHead:
     return EdgeEnergyHead(
         input_dim=encoder.output_dim,
         hidden_dim=32,
@@ -172,7 +174,7 @@ def test_from_encoder_returns_wired_model(encoder):
 # ---------------------------------------------------------------------------
 
 
-def _stub_head(encoder: Allegro) -> PermMultipoleHead:
+def _stub_head(encoder: AllegroEncoder) -> PermMultipoleHead:
     return PermMultipoleHead(
         input_dim=encoder.output_dim,
         avg_num_neighbors=12.0,

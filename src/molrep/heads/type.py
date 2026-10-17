@@ -30,14 +30,21 @@ class TypeHead(nn.Module):
         dropout: Dropout rate.
     """
 
-    def __init__(self, hidden_dim: int, num_types: int, dropout: float = 0.0):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_types: int,
+        dropout: float = 0.0,
+        *,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         if num_types < 1:
             raise ValueError(f"num_types must be >= 1, got {num_types}")
         self.hidden_dim = hidden_dim
         self.num_types = num_types
 
-        ftype = config.ftype
+        ftype = config.ftype if dtype is None else dtype  # transitional (2c)
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim, dtype=ftype),
             nn.SiLU(),
@@ -52,6 +59,7 @@ class TypeHead(nn.Module):
         type_system: TypeSystem,
         *,
         dropout: float = 0.0,
+        dtype: torch.dtype | None = None,
     ) -> TypeHead:
         """Build a head whose ``num_types`` matches a condensed type system.
 
@@ -69,7 +77,7 @@ class TypeHead(nn.Module):
         n = type_system.n_types
         if n < 1:
             raise ValueError("TypeHead.from_type_system requires n_types >= 1")
-        return cls(hidden_dim=hidden_dim, num_types=n, dropout=dropout)
+        return cls(hidden_dim=hidden_dim, num_types=n, dropout=dropout, dtype=dtype)
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
         """Compute type logits from embeddings.
@@ -132,6 +140,7 @@ class MultiTypeHead(nn.Module):
         type_systems: Mapping[str, TypeSystem],
         *,
         dropout: float = 0.0,
+        dtype: torch.dtype | None = None,
     ) -> MultiTypeHead:
         """Build one head per condensed type system.
 
@@ -148,7 +157,7 @@ class MultiTypeHead(nn.Module):
             if ts.n_types < 1:
                 continue
             dim = hidden_dims if isinstance(hidden_dims, int) else hidden_dims[key]
-            heads[str(key)] = TypeHead.from_type_system(dim, ts, dropout=dropout)
+            heads[str(key)] = TypeHead.from_type_system(dim, ts, dropout=dropout, dtype=dtype)
         return cls(heads)
 
     @property

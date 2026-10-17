@@ -7,7 +7,7 @@ import math
 
 import pytest
 import torch
-from molpy import ForceField as MolpyForceField
+from molpy.ff.forcefield import ForceField as MolpyForceField
 from tensordict import TensorDict
 from torch import nn
 
@@ -221,13 +221,33 @@ class TestForceField:
         ``i j`` would address someone else's ε and σ. They also have to start
         with a letter: ``read_data`` refuses a bare ``1`` as a type label.
         """
-        from molpy import AngleType, AtomType, BondType
+        from molpy.ff.forcefield import AngleType, AtomType, BondType
 
         ff, system, masses = _water_ion_box()
         ff.realize(system, masses=masses)
         assert [t.name for t in ff.get_types(AtomType)] == ["t1", "t2", "t3", "t4"]
         assert [t.name for t in ff.get_types(BondType)] == ["b1"]
         assert [t.name for t in ff.get_types(AngleType)] == ["a1"]
+
+    def test_realize_writes_molrs_conventions(self):
+        """molrs prices LAMMPS's ``K (r − r0)²`` and ``K (θ − θ0)²`` with ``θ0`` in degrees.
+
+        The container stores ``½ k`` force constants and radians, so ``realize``
+        halves ``k`` and converts ``θ0``; handing the container's numbers over
+        unconverted doubled every exported bond energy (molrs 0.16).
+        """
+        from molpy.ff.forcefield import AngleType, BondType
+
+        ff, system, masses = _water_ion_box()
+        bonds, angles = ff.params("bonds"), ff.params("angles")
+        ff.realize(system, masses=masses)
+        (bond,) = ff.get_types(BondType)
+        (angle,) = ff.get_types(AngleType)
+        assert float(bond.params["k"]) == pytest.approx(0.5 * float(bonds["k"][0]))
+        assert float(bond.params["r0"]) == pytest.approx(float(bonds["r0"][0]))
+        assert float(angle.params["k"]) == pytest.approx(0.5 * float(angles["k"][0]))
+        theta0_deg = math.degrees(float(angles["theta0"][0]))
+        assert float(angle.params["theta0"]) == pytest.approx(theta0_deg)
 
     def test_realize_registers_the_assignment_it_is_given(self):
         """One typing per export, computed once and passed down.
@@ -248,7 +268,7 @@ class TestForceField:
         everything, so a ``realize`` that quietly typed the system again would
         register four types where one was asked for.
         """
-        from molpy import AngleType, AtomType, BondType
+        from molpy.ff.forcefield import AngleType, AtomType, BondType
 
         ff, system, masses = _water_ion_box()
         one_class = TypeAssignment(
@@ -308,16 +328,17 @@ class TestForceField:
             lj=ExclusionScales(0.0, 0.0, 0.5),
         )
         ff = ForceField(name="x", units="real", nonbonded_scaling=opls)
-        assert list(ff.special_bonds_lj) == [0.0, 0.0, 0.5]
-        assert list(ff.special_bonds_coul) == [0.0, 0.0, 0.5]
+        lj, coul = ff.special_bonds
+        assert list(lj) == [0.0, 0.0, 0.5]
+        assert list(coul) == [0.0, 0.0, 0.5]
 
         ff.nonbonded_scaling = NonbondedScaling()  # AMBER: q 1–4 = 5/6
-        assert ff.special_bonds_coul[2] == pytest.approx(5.0 / 6.0)
-        assert ff.special_bonds_lj[2] == 0.5
+        lj, coul = ff.special_bonds
+        assert coul[2] == pytest.approx(5.0 / 6.0)
+        assert lj[2] == 0.5
 
         clone = ff.clone()
-        assert list(clone.special_bonds_lj) == list(ff.special_bonds_lj)
-        assert list(clone.special_bonds_coul) == list(ff.special_bonds_coul)
+        assert clone.special_bonds == ff.special_bonds
 
     def test_setting_molpy_special_bonds_updates_the_scaling(self):
         """The mirror runs both ways, so the two spellings cannot drift apart."""

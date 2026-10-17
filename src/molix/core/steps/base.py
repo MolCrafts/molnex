@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from molix.autograd import Derivative
+import torch
+
+from molix.autograd import Derivative, Potential
 
 if TYPE_CHECKING:
     from molix.core.state import TrainState
@@ -22,10 +24,11 @@ def _mark_leaves(model: object, batch: Any) -> None:
     is served too. If the model exposes ``physics(batch)``, that runs first —
     Class-I topology bind, ForceField assembly, and construction of the
     :class:`~molix.autograd.Derivative` are host-side and cost 22 graph breaks
-    if they sit inside the traced region. Then finds the op the model runs —
-    the model itself, or the op it exposes as ``derivative`` — and calls
-    :meth:`~molix.autograd.Derivative.mark_leaves` when it has variables. A
-    model with no op, or an energy-only op (``wrt=()``), needs nothing.
+    if they sit inside the traced region. Then finds the op the model runs by
+    type — a :class:`~molix.autograd.Derivative` is the op, a
+    :class:`~molix.autograd.Potential` runs its ``derivative`` — and calls
+    :meth:`~molix.autograd.Derivative.mark_leaves` when it has variables. Any
+    other model, or an energy-only op (``wrt=()``), needs nothing.
     Outside the traced body on purpose: a leaf made inside the region leaks
     through the attached derivatives and breaks the graph on stock torch; a
     leaf made here is a graph input (:mod:`molix.autograd.derivative`).
@@ -38,10 +41,53 @@ def _mark_leaves(model: object, batch: Any) -> None:
     physics = getattr(model, "physics", None)
     if callable(physics):
         physics(batch)
-    op = model if isinstance(model, Derivative) else getattr(model, "derivative", None)
+    if isinstance(model, Derivative):
+        op: Derivative | None = model
+    elif isinstance(model, Potential):
+        op = model.derivative
+    else:
+        op = None
     op = getattr(op, "_orig_mod", op)
     if isinstance(op, Derivative) and op.wrt:
         op.mark_leaves(batch)
+
+
+def term_keys(namespace: str, objective: Any) -> tuple[tuple[str, str], ...]:
+    """``(namespace, "loss_<name>")`` per named term of *objective*, or ``()``.
+
+    An objective has named terms when it exposes ``names`` with more than one
+    entry and a ``terms(pred, target)`` method
+    (:class:`~molix.core.losses.WeightedLoss`).
+    """
+    return tuple((namespace, f"loss_{name}") for name in _named_terms(objective))
+
+
+def _named_terms(objective: Any) -> tuple[str, ...]:
+    """The term names of a combined objective; ``()`` for a loss with no parts to report."""
+    names = tuple(getattr(objective, "names", ()))
+    if not callable(getattr(objective, "terms", None)) or len(names) < 2:
+        return ()
+    return names
+
+
+def publish_terms(objective: Any, predictions: Any, batch: Any, into: Any) -> None:
+    """Write each named term of *objective* into *into* as ``loss_<name>``.
+
+    Reporting only, eager and under ``no_grad``: the weighted sum stays the one
+    thing differentiated. A combined objective watched only as a sum cannot say
+    which part is rising.
+
+    Args:
+        objective: The loss; one without named terms is skipped.
+        predictions: The model output the terms read.
+        batch: The batch the terms read their targets from.
+        into: The state namespace to write into.
+    """
+    if not _named_terms(objective):
+        return
+    with torch.no_grad():
+        for name, value in objective.terms(predictions, batch).items():
+            into[f"loss_{name}"] = value.detach()
 
 
 class Step(Protocol):

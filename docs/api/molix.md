@@ -1,5 +1,15 @@
 # molix API
 
+## Potentials and derivatives
+
+::: molix.autograd
+
+::: molix.autograd.potential
+
+::: molix.autograd.derivative
+
+::: molix.autograd.variables
+
 ## Training
 
 ::: molix.core.trainer
@@ -38,17 +48,13 @@
 
 ::: molix.io.extxyz
 
-## Storage
-
-::: molix.data
-
-::: molix.data.cache
+## Datasets
 
 ::: molix.data.dataset
 
-::: molix.data.frame_store
+::: molix.data.frame_dataset
 
-::: molix.data.frame_store_view
+::: molix.frame
 
 ## Force-field export
 

@@ -9,8 +9,14 @@ from tensordict import TensorDict
 from molpot.composition import LJParameterHead, PotentialComposer
 from molpot.pooling import EdgeToNodePooling, LayerPooling
 from molpot.potentials import LJ126
-from molrep.embedding.node import DiscreteEmbeddingSpec
-from molzoo import MACE, Allegro
+from molzoo.allegro import AllegroEncoder, AllegroSpec
+from molzoo.mace.encoder import MACEEncoder
+from molzoo.mace.spec import MACEMatpesSpec
+from tests.test_molzoo.test_mace.conftest import (
+    ATOMIC_ENERGIES,
+    ATOMIC_NUMBERS,
+    TINY_MATPES_KWARGS,
+)
 
 
 @pytest.fixture
@@ -54,6 +60,7 @@ def molecular_batch():
             pair_dist=pair_dist,
             batch_size=[6],
         ),
+        graphs=TensorDict(batch_size=[2]),
         batch_size=[],
     )
 
@@ -137,12 +144,12 @@ def test_potential_composer_aggregates_terms_and_derives_forces(molecular_batch)
 
 
 def test_integration_with_mace_encoder(molecular_batch):
-    encoder = MACE(
-        node_attr_specs=[DiscreteEmbeddingSpec(input_key="Z", num_classes=10, emb_dim=16)],
-        num_elements=10,
-        num_features=16,
-        r_max=5.0,
-        num_interactions=2,
+    encoder = MACEEncoder(
+        MACEMatpesSpec(
+            atomic_numbers=ATOMIC_NUMBERS,
+            atomic_energies=ATOMIC_ENERGIES,
+            **TINY_MATPES_KWARGS,
+        )
     )
     result = encoder(molecular_batch)
 
@@ -164,16 +171,18 @@ def test_integration_with_mace_encoder(molecular_batch):
 
 
 def test_integration_with_allegro_encoder(molecular_batch):
-    encoder = Allegro(
-        num_elements=10,
-        num_scalar_features=16,
-        num_tensor_features=8,
-        r_max=5.0,
-        num_layers=2,
-        type_embed_dim=16,
-        latent_mlp_depth=1,
-        latent_mlp_width=16,
-        avg_num_neighbors=4.0,
+    encoder = AllegroEncoder(
+        AllegroSpec(
+            atomic_numbers=[1, 6, 7, 8],
+            num_scalar_features=16,
+            num_tensor_features=8,
+            r_max=5.0,
+            num_layers=2,
+            radial_chemical_embed_dim=16,
+            allegro_mlp_hidden_layers_depth=1,
+            allegro_mlp_hidden_layers_width=16,
+            avg_num_neighbors=4.0,
+        )
     )
     result = encoder(molecular_batch)
 

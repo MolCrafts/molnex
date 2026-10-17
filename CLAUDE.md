@@ -156,8 +156,8 @@ built per call. Dynamic sizes are handled by fixed capacity + mask (the
 the MD default** (2026-09-11, spec `derivation-head-02-static-shapes`): the
 driver hands the derivative op the list's full capacity buffer every step,
 dead rows are `(0, 0)` self-loops at `molix.schema.dead_pair_shift(cutoff)`
-(shared by `NeighborList`, `MoleculePadder(max_atoms=, max_pairs=, …, max_graphs=, cutoff=)`
-and `StaticForward`), ghost atoms are killed by multiplying `atoms.mask` into
+(shared by `NeighborList` and
+`MoleculePadder(max_atoms=, max_pairs=, …, max_graphs=, cutoff=)`), ghost atoms are killed by multiplying `atoms.mask` into
 every per-atom energy before the graph sum (never a slice), and
 `Compiler(cuda_graphs=True)` is the MD compiler (GH200: 1.9 ms/step vs 21 ms
 eager at 256 atoms). **Training batches are capacity-first** (2026-09-14):
@@ -219,9 +219,9 @@ whether the tree is committed.
 | Package | Role | Key Patterns |
 |---------|------|-------------|
 | **molix** | Training infrastructure | Trainer, TrainState (dict), Step protocol, Hook lifecycle |
-| **molrep** | Representation learning | Embedding → Interaction → Readout pipeline, equivariance via cuEquivariance |
+| **molrep** | Representation learning | Generic blocks only: embeddings (geometry, radial, cutoff, spherical harmonics, MLPs), `interaction.product`, `molrep.cueq`, representation heads; equivariance via cuEquivariance |
 | **molpot** | Potential functions | BasePotential (nn.Module + ABC), Potentials (Class-I container), PotentialComposer; derivatives via `molix.autograd.Derivative` |
-| **molzoo** | Pre-built encoders and named models | Encoder recipes (MACE, Allegro, PiNet) and the learnable Class-I force field **Rondo**; physics heads/derivation stay in molpot |
+| **molzoo** | Pre-built encoders and named models | Model families (MACE, Allegro, PiNet2: spec → encoder → potential, each product a `molix.autograd.Potential`) and the learnable Class-I force field **Rondo**; physics heads stay in molpot |
 
 ### Industrial layout + test mirror (hard rules)
 
@@ -253,17 +253,58 @@ Source ↔ unit-test path mirror:
 src/<pkg>/<area>/<module>.py  →  tests/test_<pkg>/test_<area>/test_<module>.py
 ```
 
-Gate for the PiNet spine: `python scripts/check_test_mirror.py --strict-pinet`.
+Gate for the model spine: `python scripts/check_test_mirror.py --strict-spine`.
 See `.claude/notes/notes.md` §"Industrial module layout" for the full decision.
 
-PiNet package layout:
+Model package layout — every molzoo model has MACE's shape: a torch-free
+`spec.py` (pydantic, `extra="forbid"`, every default lives here), an
+`encoder.py` body exposing primitives (`ElementTable` mixin from
+`molzoo/encoder.py` for the element-table precondition), a `potential.py`
+product that **subclasses** the body (flat checkpoint keys) and
+`molix.autograd.Potential`, and, where official weights exist, `checkpoint.py`
+key tables + `utils.py` archive reader behind `.load(path, ...)`. A product
+has exactly two public methods and no layer between them: `energy(frame)` —
+the one method a model writes; it reads its columns straight off the frame,
+writes `atoms.energy` and `graphs.energy`, requires the `graphs` namespace
+(`B = frame["graphs"].batch_size[0]`, no host sync), and derives / detaches /
+validates nothing — and `forward = Derivative(self.energy, wrt)` built as the
+last line of `__init__`. No `energy_core` / `atomic_energy` /
+`configure_input_dtype` / `shifts=` in between (`input_dtype` is a constructor
+kwarg). Products take the typed spec object: `MaceMatpes(MACEMatpesSpec(...),
+wrt=(), energy_dtype=torch.float64, input_dtype=None)`,
+`AllegroPotential(AllegroSpec(...), wrt=())`, `PiNetPotential(PiNetSpec(),
+wrt=())`. Official loading: `MaceMatpes.load(path, *, config=None, wrt=(), ...)`
+→ `MaceArchive.read` → typed `MaceOfficialConfig` →
+`MACEMatpesSpec.from_official(cfg)` → `CheckpointRemap(matpes_keys,
+skip=MACE_SKIP)`; `AllegroPotential.load(path, *, wrt=(), tp_method=None)` over
+`NequipPackage.read(path) -> (state, AllegroSpec)`. `molzoo/__init__.py` is a
+docstring: import a family from its subpackage, eagerly (`from molzoo.mace
+import MaceMatpes`), no lazy tables. **A block that serves one model lives in
+that model's package** (`layers.py`; MACE also `heads.py`, `coupling.py`);
+only generic components and operators (MLPs, radial bases, cutoffs, spherical
+harmonics, edge geometry, scatter, `interaction.product`, `molrep.cueq`) live
+in molrep (operator ruling 2026-10-15; MACE blocks moved 2026-10-16).
+Equivariant operations use cuEquivariance only.
 
 ```
-src/molrep/interaction/pinet/   # pure GC blocks (no energy/force)
-src/molzoo/pinet/               # spec, geometry, encoder, potential, properties
+src/molix/autograd/potential.py    # Potential: abstract energy(frame); forward = the Derivative op
+src/molzoo/encoder.py              # ElementTable mixin (validate_elements, spent once eagerly)
+src/molzoo/{mace,pinet,allegro}/   # spec, encoder, potential, layers (+ heads / coupling / checkpoint / utils / properties)
+src/molzoo/checkpoint.py           # OfficialArchive + StubUnpickler + CheckpointRemap(table, *, on_unexpected, skip=())
+src/molrep/embedding/geometry.py   # edge_vectors / edge_lengths (the one owner)
 ```
 
 ## Build & Development
+
+**molnex runs in its own environment** — `.venv-x86_64` (login / CPU nodes) and
+`.venv-aarch64` (GH200), built by `scripts/env/build_env.sh [--fresh]` and used
+through `source scripts/env/activate.sh` (sets `PY`, and `PYTHONPATH` to molnex
+only). molrs is compiled in from local source as a release wheel and
+molpy / molhub / mollog / molcfg are installed non-editable, so edits to those
+working trees reach molnex only on a rebuild; `BUILT_FROM` records the source
+revisions. Never put the molpy / molhub / molrs trees on `PYTHONPATH` — that
+shadows the installed copies. The crate registry is molnex's own
+(`.cargo-home`), never a cache inside the molrs tree.
 
 ```bash
 # Install (editable, with C++ extensions via scikit-build-core + CMake >=4.0)
@@ -273,10 +314,10 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 
 # Run single test file
-python -m pytest tests/test_molzoo/test_mace.py -v
+python -m pytest tests/test_molzoo/test_mace/test_potential.py -v
 
 # Run single test
-python -m pytest tests/test_molzoo/test_mace.py::test_mace_forward -v
+python -m pytest tests/test_molzoo/test_mace/test_potential.py::TestMaceMatpes -v
 
 # Run with coverage
 python -m pytest tests/ --cov=src --cov-report=term-missing
@@ -284,7 +325,7 @@ python -m pytest tests/ --cov=src --cov-report=term-missing
 
 Python >=3.12 required (pyproject pins >=3.12). Requires `torch>=2.14` and `tensordict>=0.14` (always use latest stable PyTorch; the native op lib is built with C++20, which torch 2.14 headers require).
 
-GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** `src/molix/op/libmolnex_opLib.aarch64.so` against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
+GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** molnex's native op libraries (`csrc/` → `build/csrc-aarch64/{molix,cueq}/`, on `MOLNEX_OP_LIBRARY_PATH`) against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
 
 ### Test layout rules
 
@@ -359,7 +400,7 @@ Three spellings, deliberately different, because they cost different things:
 
 | Spelling | What | Cost |
 |---|---|---|
-| `frame["atoms"].nrows` | molpy `Block` **attribute** — this one block's length | free |
+| `frame["atoms"].n_rows` | molpy `Block` **attribute** — this one block's length | free |
 | `MyDataset.counted_tables = {"atoms": "_n_atoms"}` | **declaration** — this container already holds the per-row vector in that attribute | a read |
 | `MyDataset.count_rows(table)` | **verb** — the container has to measure, and may cache what it measured | a scan, once |
 | `BaseDataset.nrows_of(source, table)` | the one **request** every batch budget goes through | whichever of the three applies |
@@ -369,13 +410,15 @@ sample. That fallback is correct and is the slowest thing in a data path: on a
 four-million-row LMDB it is a quarter of an hour (measured 140-230 us/row), so
 a container that can do better must say so.
 
-There is deliberately **no** `dataset.nrows(table)`. A `Block.nrows` attribute
+There is deliberately **no** `dataset.nrows(table)`. A `Block.n_rows` attribute
 returning a scalar and a dataset method returning a vector would read the same
 at the call site and mean different things; the verb and the declaration keep
 them apart.
 
-`("pairs", "shifts")` is written by the MD bind path (`molix.md.NeighborList.build`)
-and read by `molzoo.mace` potentials; `("graphs", "cell")` is read by
+`("pairs", "shifts")` is written by the MD bind path (`molix.md.NeighborList.build`);
+no molzoo model reads it — they read the imaged `pairs.pair_diff` (value) with
+the gradient through `atoms.pos` (`molrep.embedding.geometry.edge_vectors`);
+no potential takes a `shifts=` argument. `("graphs", "cell")` is read by
 `molpot.composition.sonata` (stress). On the MD bind path the `pairs`
 namespace has `batch_size=[capacity]` with live pairs in `[0, num_pairs)`
 and dead padding beyond — the list owns `pairs` once bound.
@@ -422,7 +465,7 @@ sits (decision 2026-09-15):
 
 | layer | spelling | where |
 |---|---|---|
-| chemistry / data | `pairs` namespace, `pair_index` / `pair_diff` / `pair_dist`, `max_pairs`, `num_pairs`, `dead_pair_shift` | `TensorFrame` and the batch schema, collate, `MoleculePadder`, the samplers, `molix.data`, `molix.md`, `molix.engine`, all of `molpot`, `interface/` |
+| chemistry / data | `pairs` namespace, `pair_index` / `pair_diff` / `pair_dist`, `max_pairs`, `num_pairs`, `dead_pair_shift` | `TensorFrame` and the batch schema, collate, `MoleculePadder`, the samplers, `molix.data`, `molix.md`, `molix.deploy`, all of `molpot`, `interface/` |
 | ML / graph net | `edge_index` / `edge_diff` / `edge_attrs` / `edge_feats` as **parameter and local names** | `molrep` blocks, `molzoo` encoders, and the kwargs dicts they pass among themselves |
 
 The seam is explicit and lives in the encoder's first line —
@@ -498,13 +541,13 @@ friendly for fixed-schema molecular data.
 ### Module Dependency Graph
 
 ```
-molix.config (global dtype singleton)
+molix.config (global dtype singleton) · molix.autograd (Derivative, Potential)
     ↓
-molrep.embedding → molrep.interaction → molrep.readout
-    │  └── molrep.heads (ScalarHead, …)        │
+molrep.embedding (geometry / radial / cutoff / angular / mlp) · molrep.interaction.product · molrep.cueq
+    │  └── molrep.heads (ScalarHead, …)
     │            ↑ (molpot.heads → molrep.embedding)
-    ↓            │                              ↓
-molzoo (MACE, Allegro, PiNet encoders) ──→ molpot.heads
+    ↓            │
+molzoo (MACE / Allegro / PiNet2: spec → encoder (+ layers) → potential, a molix.autograd.Potential) ──→ molpot.heads
     ↓                                          ↓
 molpot.composition (PotentialComposer,    molpot.potentials
     Sonata, Sonata.from_encoder)               ↓
@@ -515,8 +558,10 @@ molix.data (BaseDataset/FrameDataset, collate, MoleculePadder, samplers, DataMod
 molix.frame (TensorFrame) · molix.neighbor (NeighborList)
     ↑ dataset acquisition (download / parse / preprocess / cache write) is MolHub's, not molnex's
 molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization scalars)
-molix.export (Exporter, AOTInductor .pt2) · molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution utils]
-molix.engine (EngineAdapter/EngineForward/StaticForward, export_for_lammps) ─→ interface/ (C++ pair_style molnex)
+molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution util]
+molix.deploy (SiteEnergyModel contract, SiteEnergyAdapter, DeployMetadata) ─┐
+molix.export (one module per format: aoti.package / load / custom_op_namespaces) ─┴─→ interface/
+csrc/ (native op libraries: molix/, cueq/) ─→ interface/: runtime/ (format loaders, engine-free) ← lammps/ (pair_style molnex)
 ```
 
 One documented exception to the one-way rule: `molix.ff_export` imports
@@ -525,10 +570,15 @@ One documented exception to the one-way rule: `molix.ff_export` imports
 the only `molix → molpot` edge, recorded in `.claude/notes/architecture.md`.
 
 Notes on cross-package edges (verified against imports):
-- `molzoo` consumes `molrep.readout`/`molrep.interaction` and `molpot.derivation`
-  (PiNet's energy/force head is co-located with the encoder by design;
-  `MACEMatpes` / `MACEOMol` are full energy/force checkpoint ports under the
-  same scoped exception — pending the mace-subpackage restructure spec).
+- `molzoo` consumes `molrep.embedding` / `molrep.interaction.product` /
+  `molrep.cueq` and `molpot.heads` / `molpot.potentials` — never
+  `molpot.derivation`; its energy products subclass `molix.autograd.Potential`
+  (each family's energy product — `MaceMatpes` / `MaceOmol` / `MacePolar`,
+  `AllegroPotential`, `PiNetPotential` — subclasses its encoder and is
+  co-located with it by design, the scoped exception in
+  `.claude/notes/architecture.md`). MACE-only blocks live in
+  `molzoo/mace/{layers,heads,coupling}.py`; molrep has no `readout` / `utils`
+  packages.
 - `molpot.heads` imports `molrep.embedding` (e.g. `heads/edge.py`) — the arrow
   runs heads→embedding, **not** readout→heads.
 - `molrep.heads` (`ScalarHead`, …) is a distinct sub-tree from `molpot.heads`.
@@ -539,17 +589,29 @@ Notes on cross-package edges (verified against imports):
   the `pinet-quant` project (`csmd` package); molnex keeps only the reusable MD
   engine (`molix.md`) and `molix.quant`.
 - `molix.md` (in-process Langevin velocity-Verlet driver) produces paired
-  trajectories; `molix.export` (`Exporter` — AOTInductor `.pt2`, with
-  `export_pretraced` for in-forward autograd force heads) and `molix.compile`
-  (`Compiler` — `torch.compile`, `cuda_graphs=True` preset) are leaf execution
-  utilities that wrap a trained model — nothing in the core training loop
-  imports them.
-- `molix.engine` is the engine-neutral export bridge: `EngineAdapter` /
-  `EngineForward` map a model onto the flat `(Z, pos, pair_index) -> (energy,
-  forces)` convention, `StaticForward` is the fixed-shape CUDA-graph-capturable
-  variant, and `export_for_lammps` is the LAMMPS preset. The engine-specific C++
-  (`pair_style molnex`, AOTI `ModelRunner`) lives in the repo-root `interface/`
-  — no per-model C++ there.
+  trajectories; `molix.compile` (`Compiler` — `torch.compile`,
+  `cuda_graphs=True` preset) is a leaf execution utility — nothing in the core
+  training loop imports it.
+- **Deployment is three decoupled layers (decision 2026-10-15): contract →
+  format → engine.** `molix.deploy` owns the engine-neutral contract —
+  `SiteEnergyModel` (`(Z, pos, pair_index, shifts, local_mask) -> (energy,
+  forces, site_energy, virial)`; zero `shifts` for staged ghost copies, real
+  lattice shifts for one process folding its periodic images onto its own
+  atoms), `SiteEnergyAdapter` (a molnex potential on it, with
+  `check`), `verify`, `example_inputs`, and `DeployMetadata` (`{name}.json`:
+  the model's own units, cutoff, species, dtype, receptive field, native op
+  libraries; versioned). `molix.export` holds **one module per format**
+  (`aoti`: `package` → `.pt2` + the non-ATen op namespaces it calls; ONNX etc.
+  would be siblings) and knows nothing of what a module computes or which
+  engine runs it. Callers compose adapter → `aoti.package` → metadata; there is
+  no one-call export façade. On the C++ side `interface/runtime/` loads a
+  format without knowing the engine, the native operator libraries it loads
+  are built from top-level `csrc/` (`csrc/molix`: molnex's own ops;
+  `csrc/cueq`: cuEquivariance's ops in C++ — internal only, git-ignored, never
+  published; upstream request NVIDIA/cuEquivariance#309), and
+  `interface/lammps/` is the only LAMMPS-aware layer; it converts the model's
+  units with LAMMPS' own `utils::get_conversion_factor`. AOTI only — no
+  TorchScript, no ML-IAP.
 
 ### State namespace contract
 
@@ -647,10 +709,10 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 
 ### Key Design Patterns
 
-- **Encoder-only molzoo**: Encoders take a batch `TensorDict` and write per-layer features `(N, layers, features)` under `atoms.node_features`; readout/potentials handled by molpot
-- **Pydantic configs**: All block configs use `BaseModel` with `ConfigDict(arbitrary_types_allowed=True)`
-- **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions always use cueq's indexed TP (conv fusion): global `indices_out` with `size_out=N`. Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message, and never add a local TP/CG kernel (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
-- **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...), wrt=("atoms.pos",))`). `MD` composes `Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. `ForceDerivation` stays only as the tensor-level `F = -dE/dpos` for `BasePotential` / `Sonata`; `HessianDerivation` owns its own leaf. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
+- **Encoder body + product**: an encoder's `forward(td)` takes the post-collate batch, writes per-layer features `(N, layers, features)` under `atoms.node_features` (`pairs.edge_features` for Allegro) and exposes its primitives as methods; the named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, …) subclass the body and `molix.autograd.Potential` and own only `energy(frame)` + `forward`; reusable physics heads stay in molpot. Element-table validation is `molzoo.encoder.ElementTable`, spent once on the first eager call and folded out under tracing.
+- **Pydantic specs**: molzoo model specs are torch-free `BaseModel`s with `ConfigDict(extra="forbid")` — typed fields and validators, no `getattr(spec, …, default)` duck typing; official-archive configs (`MaceOfficialConfig`, `NequipConfig`) use `extra="ignore"` and declare only the fields that are read; molpot head specs that carry tensors use `ConfigDict(arbitrary_types_allowed=True, frozen=True)`
+- **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions always use cueq's indexed TP (conv fusion): global `indices_out` with `size_out=N`. Build every cue op through `molrep.cueq` — kernel methods pinned, so CUDA never runs cue's PyTorch fallback; no `use_fallback` / `method="naive"`; CPU may fall back (operator rule 2026-10-15, notes topic `cue-kernels-only`). Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message, and never add a local TP/CG kernel (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
+- **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))`; base class `molix.autograd.Potential`, never `Derivative(<potential object>)`). `MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. `ForceDerivation` stays only as the tensor-level `F = -dE/dpos` for `BasePotential` / `Sonata`; `HessianDerivation` owns its own leaf. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
 - **Functional composition**: `PotentialComposer` chains pooling → parameter heads → potential terms → aggregation
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol
 - **Step protocol**: `DefaultTrainStep` / `DefaultEvalStep` wrap forward → loss → backward → optimizer; `forward_loss(trainer, state, batch)` (model forward + loss) is the one traced function and `Trainer.compile(step=True)` compiles it in place (`step=False` compiles the model only; a step whose traced body host-syncs declares `untraceable` and is refused by name). `MultiTaskTrainStep` reads the task label in the eager prologue, outside that body. `smoke` runs the same `forward_loss`. Spec `derivation-head-03-step-compile`.
@@ -682,11 +744,11 @@ which is the thing that is forbidden, not the type declaration.
 
 ### Adding New Components
 
-**New encoder** (molzoo): Implement `forward(td: TensorDict) -> TensorDict`, reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` back under `atoms.node_features`. Use `molrep` building blocks. Add paper reference.
+**New model family** (molzoo): a subpackage `molzoo/<family>/` in MACE's shape. `spec.py`: torch-free pydantic spec (`extra="forbid"`, every default here). `encoder.py`: the body, `class <Family>Encoder(ElementTable, nn.Module)` (`molzoo.encoder.ElementTable`), `__init__(spec)`, primitives as methods, `forward(td: TensorDict) -> TensorDict` reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` under `atoms.node_features`. `layers.py`: the blocks only this family uses (generic ones come from `molrep`). `potential.py`: `class <Family>Potential(Potential, <Family>Encoder)` taking `(spec, *, wrt=())`, implementing `energy(frame)` only and ending `__init__` with `self._derivative = Derivative(self.energy, wrt=wrt)`; official weights, if any, through a `checkpoint.py` key table + an `OfficialArchive` reader in `utils.py` behind `.load(path, *, wrt=(), ...)` and `CheckpointRemap(table, skip=...)`. Export eagerly from `molzoo/<family>/__init__.py`, never from `molzoo/__init__.py`. Add the paper reference and the spec under `src/molzoo/specs/` (mirrored to `docs/molzoo/specs/`).
 
-**New potential** (molpot): Inherit `BasePotential`, implement `forward() -> scalar energy Tensor`. Forces come from `ForceDerivation` / `BasePotential.calc_forces` (autograd) — `forward` must read positions via `pos=`/`_get_positions` so the energy can be differentiated as a function of positions.
+**New potential** (molpot): one class per molrs style under `molpot.potentials` (`bond.py`, `angle.py`, `dihedral.py`, `improper.py`, `pair.py`), registered with `@register`, built from the force field by `from_style` and reached through `Potentials.from_forcefield(ff)`; a bonded style implements `term_energy(x, **params)`, a pair style prices `pairs` under the field's `special_bonds`. Forces come from `molix.autograd.Derivative`. `BasePotential` (`forward() -> scalar`, `ForceDerivation`) is the fixed tabulated path (MD / export / OPLS-AA).
 
-**New embedding/interaction** (molrep): Pure `nn.Module`, use `cuequivariance` for equivariant layers.
+**New embedding/interaction** (molrep): only when at least two families use it — a block that serves one model lives in that model's `layers.py`. Pure `nn.Module`; build cue ops through `molrep.cueq`.
 
 ## Scientific Correctness Requirements
 
@@ -796,11 +858,39 @@ The 10-section structure of `<encoder>.md` is **immutable** — adding / removin
 See `.claude/notes/learnable-classical-ff.md`. Short form:
 
 0. **The named product is `Rondo`** (`src/molzoo/rondo/`, spec
-   `src/molzoo/specs/rondo.md`): `RondoForceField` + `RondoSpec` + `Rondo`
-   (the `Parameterizer` recipe) + `RondoPotential`. It supersedes
-   `espaloma_like_template` / `build_espaloma_like_model` / `ForceAwareModel`
-   in `scripts/` — a model does not live in `scripts/`.
-1. **Reuse first** — molnex `ForceField` **is** `molpy.ForceField` (subclass). No `to_molpy()`. Named product template is `OPLSAAForceField(ForceField)`; trainable fill is `Parameterizer(encoder, template=…)`; task mapping is `ForceFieldPredictions` — no `ForceField.class_i()` / `.opls()` façades. Override `to_potentials()` for torch; IO is `molpy.io` after `realize(system)`. Graph → SMARTS is `molpy.io.write_smarts` (molrs local-SMARTS). `Condenser` merges params inside those keys; types are registered with molpy `def_type`.
+   `src/molzoo/specs/rondo.md`), shaped like every other molzoo model:
+   `Rondo(forcefield, spec, wrt=("atoms.pos",))`, `forward = Derivative(energy, wrt)`.
+   The force field **is** the Hamiltonian — a molpy `ForceField` (molrs IR,
+   LAMMPS `K` without ½, degrees) declares styles / cutoff / mixing / Coulomb
+   constant / special bonds once; `Potentials.from_forcefield(ff)` is the one
+   factory. Rondo adds `ChemEncoder` (ByteFF channels), `Hybridization` and one
+   head per open parameter (`molpot.heads.classical`); three primitives —
+   `tables(frame)`, `energy(frame, tables=None, styles=None)`, `partial_hessian(frame, tables=None)`
+   — and **no training-stage arguments** (no `outputs=` / `trainable=` /
+   `energy_terms=` / `param_groups`; user ruling 2026-10-11). Which loss trains
+   which parameters is the training step's: `molix.core.steps.JointObjective(trainable=)`
+   detaches the other tables between `tables` and `energy`; the optimizer is
+   `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
+   (`JointTrainStep` + `JointDataModule`). `forward` writes `graphs.energy_pred`,
+   `atoms.forces_pred` and every table column (`bonds.k`, `bonds.k_ref`, …,
+   `atoms.charge`); DFT labels at `graphs.energy` / `atoms.forces` are restored.
+   Required input columns (MolHub writes them for THEMol): `atoms.formal_charge`,
+   `ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`;
+   `bonds.bond_type`, `in_ring`; `impropers` as three cyclic rows per centre.
+1. **Style potentials are molrs-verbatim** (`molpot.potentials`, one class per
+   molrs style, registered with `@register`): what is fixed about the form
+   (cutoff, mixing, special bonds, Coulomb constant) comes from the force field
+   at `from_style`; predicted parameters are call arguments
+   (`potential(frame, **params)`). Bonded potentials expose
+   `term_energy(x (M, w, 3), **params) -> (M,)` — the same call serves the energy
+   and the per-term partial Hessian. Pair potentials weight each pair by the
+   field's `special_bonds` entry of `pairs.relation` (0 none, 1/2/3 =
+   1-2/1-3/1-4, from the loader task `molix.data.PairRelation`), so the model
+   does no host work per batch. The fixed
+   (tabulated) path — molnex `ForceField` (a `molpy.ForceField` subclass),
+   `OPLSAAForceField`, `to_potentials()`, `Potentials` — stays for MD / export /
+   OPLS-AA and is not what a learned field uses. IO is `molpy.io` after
+   `realize(system)`; graph → SMARTS is `molpy.io.write_smarts`.
 2. **Generalize without `Foo(method=…)`** — single-responsibility types only; no multi-backend method switches on new APIs.
 3. **Non-diff sinks to molpy/molrs** — *enumeration*, SMARTS, classical non-torch E/F, FF tables under molpy (≥0.13, with `k_B` / `openmm` preset). Imports: `molpy` only (never bare `molrs`).
 4. **Batch topology lives in molix TensorDict**, not molpy Frame. Column form under namespaces, e.g. `batch["angles"]["atomi"]` / `batch["angles", "atomj"]` / `atomk` (propers/impropers add `atoml`; improper **center = atomi**). Stack to COO only at kernel call sites if a potential still wants `[arity, N]`.

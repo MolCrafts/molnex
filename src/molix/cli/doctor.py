@@ -215,7 +215,7 @@ class Doctor:
                 "Native ops",
                 Status.FAIL,
                 f"{type(exc).__name__}: {exc}",
-                hint="Rebuild the native op library (see molix/op/CMakeLists.txt).",
+                hint="Rebuild the native op library (see csrc/CMakeLists.txt).",
             )
         if registered:
             return CheckResult("Native ops", Status.OK, f"torch.ops.molix.{_PROBE_OP} registered")

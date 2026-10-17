@@ -752,7 +752,7 @@ class DatasetProfiler:
         return n_total
 
     def _table_nrows(self, data: object, table: str) -> tuple[torch.Tensor | None, str | None]:
-        """Exact per-record ``frame[table].nrows`` when the source is Frame-shaped."""
+        """Exact per-record ``frame[table].n_rows`` when the source is Frame-shaped."""
         try:
             counts = BaseDataset.nrows_of(data, table)
         except ValueError as exc:

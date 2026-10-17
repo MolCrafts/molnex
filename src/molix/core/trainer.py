@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 
 from molix import logger as _logger_mod
-from molix.config import config
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.hook import Hook
 from molix.core.state import Stage, TrainState, resolve
@@ -102,6 +101,7 @@ class Trainer:
         resume_from_checkpoint: str | Path | None = None,
         checkpoint_backend: CheckpointBackend | None = None,
         device: str | torch.device | None = None,
+        autocast: torch.dtype | None = None,
     ):
         """Initialize trainer.
 
@@ -154,14 +154,24 @@ class Trainer:
                    device-aligned batch. If ``None`` (default), the model is
                    left on its current device and batches are still moved to
                    whatever device the model currently sits on.
+            autocast: ``torch.autocast`` dtype the steps run the forward
+                   under — ``torch.bfloat16`` or ``torch.float16`` — or
+                   ``None`` (default) for no autocast. float16 gets a
+                   :class:`torch.amp.GradScaler`; bfloat16 needs none.
+                   Parameters keep the dtype the model was built with.
 
         Raises:
-            ValueError: If eval_every_n_steps is <= 0
+            ValueError: If eval_every_n_steps is <= 0, or ``autocast`` is not
+                ``None`` / ``torch.float16`` / ``torch.bfloat16``.
         """
         if eval_every_n_steps is not None and eval_every_n_steps <= 0:
             raise ValueError(f"eval_every_n_steps must be > 0, got {eval_every_n_steps}")
         if accumulate_grad_batches <= 0:
             raise ValueError(f"accumulate_grad_batches must be > 0, got {accumulate_grad_batches}")
+        if autocast not in (None, torch.float16, torch.bfloat16):
+            raise ValueError(
+                f"autocast must be None, torch.float16 or torch.bfloat16, got {autocast}"
+            )
         self.eval_every_n_steps = eval_every_n_steps
         self.accumulate_grad_batches = accumulate_grad_batches
         # Set by :meth:`stop`; read by the epoch and batch loops. A hook that wants
@@ -187,9 +197,10 @@ class Trainer:
         # lr scheduler
         self.lr_scheduler = lr_scheduler_factory(self.optimizer) if lr_scheduler_factory else None
 
-        # Scaler reflects current global config. Call :meth:`set_precision`
-        # to change it after construction.
-        self.scaler = torch.amp.GradScaler() if config["use_amp"] else None
+        #: The ``torch.autocast`` dtype the steps run the forward under, or
+        #: ``None``. Loss scaling is a float16 need only.
+        self.autocast = autocast
+        self.scaler = torch.amp.GradScaler() if autocast is torch.float16 else None
 
         # Checkpoint backend
         self._checkpoint_backend = checkpoint_backend or TorchSaveBackend()
@@ -221,30 +232,6 @@ class Trainer:
                     normalized.append((item, 100, idx))
             normalized.sort(key=lambda x: (x[1], x[2]))
             self.hooks = [hook for hook, _, _ in normalized]
-
-    def set_precision(self, mode: str) -> None:
-        """Configure training precision and sync the AMP ``GradScaler``.
-
-        Delegates to :meth:`molix.config.MolnexConfig.set_precision` (which
-        writes ``ftype`` / ``use_amp`` / ``amp_dtype`` into the global
-        :data:`molix.config.config`), then (re)creates ``self.scaler`` to
-        match ``config["use_amp"]`` and updates the checkpoint aggregate so
-        the new scaler is saved/loaded.
-
-        Must be called **before** ``trainer.train()``. For ``"fp64"`` the
-        model must additionally be constructed (or cast) with the new
-        ``ftype``, because layers bake in ``config["ftype"]`` at ``__init__``.
-
-        Args:
-            mode: One of ``"fp32"``, ``"fp64"``, ``"fp16-mixed"``,
-                ``"bf16-mixed"``.
-
-        Raises:
-            ValueError: If ``mode`` is not a supported preset.
-        """
-        config.set_precision(mode)
-        self.scaler = torch.amp.GradScaler() if config["use_amp"] else None
-        self._checkpoint.scaler = self.scaler
 
     def train(
         self,
@@ -444,8 +431,6 @@ class Trainer:
         cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
 
         model_device = next(self.model.parameters()).device
-        amp_enabled = bool(config["use_amp"])
-        amp_dtype = config["amp_dtype"]
         device_type = model_device.type
 
         try:
@@ -461,8 +446,8 @@ class Trainer:
                 batch = batch.to(model_device)
 
                 ctx = (
-                    torch.amp.autocast(device_type, dtype=amp_dtype)
-                    if amp_enabled
+                    torch.amp.autocast(device_type, dtype=self.autocast)
+                    if self.autocast is not None
                     else nullcontext()
                 )
                 self.optimizer.zero_grad(set_to_none=True)
@@ -566,7 +551,7 @@ class Trainer:
         self._log_setup_banner(datamodule, max_epochs, max_steps)
 
         # AMP without grad clip → occasional outlier-gradient metric spikes.
-        if config["use_amp"]:
+        if self.autocast is not None:
             from molix.hooks.training import GradClipHook as _GradClipHook
 
             if not any(isinstance(h, _GradClipHook) for h in self.hooks):
@@ -748,6 +733,14 @@ class Trainer:
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             return
         for step in (self.train_step, self.eval_step):
+            if getattr(step, "traced_bodies", None) is not None:
+                raise ValueError(
+                    f"{type(step).__name__} runs the model's tables / energy / "
+                    "partial_hessian methods, not its forward. DistributedDataParallel "
+                    "all-reduces only through forward, so under a process group this "
+                    "step would never synchronise gradients. Joint training is "
+                    "single-process."
+                )
             region = getattr(step, "_traced_forward_loss", None)
             if region is not None and getattr(region, "__self__", None) is not step:
                 raise ValueError(
@@ -798,7 +791,10 @@ class Trainer:
         objective truly cannot trace declares ``untraceable`` and is refused
         with ``step=True``. :class:`~molix.core.steps.multitask.MultiTaskTrainStep`
         reads the task label in the eager prologue, outside the traced body,
-        so ``step=True`` compiles one region per task.
+        so ``step=True`` compiles one region per task. A step that declares
+        ``traced_bodies`` (:class:`~molix.core.steps.joint.JointTrainStep`)
+        has one region per objective: each entry is compiled in place and
+        ``_traced_forward_loss`` is left alone.
 
         Can be chained after construction::
 
@@ -874,9 +870,16 @@ class Trainer:
                 )
         # A bound method stays callable with the same signature, and the
         # eager ``forward_loss`` (the leaf prologue) reads the instance
-        # attribute, so the swap is the whole install.
-        self.train_step._traced_forward_loss = compiler(self.train_step._traced_forward_loss)
-        self.eval_step._traced_forward_loss = compiler(self.eval_step._traced_forward_loss)
+        # attribute, so the swap is the whole install. A joint step's regions
+        # are its ``traced_bodies``: K explicit compiled objects, never one
+        # region specialised K times.
+        for target in (self.train_step, self.eval_step):
+            bodies = getattr(target, "traced_bodies", None)
+            if bodies is not None:
+                for name in tuple(bodies):
+                    bodies[name] = compiler(bodies[name])
+                continue
+            target._traced_forward_loss = compiler(target._traced_forward_loss)
         return self
 
     def _log_setup_banner(
@@ -889,10 +892,7 @@ class Trainer:
         n_params = sum(p.numel() for p in self.model.parameters())
         n_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         model_device = next((p.device for p in self.model.parameters()), torch.device("cpu"))
-        model_dtype = next((p.dtype for p in self.model.parameters()), config["ftype"])
-
-        use_amp = bool(config["use_amp"])
-        amp_dtype = config["amp_dtype"] if use_amp else None
+        model_dtype = next((p.dtype for p in self.model.parameters()), torch.float32)
 
         opt_name = type(self.optimizer).__name__
         lrs = [g.get("lr") for g in self.optimizer.param_groups]
@@ -929,8 +929,7 @@ class Trainer:
             f"    parameters   : {n_params:,} ({n_trainable:,} trainable)",
             "-" * 72,
             "  Precision",
-            f"    ftype        : {config['ftype']}",
-            f"    use_amp      : {use_amp}" + (f"  (amp_dtype={amp_dtype})" if use_amp else ""),
+            f"    autocast     : {self.autocast if self.autocast is not None else 'off'}",
             f"    matmul       : {torch.get_float32_matmul_precision()}",
             "-" * 72,
             "  Optimization",
@@ -1078,6 +1077,13 @@ class Trainer:
                     value = value.detach().clone()
                 totals[name] = value if name not in totals else totals[name] + value
                 counts[name] = counts.get(name, 0) + 1
+            # A step that evaluates with grad on (a force or Hessian loss)
+            # returns a loss and predictions that hold this batch's whole
+            # autograd graph, and the predictions are the sub-batches it wrote
+            # into. Kept in this loop variable they would stay alive through
+            # the next batch's forward, doubling the eval peak (a large tier
+            # that survived its smoke steps OOMed in its baseline eval).
+            del outputs
 
         for name, total in totals.items():
             self.state["eval"][name] = total / counts[name]

@@ -42,7 +42,7 @@ from typing import Any
 import torch
 from tensordict import TensorDict
 
-from molix.autograd import Derivative
+from molix.autograd import Derivative, Potential
 from molix.frame import TensorFrame, as_tensor_frame
 from molix.md.barostat import BerendsenBarostat
 from molix.md.forcefield import ForceField, MDForceField
@@ -122,7 +122,7 @@ class _TensorDictForce:
 
     def __init__(
         self,
-        pots: object,
+        pots: Potential,
         scale: float,
         *,
         md_dtype: torch.dtype | None = None,
@@ -169,7 +169,7 @@ class _TensorDictForce:
 
         Called once per :meth:`MD.run`, never once per step. Stores ``work``,
         re-resolves the live cell via :meth:`rebind_cell`, then composes the
-        one derivative op of the run — ``Derivative(pots,
+        one derivative op of the run — ``Derivative(pots.energy,
         wrt=("atoms.pos",))``, with ``"graphs.strain"`` added when a barostat
         wants the virial (``want_virial``). With a compiler set, the op is
         evaluated **once eagerly** on ``work`` first — the topology bind, the
@@ -195,7 +195,7 @@ class _TensorDictForce:
         self.rebind_cell()
         self._bind_edges(self._frame)
         wrt = (POS_KEY, STRAIN_KEY) if self.want_virial else (POS_KEY,)
-        self._op = Derivative(self._pots, wrt=wrt)  # type: ignore[arg-type]
+        self._op = Derivative(self._pots.energy, wrt=wrt)
         if self._compiler is not None:
             with torch.no_grad():
                 self(work[POS_KEY])
@@ -349,11 +349,7 @@ class _TensorDictForce:
         return copy
 
     def to_pots(self, device: torch.device) -> None:
-        to_fn = getattr(self._pots, "to", None)
-        if callable(to_fn):
-            moved = to_fn(device)
-            if moved is not None:
-                self._pots = moved
+        self._pots = self._pots.to(device)
 
     def __call__(self, pos: torch.Tensor) -> dict[str, torch.Tensor]:
         """Evaluate the potential at ``pos`` and return MD-unit results.
@@ -600,7 +596,7 @@ class MD:
         self._compiler: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None
 
     def set_forcefield(self, force: MDForceField) -> MD:
-        """Attach a :class:`molpy.ForceField` (including Class-I / OPLS subclasses).
+        """Attach a :class:`molpy.ff.forcefield.ForceField` (including Class-I / OPLS subclasses).
 
         Energy and forces from ``force.to_potentials()`` are converted from
         ``force.units`` (LAMMPS style name) to amu·Å²/fs² via
@@ -615,10 +611,18 @@ class MD:
             ``self``.
 
         Raises:
-            TypeError: If ``force`` is not a :class:`~molpy.ForceField`.
+            TypeError: If ``force`` is not a :class:`~molpy.ff.forcefield.ForceField`, or does
+                not satisfy :class:`~molix.md.forcefield.MDForceField` (a bare
+                ``molpy.ff.forcefield.ForceField`` has no ``to_potentials``).
         """
         if not isinstance(force, ForceField):
             raise TypeError(f"set_forcefield expects a ForceField, got {type(force).__name__}")
+        if not isinstance(force, MDForceField):
+            raise TypeError(
+                f"set_forcefield needs a field with a nullary to_potentials and a units "
+                f"label (MDForceField); {type(force).__name__} has no to_potentials — "
+                "use molpot.forcefield.ForceField"
+            )
         self.force = force
         self._wire()
         return self
@@ -687,7 +691,7 @@ class MD:
         """Compile the derivative op composed over the potential, once per run.
 
         The one compile seam of an MD run. :meth:`run` binds the working batch
-        and composes ``Derivative(pots, wrt=("atoms.pos"[, "graphs.strain"]))``
+        and composes ``Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))``
         over the freshly assembled potential; with a compiler set, that op is
         evaluated once eagerly — the topology bind, an mlip's element-table
         check and any k-space grid sizing are host-side work a trace cannot do
@@ -794,11 +798,10 @@ class MD:
                 )
             source = to_dtype(self.potential_dtype)
         pots = source.to_potentials()
-        if isinstance(pots, torch.nn.Module):
-            pots.eval()
-            pots.requires_grad_(False)
-            if self.potential_dtype is not None:
-                pots.to(self.potential_dtype)
+        pots.eval()
+        pots.requires_grad_(False)
+        if self.potential_dtype is not None:
+            pots.to(self.potential_dtype)
         scale = preset_energy_to_md(self.force.units)
         self._adapter = _TensorDictForce(
             pots,

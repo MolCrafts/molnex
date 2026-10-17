@@ -2,10 +2,11 @@
 
 from typing import Any
 
+import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
-from molix.config import config
+from molix.nn.activation import activation_from_name
 
 Key = str | tuple[str, ...]
 
@@ -40,6 +41,7 @@ class KeyedMLP(nn.Module):
         out_dim: int,
         activation: str = "silu",
         use_bias: bool = True,
+        dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
 
@@ -56,15 +58,12 @@ class KeyedMLP(nn.Module):
         self.input_key = self.config.input_key
         self.output_key = self.config.output_key
 
-        activation_map = {
-            "silu": nn.SiLU(),
-            "relu": nn.ReLU(),
-            "gelu": nn.GELU(),
-            "tanh": nn.Tanh(),
-        }
-        act_fn = activation_map[self.config.activation.lower()]
+        act_cls = activation_from_name(self.config.activation)
+        if act_cls is None:
+            raise ValueError("KeyedMLP needs an activation")
+        act_fn = act_cls()
 
-        ftype = config.ftype
+        ftype = dtype
 
         layers: list[nn.Module] = []
         layers.append(

@@ -3,6 +3,7 @@
 Molix is the canonical base package for shared NN utilities, ops, and training.
 """
 
+import os
 import platform
 import sys
 from pathlib import Path
@@ -11,14 +12,37 @@ import torch
 
 _lib_loaded = False
 
+#: Rebuild instructions shown when the native library is missing or stale.
+_BUILD_HINT = (
+    "Build it from csrc/ (out of source) and put the build directory on "
+    "MOLNEX_OP_LIBRARY_PATH:\n"
+    "  cmake -S csrc -B build/csrc-$(uname -m) -DMOLNEX_OP_ENABLE_CUDA=ON "
+    "-DTorch_DIR=$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')/Torch\n"
+    "  cmake --build build/csrc-$(uname -m) -j   # -> build/csrc-<arch>/molix/\n"
+    "(scripts/env/activate.sh sets MOLNEX_OP_LIBRARY_PATH; drop "
+    "-DMOLNEX_OP_ENABLE_CUDA=ON for a CPU-only build.)"
+)
 
-def _op_lib_path() -> Path:
-    """Op-library path for the running machine.
 
-    The build (``op/CMakeLists.txt``) tags the artifact with the target
-    architecture — ``libmolnex_opLib.<machine>.so`` (e.g. ``...x86_64.so``,
-    ``...aarch64.so``) — so per-arch builds coexist in one in-source ``op/``
-    directory.
+def _op_library_dirs() -> list[Path]:
+    """Where the native op library is looked for, in order.
+
+    Each directory of ``MOLNEX_OP_LIBRARY_PATH`` (``os.pathsep``-separated —
+    the variable molnex's C++ runtime reads too), then this package's ``lib/``,
+    where a wheel installs it.
+    """
+    listed = os.environ.get("MOLNEX_OP_LIBRARY_PATH", "")
+    return [Path(d) for d in listed.split(os.pathsep) if d] + [
+        Path(__file__).resolve().parent / "lib"
+    ]
+
+
+def _op_lib_path() -> Path | None:
+    """The native op library for the running machine, or ``None`` if not built.
+
+    ``csrc/molix/CMakeLists.txt`` tags the file with the target architecture —
+    ``libmolnex_opLib.<machine>.so`` — so builds for several machines can share
+    a directory.
     """
     if sys.platform == "win32":
         prefix, ext = "", "pyd"
@@ -26,16 +50,18 @@ def _op_lib_path() -> Path:
         prefix, ext = "lib", "dylib"
     else:
         prefix, ext = "lib", "so"
-    op_dir = Path(__file__).resolve().parents[0] / "op"
-    arch = platform.machine()  # 'x86_64', 'aarch64', ... — matches CMAKE_SYSTEM_PROCESSOR
-    return op_dir / f"{prefix}molnex_opLib.{arch}.{ext}"
+    name = f"{prefix}molnex_opLib.{platform.machine()}.{ext}"
+    for directory in _op_library_dirs():
+        if (directory / name).is_file():
+            return directory / name
+    return None
 
 
 def _load_ops_library() -> None:
-    """Load the C++ ops library when present and ABI-compatible.
+    """Load the native op library when present and ABI-compatible.
 
     Pure-Python call paths (e.g. ClassicalIMM energy training) do not need the
-    native neighbour/MD ops. A missing or ABI-mismatched ``.so`` (common when
+    native neighbour/MD ops. A missing or ABI-mismatched library (common when
     switching between CPU and CUDA torch wheels) therefore **warns** rather than
     hard-failing import — :func:`ensure_op_registered` still raises for callers
     that actually need a named op.
@@ -45,15 +71,13 @@ def _load_ops_library() -> None:
         return
 
     candidate = _op_lib_path()
-    if not candidate.exists():
+    if candidate is None:
         import warnings
 
-        op_src = candidate.parents[0]
+        searched = ", ".join(str(d) for d in _op_library_dirs())
         warnings.warn(
             f"molix native op library not found for machine '{platform.machine()}' "
-            f"at {candidate}. Pure-Python paths still work; rebuild for MD/C++ ops:\n"
-            f"  cmake -S {op_src} -B {op_src}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
-            f"  cmake --build {op_src}/build -j",
+            f"(searched {searched}). Pure-Python paths still work. " + _BUILD_HINT,
             stacklevel=2,
         )
         return
@@ -76,23 +100,17 @@ def _load_ops_library() -> None:
 def ensure_op_registered(op_name: str) -> None:
     """Ensure a named ``torch.ops.molix`` op is registered in this process.
 
-    This is a defensive helper for editable installs, worker subprocesses,
-    and import paths that reach ``molix.F`` modules before callers have
-    imported the top-level ``molix`` package explicitly.
+    This is a defensive helper for worker subprocesses and import paths that
+    reach ``molix.F`` modules before callers have imported the top-level
+    ``molix`` package explicitly.
     """
     _load_ops_library()
     if hasattr(torch.ops.molix, op_name):
         return
-
-    candidate = Path(__file__).resolve().parents[0] / "op"
     raise RuntimeError(
         f"molix native op 'molix::{op_name}' is not registered after loading "
-        f"the native library from {candidate}. "
-        "The shared library is likely stale relative to the Python sources. "
-        "Rebuild it with:\n"
-        f"  cmake -S {candidate} -B {candidate}/build -DMOLNEX_OP_ENABLE_CUDA=ON\n"
-        f"  cmake --build {candidate}/build -j\n"
-        "(drop -DMOLNEX_OP_ENABLE_CUDA=ON for CPU-only builds.)"
+        f"the native library ({_op_lib_path()}). It is missing or stale relative "
+        "to the Python sources. " + _BUILD_HINT
     )
 
 
@@ -106,7 +124,6 @@ from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBacken
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
 from molix.core.trainer import Trainer
-from molix.export import Exporter
 from molix.hooks import JournalHook, ProfilerHook
 
 __all__ = [
@@ -115,7 +132,6 @@ __all__ = [
     "Compiler",
     "Derivative",
     "ExplainSummary",
-    "Exporter",
     "JournalHook",
     "MAELoss",
     "MSELoss",

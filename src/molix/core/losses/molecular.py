@@ -26,14 +26,14 @@ static shape/key access (keeps ``torch.compile`` graphs stable).
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 
-from molix.config import config
 from molix.core.losses.energy import MSELoss
+from molix.schema import ENERGY_PRED_KEY, FORCES_PRED_KEY, NONBONDED_FORCES_KEY
 
 __all__ = [
     "AtomicChargeLoss",
@@ -43,6 +43,7 @@ __all__ = [
     "PartialHessianLoss",
     "ProjectedInternalHessianLoss",
     "ScaleNormalizedLoss",
+    "StationaryForceLoss",
     "TorsionProfileLoss",
     "center_by_group",
     "energy_force_mse",
@@ -191,6 +192,16 @@ def _prediction_key(key: str | tuple[str, str]) -> str | tuple[str, str]:
 def _read_prediction(pred: Any, key: str | tuple[str, str]) -> Any:
     """Read one column from a flat dict or a nested TensorDict."""
     return pred[key]
+
+
+def _prediction_names(pred: Any) -> list[str]:
+    """The top-level keys of *pred*, for a missing-prediction message.
+
+    ``sorted(pred)`` is not this: iterating a ``TensorDict`` with an empty
+    batch size raises ``StopIteration`` inside the generator, which surfaces
+    as a ``RuntimeError`` in place of the ``KeyError`` the caller promised.
+    """
+    return sorted(str(key) for key in pred.keys())
 
 
 def energy_loss(
@@ -578,8 +589,7 @@ class ParsleyEnergyWeight(nn.Module):
     Weights are constants of the objective, never a gradient path: the input is
     detached and the returned tensor has ``requires_grad=False``. It is returned
     in the **input** dtype; ``denom`` / ``upper`` are non-learnable buffers
-    registered at :data:`~molix.config.config` precision so they ride ``.to()``
-    and ``state_dict``.
+    registered at ``dtype`` so they ride ``.to()`` and ``state_dict``.
 
     Units: ``denom`` / ``upper`` and the input ``ΔE`` are kcal/mol; the weights
     are dimensionless. The eq.-3 ``1/dE²`` prefactor is **not** applied here —
@@ -599,14 +609,16 @@ class ParsleyEnergyWeight(nn.Module):
     denom: torch.Tensor
     upper: torch.Tensor
 
-    def __init__(self, *, denom: float = 1.0, upper: float = 5.0) -> None:
+    def __init__(
+        self, *, denom: float = 1.0, upper: float = 5.0, dtype: torch.dtype = torch.float32
+    ) -> None:
         super().__init__()
         if denom <= 0:
             raise ValueError(f"denom must be positive (kcal/mol), got {denom!r}")
         if upper < denom:
             raise ValueError(f"upper must be >= denom, got upper={upper!r} denom={denom!r}")
-        self.register_buffer("denom", torch.tensor(float(denom), dtype=config.ftype))
-        self.register_buffer("upper", torch.tensor(float(upper), dtype=config.ftype))
+        self.register_buffer("denom", torch.tensor(float(denom), dtype=dtype))
+        self.register_buffer("upper", torch.tensor(float(upper), dtype=dtype))
 
     def forward(self, relative_energies: torch.Tensor) -> torch.Tensor:
         """Evaluate the three-branch weight on relative in-scan energies.
@@ -824,20 +836,22 @@ class ChargeMSELoss(nn.Module):
 class ScaleNormalizedLoss(nn.Module):
     """Wrap a loss as the dimensionless ``L / s²`` used by ``WeightedLoss``.
 
-    ``scale`` is a registered buffer (moves with ``.to()`` / ``state_dict``),
-    not an ``nn.Parameter``. The caller supplies the training-set statistic
+    ``scale`` is a registered buffer at ``dtype`` (moves with ``.to()`` /
+    ``state_dict``), not an ``nn.Parameter``. The caller supplies the training-set statistic
     ``s``; this module does not scan a dataset.
 
     Units: ``scale`` has the same physical unit as the inner residual so
     that ``L / scale²`` is dimensionless.
     """
 
-    def __init__(self, loss: nn.Module, scale: float) -> None:
+    def __init__(
+        self, loss: nn.Module, scale: float, *, dtype: torch.dtype = torch.float32
+    ) -> None:
         super().__init__()
         if scale == 0:
             raise ValueError("scale must be non-zero")
         self.loss = loss
-        self.register_buffer("scale", torch.tensor(float(scale), dtype=config.ftype))
+        self.register_buffer("scale", torch.tensor(float(scale), dtype=dtype))
         self.scale: torch.Tensor
 
     def forward(self, pred: Any, target: Any) -> torch.Tensor:
@@ -936,8 +950,8 @@ class PartialHessianLoss(nn.Module):
         """
         if self.key not in pred:
             raise KeyError(
-                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
-                "for it (Rondo(outputs=('partial_hessian',)))"
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; ask "
+                "the model for it (Rondo(outputs=('partial_hessian',)))"
             )
         blocks = _read_prediction(pred, self.key)
         if "hessian_pairs" not in batch.keys():
@@ -1019,14 +1033,186 @@ class ReferenceShiftPrior(nn.Module):
         """
         if self.key not in pred:
             raise KeyError(
-                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
-                "for it (Rondo(outputs=(..., 'angle_theta0_residual')))"
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; ask "
+                "the model for it (Rondo(outputs=(..., 'angle_theta0_residual')))"
             )
         shift = _read_prediction(pred, self.key).reshape(-1)
         block = batch[self.namespace]
         live = block.get("mask")
         weight = torch.ones_like(shift) if live is None else live.reshape(-1).to(shift.dtype)
         return (shift.pow(2) * weight).sum() / weight.sum().clamp(min=1.0)
+
+
+class LogRatioPrior(nn.Module):
+    """Harmonic prior on the log-ratio of a predicted column to its reference column.
+
+    Mean of ``log(value / reference)²`` over the live rows of one namespace —
+    e.g. a Lennard-Jones ``sigma`` against the GAFF2 well the head started on
+    (``atoms.sigma`` / ``atoms.sigma_ref``). Weighted (``WeightedLoss``), it is
+    negligible wherever the data identifies the parameter and decides it where
+    the data is flat — ByteFF's ``Sigma_MSE`` / ``Epsilon_MSE`` regression to
+    GAFF2 (``loss.py:410-417``), in the log so a factor of two costs the same on
+    a 1 Å well as on a 4 Å one.
+
+    Both columns are read from the same batch (:class:`~molzoo.rondo.Rondo`
+    writes a table's parameters beside their references), so a prediction that
+    did not run the head is a ``KeyError``, never a silent zero.
+
+    A padded row is excluded by weight, and its two columns are replaced by
+    ``1`` **before** the log: a ghost atom's reference is ``0`` and its
+    prediction ``0 · exp(raw)``, and ``0 · log(0 / 0)`` is ``NaN`` in the
+    forward and in the backward alike — masking after the log would poison the
+    gradient of every head weight through the dead rows.
+
+    Units: dimensionless.
+
+    Args:
+        value_key: ``(namespace, column)`` of the predicted parameter.
+        reference_key: ``(namespace, column)`` of its reference.
+        namespace: Batch namespace whose ``mask`` marks the live rows.
+        mask: Column on *namespace* marking live rows; absent means all live.
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://arxiv.org/abs/2408.12817
+    """
+
+    def __init__(
+        self,
+        value_key: str | tuple[str, str],
+        reference_key: str | tuple[str, str],
+        *,
+        namespace: str = "atoms",
+        mask: str = "mask",
+    ) -> None:
+        super().__init__()
+        self.value_key = _prediction_key(value_key)
+        self.reference_key = _prediction_key(reference_key)
+        self.namespace = str(namespace)
+        self.mask = str(mask)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean squared log-ratio over the live rows.
+
+        Args:
+            pred: Mapping carrying the ``(M,)`` value under :attr:`value_key`
+                and its reference under :attr:`reference_key`.
+            batch: Post-collate batch; ``batch[namespace][mask]`` when padded.
+
+        Returns:
+            Scalar loss, dimensionless.
+
+        Raises:
+            KeyError: Either column is absent.
+            ValueError: The two columns disagree in shape.
+        """
+        for key in (self.value_key, self.reference_key):
+            if key not in pred:
+                raise KeyError(
+                    f"{key!r} is not among the predictions {_prediction_names(pred)}; the "
+                    "head that writes the parameter and its reference has to run first"
+                )
+        value = _read_prediction(pred, self.value_key).reshape(-1)
+        reference = _read_prediction(pred, self.reference_key).reshape(-1).to(value.dtype)
+        if value.shape != reference.shape:
+            raise ValueError(
+                f"{self.value_key!r} {tuple(value.shape)} and {self.reference_key!r} "
+                f"{tuple(reference.shape)} disagree; both are one value per row"
+            )
+        block = batch[self.namespace]
+        live = block.get(self.mask)
+        weight = torch.ones_like(value) if live is None else live.reshape(-1).to(value.dtype)
+        alive = weight > 0
+        one = torch.ones_like(value)
+        ratio = torch.where(alive, value, one) / torch.where(alive, reference, one)
+        return (torch.log(ratio).pow(2) * weight).sum() / weight.sum().clamp(min=1.0)
+
+
+class NormPrior(nn.Module):
+    """Lp-norm prior toward zero on a predicted parameter table — ByteFF's ``l1_norm``.
+
+    Mean of ``|value|**p`` over every element of the live rows of one table,
+    e.g. the proper-torsion amplitudes ``propers.k`` ``(M, T)``: ByteFF's
+    ``TorsionLossType.l1_norm`` (``loss.py:134``, ``torch.mean(abs(k))``) used as
+    the torsion dataset's auxiliary loss — "L1-norm regularization was applied
+    to the force constants of proper torsions to restrain redundant degrees of
+    freedom" (paper §2.4, Table 1). Weighted (``WeightedLoss`` or a
+    ``JointObjective`` weight), it is a constant pull of ``weight / (M·T)`` per
+    element toward zero: negligible on an amplitude the profiles identify,
+    decisive on one they only wiggle.
+
+    **Why a torsion stage needs it.** A scan measures one dihedral; every other
+    proper of the molecule turns a little as the constrained conformers relax,
+    and six free amplitudes per row let the profile loss fit those wiggles with
+    arbitrarily large constants that nothing in the stage prices back — the
+    hessian-set objectives detach ``propers.k`` — while they put forces and
+    curvature on every QM minimum (GH200 3748659: Σn²|k| median 9 → 34 in
+    2 000 steps, the improper amplitudes driven to their floor, N3 θ0 off by
+    13°). The L1 norm is the sparsity prior that keeps the redundant terms at
+    zero.
+
+    Units: the key's, to the power *p*.
+
+    Args:
+        key: Prediction key holding the ``(M,)`` or ``(M, T)`` table.
+        namespace: Batch namespace whose *mask* column marks the live rows.
+        mask: Live-row column on *namespace*; absent means every row is live.
+        p: The norm's power, ``1`` (L1) or ``2`` (L2).
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://arxiv.org/abs/2408.12817
+    """
+
+    def __init__(
+        self,
+        key: str | tuple[str, str] = ("propers", "k"),
+        *,
+        namespace: str = "propers",
+        mask: str = "mask",
+        p: int = 1,
+    ) -> None:
+        super().__init__()
+        if int(p) not in (1, 2):
+            raise ValueError(f"p is the norm's power, 1 or 2, got {p!r}")
+        self.key = _prediction_key(key)
+        self.namespace = str(namespace)
+        self.mask = str(mask)
+        self.p = int(p)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean ``|value|**p`` over the elements of the live rows.
+
+        Args:
+            pred: Mapping carrying the ``(M,)`` / ``(M, T)`` table under :attr:`key`.
+            batch: Post-collate batch; ``batch[namespace][mask]`` when padded.
+
+        Returns:
+            Scalar loss.
+
+        Raises:
+            KeyError: The prediction is absent.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; the "
+                "head that writes the table has to run first"
+            )
+        value = _read_prediction(pred, self.key)
+        rows = value.shape[0]
+        value = value.reshape(rows, -1)
+        block = batch[self.namespace]
+        live = block.get(self.mask)
+        weight = (
+            torch.ones(rows, dtype=value.dtype, device=value.device)
+            if live is None
+            else live.reshape(-1).to(value.dtype)
+        )
+        norm = value.abs() if self.p == 1 else value.pow(2)
+        total = (norm * weight[:, None]).sum()
+        return total / (weight.sum() * value.shape[1]).clamp(min=1.0)
 
 
 class AtomicChargeLoss(nn.Module):
@@ -1082,8 +1268,8 @@ class AtomicChargeLoss(nn.Module):
         """
         if self.key not in pred:
             raise KeyError(
-                f"{self.key!r} is not among the predictions {sorted(pred)}; ask the model "
-                "for it (Rondo(outputs=('charge',)))"
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; ask "
+                "the model for it (Rondo(outputs=('charge',)))"
             )
         charges = _read_prediction(pred, self.key).reshape(-1)
         atoms = batch["atoms"]
@@ -1207,7 +1393,9 @@ class BoltzmannProfileLoss(nn.Module):
                 the shapes disagree.
         """
         if self.pred_key not in pred:
-            raise KeyError(f"{self.pred_key!r} is not among the predictions {sorted(pred)}")
+            raise KeyError(
+                f"{self.pred_key!r} is not among the predictions {_prediction_names(pred)}"
+            )
         energy = _read_prediction(pred, self.pred_key).reshape(-1)
         graphs = batch["graphs"]
         reference = graphs.get(self.target_key)
@@ -1301,3 +1489,213 @@ class BoltzmannProfileLoss(nn.Module):
         # no graph landed in contributes neither a numerator nor a denominator.
         occupied = (counts > 0).to(energy.dtype)
         return (per_profile * occupied).sum() / occupied.sum().clamp(min=1.0)
+
+
+class StationaryForceLoss(nn.Module):
+    """Mean squared force toward **zero** at a QM minimum — ByteFF's ``Force_MSE``.
+
+    A relaxed geometry is a stationary point of the reference surface, so the
+    molecular-mechanics force there is the residual itself: no label column is
+    read. ByteFF prices the bond and angle equilibria (``r0``, ``theta0``) this
+    way in its first stage (``loss.py:367-400``, ``Force_MSE`` /
+    ``Force_Soft_MSE``), beside the partial-Hessian fit of the stiffnesses.
+
+    The value is ``sum_live |F_i|**2 / (3 * max(n_live, 1))`` — the mean over
+    every live force component — where a row is live when the namespace's mask
+    column says so (every row when the column is absent). A padded ghost atom
+    is excluded by multiplying its weight, never by a gather: the shape stays
+    static and the mean's divisor does not move with how empty the batch was.
+
+    With *soft_max* set the mean becomes :func:`log_knee` of itself — the loss
+    below the knee, ``m (1 + log(L/m))`` above — ByteFF's ``Force_Soft_MSE``
+    gradient written as the function that has it: past the knee the gradient is
+    ``m / L``, so one frame whose Lennard-Jones wall is still wrong is pulled
+    back slowly instead of owning the batch.
+
+    Units are the force's squared: kcal² mol⁻² Å⁻² on the Class-I path, so
+    *soft_max* is dimensionful.
+
+    With *skip_above* set, a molecule in which any component of the non-bonded
+    force alone — the column at *skip_key*, written by the step beside the
+    full force — exceeds it leaves the loss whole: ByteFF's ``skip_large_nb``
+    (``loss.py:373-380``). A pair of atoms inside each other's Lennard-Jones
+    wall at a QM minimum is a geometry the fixed non-bonded terms cannot
+    describe, and asking ``r0`` / ``θ0`` to hold that force open bends every
+    equilibrium in the batch. The skip is a per-graph weight of 0 on every
+    row (``index_add`` over the membership column, a gather back), never a
+    selection, so the shape stays static; unlike ByteFF the divisor counts
+    only the rows kept.
+
+    Args:
+        key: Prediction key holding the ``(n_atoms, 3)`` forces.
+        namespace: Batch namespace whose rows the forces belong to.
+        mask: Column on *namespace* marking live rows; absent means all live.
+        soft_max: Knee of the robust variant, in the loss's own units.
+            ``None`` (default) leaves the mean quadratic.
+        skip_above: Non-bonded force component, in the force's units, above
+            which the molecule leaves the loss. ``None`` (default) skips nothing.
+        skip_key: Column holding the ``(n_atoms, 3)`` non-bonded force the skip
+            reads (:data:`molix.schema.NONBONDED_FORCES_KEY`).
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://arxiv.org/abs/2408.12817
+    """
+
+    def __init__(
+        self,
+        *,
+        key: str | tuple[str, str] = FORCES_PRED_KEY,
+        namespace: str = "atoms",
+        mask: str = "mask",
+        soft_max: float | None = None,
+        skip_above: float | None = None,
+        skip_key: str | tuple[str, str] = NONBONDED_FORCES_KEY,
+    ) -> None:
+        super().__init__()
+        if soft_max is not None and soft_max <= 0.0:
+            raise ValueError(f"soft_max must be > 0 in the loss's units, got {soft_max}")
+        if skip_above is not None and skip_above <= 0.0:
+            raise ValueError(f"skip_above must be > 0 in the force's units, got {skip_above}")
+        self.key = _prediction_key(key)
+        self.namespace = str(namespace)
+        self.mask = str(mask)
+        self.soft_max = None if soft_max is None else float(soft_max)
+        self.skip_above = None if skip_above is None else float(skip_above)
+        self.skip_key = _prediction_key(skip_key)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Mean squared force component over the live rows, kneed if asked.
+
+        Args:
+            pred: Mapping carrying ``(n_rows, 3)`` forces under :attr:`key`.
+            batch: Post-collate batch whose :attr:`namespace` carries, on a
+                padded batch, the :attr:`mask` column ``(n_rows,)``; with
+                :attr:`skip_above` set, also the :attr:`skip_key` column, the
+                ``batch`` membership column and ``graphs``.
+
+        Returns:
+            Scalar loss in the force unit squared.
+
+        Raises:
+            KeyError: The prediction is absent, or the skip is on and the
+                non-bonded force column is.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; the "
+                "force this loss drives to zero has to be written first (a Derivative over "
+                "the energy)"
+            )
+        forces = _read_prediction(pred, self.key)
+        live = batch[self.namespace].get(self.mask)
+        weight = (
+            forces.new_ones(forces.shape[0]) if live is None else live.reshape(-1).to(forces.dtype)
+        )
+        if self.skip_above is not None:
+            if self.skip_key not in batch:
+                raise KeyError(
+                    f"{self.skip_key!r} is not on the batch; skip_above reads the non-bonded "
+                    "force the step writes beside the full one (JointObjective(nonbonded=...))"
+                )
+            nonbonded = _read_prediction(batch, self.skip_key)
+            membership = batch[self.namespace, "batch"].long()
+            large = (nonbonded.abs().amax(dim=-1) > self.skip_above).to(forces.dtype)
+            flagged = forces.new_zeros(batch["graphs"].batch_size[0]).index_add(
+                0, membership, large
+            )
+            weight = weight * (flagged[membership] == 0).to(forces.dtype)
+        squared = forces.pow(2).sum(dim=-1) * weight
+        loss = squared.sum() / (3.0 * weight.sum().clamp(min=1.0))
+        if self.soft_max is not None:
+            loss = log_knee(loss, self.soft_max)
+        return loss
+
+
+class MeanTermEnergyLoss(nn.Module):
+    """Mean energy per live term of the styles an objective priced — ByteFF's ``Angle_Energy``.
+
+    On a QM minimum the bond and angle energy is strain the equilibria should
+    not carry, so its mean over the terms, trained through ``r0`` / ``θ0``
+    with the stiffnesses detached, is the ``K``-weighted regression of each
+    equilibrium onto the geometry the chemistry shows (``loss.py:302-314``).
+    It fixes what :class:`StationaryForceLoss` cannot: a common shift of every
+    ``θ0`` at a planar or tetrahedral centre moves no atom, so the force loss
+    sees only differences between the angles of one centre and the common
+    value walks (GH200 3685025/3685026: sp3 ``θ0`` from 109° to 95° while the
+    force loss fell).
+
+    The value is ``sum_live graphs.<key> / max(sum_live n_terms, 1)`` with the
+    live terms counted over every namespace in *namespaces* through its mask
+    column (every row when absent), and a dead graph slot weighted out through
+    ``graphs.<mask>``. One objective, one count: ByteFF normalises each term
+    type by its own count in its own loss; the pooled mean weights a bond's
+    strain like an angle's, which is the quantity's unit (kcal/mol per term).
+
+    Args:
+        key: Prediction key holding the ``(B,)`` energy of the priced styles.
+        namespaces: The namespaces whose terms the energy summed — the styles
+            the objective named (``("bonds", "angles")``).
+        mask: Live-row column on each namespace and on ``graphs``.
+
+    Reference:
+        Zheng, T. et al. "Data-driven parametrization of molecular mechanics
+        force fields for expansive chemical space coverage." *Chem. Sci.* (2025).
+        https://arxiv.org/abs/2408.12817
+    """
+
+    def __init__(
+        self,
+        *,
+        key: str | tuple[str, str] = ENERGY_PRED_KEY,
+        namespaces: Sequence[str] = ("bonds", "angles"),
+        mask: str = "mask",
+    ) -> None:
+        super().__init__()
+        names = tuple(str(name) for name in namespaces)
+        if not names:
+            raise ValueError("namespaces must name at least one term table")
+        self.key = _prediction_key(key)
+        self.namespaces = names
+        self.mask = str(mask)
+
+    def forward(self, pred: Mapping[str, Any], batch: Any) -> torch.Tensor:
+        """Energy per live term.
+
+        Args:
+            pred: Mapping carrying the ``(B,)`` energy under :attr:`key`.
+            batch: Post-collate batch with ``graphs`` and every namespace in
+                :attr:`namespaces`.
+
+        Returns:
+            Scalar, the energy's unit per term.
+
+        Raises:
+            KeyError: The prediction is absent, or a namespace is.
+        """
+        if self.key not in pred:
+            raise KeyError(
+                f"{self.key!r} is not among the predictions {_prediction_names(pred)}; the "
+                "energy of the objective's styles has to be written first"
+            )
+        energy = _read_prediction(pred, self.key).reshape(-1)
+        graph_mask = batch["graphs"].get(self.mask)
+        total = (
+            energy.sum()
+            if graph_mask is None
+            else (energy * graph_mask.reshape(-1).to(energy.dtype)).sum()
+        )
+        count = energy.new_zeros(())
+        for namespace in self.namespaces:
+            if namespace not in batch.keys():
+                raise KeyError(
+                    f"{namespace!r} is not on the batch; MeanTermEnergyLoss counts the terms of "
+                    f"{self.namespaces}"
+                )
+            block = batch[namespace]
+            live = block.get(self.mask)
+            count = count + (
+                float(block.batch_size[0]) if live is None else live.to(energy.dtype).sum()
+            )
+        return total / count.clamp(min=1.0)

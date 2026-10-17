@@ -1,4 +1,4 @@
-"""Re-export :class:`molpy.ForceField` plus the structural contract MD binds to.
+"""Re-export :class:`molpy.ff.forcefield.ForceField` plus the structural contract MD binds to.
 
 ``from molix.md import ForceField`` and ``from molpy import ForceField`` are
 the same object. Evaluation is ``ff.to_potentials()`` composed under a
@@ -6,7 +6,7 @@ the same object. Evaluation is ``ff.to_potentials()`` composed under a
 :class:`~molix.md.driver.MD`.
 
 :class:`MDForceField` is what the driver actually requires: a **nullary**
-``to_potentials`` and a ``units`` style label. ``molpy.ForceField``'s own
+``to_potentials`` and a ``units`` style label. ``molpy.ff.forcefield.ForceField``'s own
 ``to_potentials`` takes the frame to enumerate topology over, so the bare
 container does not satisfy MD — molnex's :class:`molpot.forcefield.ForceField`
 subclass does, because a parameterized field carries its own realization and
@@ -23,8 +23,9 @@ module's class docstring is the sole home of its contract.
 
 from typing import Protocol, runtime_checkable
 
-from molpy import ForceField
+from molpy.ff.forcefield import ForceField
 
+from molix.autograd import Potential
 from molix.schema import CellBound
 
 __all__ = ["CellBound", "ForceField", "MDForceField"]
@@ -41,6 +42,6 @@ class MDForceField(Protocol):
 
     units: str
 
-    def to_potentials(self) -> object:
-        """Realized torch potentials — callable with no frame argument."""
+    def to_potentials(self) -> Potential:
+        """Realized torch potentials — the :class:`~molix.autograd.Potential` MD evaluates."""
         ...

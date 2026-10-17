@@ -82,3 +82,38 @@ def stack_improper_index(impropers_td: Mapping[str, torch.Tensor]) -> torch.Tens
         Long tensor ``[4, N_impropers]`` with center at row 0.
     """
     return _stack_columns(impropers_td, ("atomi", "atomj", "atomk", "atoml"))
+
+
+#: Rows an improper centre contributes: the three cyclic orders of its legs.
+IMPROPER_ROWS_PER_CENTRE = 3
+
+
+def cyclic_impropers(block: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Three rows per improper centre: ``(c, i, j, k)``, ``(c, j, k, i)``, ``(c, k, i, j)``.
+
+    molpy enumerates one centre-first row per three-coordinate atom. A single
+    ``cvff`` row prices one dihedral ``i-c-j-k`` and is not symmetric in the
+    legs — swapping two of them changes the energy while every parameter a
+    head predicts is a function of the centre alone. ByteFF splits ``k/3``
+    over the three cyclic leg orders; the batch carries those three rows, the
+    head's ``k`` is per row, so the centre's amplitude is their sum and the
+    energy does not depend on how the legs were listed.
+
+    Args:
+        block: ``atomi`` (centre), ``atomj``, ``atomk``, ``atoml``, each ``(M,)``.
+
+    Returns:
+        The same columns with ``3M`` rows, centre first in every row; a
+        centre's three rows are consecutive.
+    """
+    centre, i, j, k = (block[name] for name in ("atomi", "atomj", "atomk", "atoml"))
+    rows = (
+        torch.stack([centre, i, j, k], dim=-1),
+        torch.stack([centre, j, k, i], dim=-1),
+        torch.stack([centre, k, i, j], dim=-1),
+    )
+    stacked = torch.stack(rows, dim=1).reshape(-1, 4)  # (M, 3, 4) -> (3M, 4), a centre adjacent
+    return {
+        name: stacked[:, column].contiguous()
+        for column, name in enumerate(("atomi", "atomj", "atomk", "atoml"))
+    }

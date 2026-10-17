@@ -113,11 +113,11 @@ class _CountsDataset(BaseDataset):
         self._samples = samples
         self.getitem_calls = 0
         self._n_atoms = torch.tensor(
-            [int(sample["atoms"].nrows) for sample in samples], dtype=torch.long
+            [int(sample["atoms"].n_rows) for sample in samples], dtype=torch.long
         )
         try:
             self._n_edges: torch.Tensor | None = torch.tensor(
-                [int(sample["pairs"].nrows) for sample in samples], dtype=torch.long
+                [int(sample["pairs"].n_rows) for sample in samples], dtype=torch.long
             )
         except KeyError:
             self._n_edges = None

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from molrep.chem.embed import DiscreteChannel
+
 
 class ChemPerceptionSpec(BaseModel):
     """Configuration for the continuous chemical-perception recipe.
@@ -16,7 +18,11 @@ class ChemPerceptionSpec(BaseModel):
         improper_dim: Per-improper feature dimension.
         num_elements: Atomic-number embedding table size.
         hidden_dim: Optional shared MLP hidden width for context builders.
-        num_bond_types: Bond-type table size; ``0`` disables type conditioning.
+        atom_channels: Extra integer atom (or graph) columns embedded into the
+            atom seed, e.g. ``formal_charge``; see
+            :class:`~molrep.chem.embed.DiscreteChannel`.
+        bond_channels: Extra integer bond columns embedded into the bond seed,
+            e.g. ``bond_type``.
         n_blocks: Covalent-graph hops. The receptive field of an atom feature
             is ``n_blocks`` bonds, so this is the knob that decides how much
             of a molecule a predicted parameter can see.
@@ -33,6 +39,7 @@ class ChemPerceptionSpec(BaseModel):
     improper_dim: int = Field(default=32, gt=0)
     num_elements: int = Field(default=119, gt=0)
     hidden_dim: int | None = None
-    num_bond_types: int = Field(default=0, ge=0)
+    atom_channels: tuple[DiscreteChannel, ...] = ()
+    bond_channels: tuple[DiscreteChannel, ...] = ()
     n_blocks: int = Field(default=5, ge=0)
     local_attention: bool = False

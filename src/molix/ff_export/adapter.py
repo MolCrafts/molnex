@@ -1,8 +1,7 @@
 """BackendAdapter protocol + self-registering peer types.
 
-Mirrors :class:`molix.engine.EngineAdapter`: each backend is a named
-peer class (``LammpsAdapter``, ``OpenMMAdapter``, a future ``GromacsAdapter``),
-**not** a ``Translator(method="openmm")`` switch.
+Each backend is a named peer class (``LammpsAdapter``, ``OpenMMAdapter``,
+a future ``GromacsAdapter``), **not** a ``Translator(method="openmm")`` switch.
 
 References:
     Placement note: ``.claude/notes/learnable-classical-ff.md`` — one peer class
