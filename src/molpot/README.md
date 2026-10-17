@@ -30,7 +30,8 @@ pair_index = torch.stack([torch.arange(11), torch.arange(1, 12)], dim=1)  # a ch
 frame = TensorDict(
     atoms=TensorDict(
         Z=torch.full((12,), 6),
-        pos=torch.arange(12, dtype=torch.float64).unsqueeze(1) * torch.tensor([[1.5, 0.0, 0.0]], dtype=torch.float64),
+        pos=torch.arange(12, dtype=torch.float64).unsqueeze(1)
+        * torch.tensor([[1.5, 0.0, 0.0]], dtype=torch.float64),
         batch=torch.zeros(12, dtype=torch.long),
         node_features=LayerPooling("mean")(encoder_features),
         batch_size=[12],

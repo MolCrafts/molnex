@@ -99,9 +99,11 @@ TOL_GRAPH_E = 1e-11  # eV, |E| ~ 1e3-1e4 so 2e-13 is below one ulp
 #: term to 2.3e-12 eV and its force gradient to 1.3e-12 eV/A (job 3978557).
 TOL_GRAPH_F_KSPACE = 5e-12
 #: Polar's molecular path sums every same-graph pair of the Hartree kernel in one
-#: reduction inductor reorders: per-atom energies replay to 1e-14, the force
-#: array to 6.4e-12 eV/A (job 3992992).
-TOL_GRAPH_F_HARTREE = 1e-11
+#: reduction inductor reorders: per-atom energies replay to 1e-14, the graph
+#: energy to 4e-12 .. 1.2e-11 eV and the force array to 6.4e-12 .. 1.3e-11
+#: eV/A across runs (jobs 3992992, 3993199).
+TOL_GRAPH_E_HARTREE = 5e-11
+TOL_GRAPH_F_HARTREE = 5e-11
 #: Allegro-OAM-L is an fp32 package: its virial under CUDA graphs sits at
 #: 2.0-2.4e-13 eV against eager (jobs 3945974, 3992992), fp32 replay noise.
 TOL_GRAPH_W_FP32 = 5e-13
@@ -198,6 +200,7 @@ def cuda_graph_vs_eager(
     batch,
     *,
     want_virial: bool = False,
+    tol_e: float = TOL_GRAPH_E,
     tol_f: float = TOL_GRAPH_F,
     tol_w: float = TOL_GRAPH_F,
 ) -> None:
@@ -218,13 +221,13 @@ def cuda_graph_vs_eager(
     report.check(
         f"{name} cuda-graphs vs eager |dE|",
         max_abs(got[ENERGY_KEY], ref[ENERGY_KEY]),
-        TOL_GRAPH_E,
+        tol_e,
         "eV",
     )
     report.check(
         f"{name} cuda-graphs vs eager |dE_atom|",
         max_abs(got[ATOMIC_ENERGY_KEY], ref[ATOMIC_ENERGY_KEY]),
-        TOL_GRAPH_E,
+        tol_e,
         "eV",
     )
     report.check(
@@ -584,9 +587,14 @@ def check_mace_compile(device: torch.device, moved: dict) -> None:
     for name in ("matpes", "omol", "polar"):
         if name in moved:
             model, batch = moved[name]
-            tol_f = TOL_GRAPH_F_HARTREE if name == "polar" else TOL_GRAPH_F
+            hartree = name == "polar"
             guarded(f"mace.{name} cuda-graphs")(
-                cuda_graph_vs_eager, f"mace.{name}", model, batch, tol_f=tol_f
+                cuda_graph_vs_eager,
+                f"mace.{name}",
+                model,
+                batch,
+                tol_e=TOL_GRAPH_E_HARTREE if hartree else TOL_GRAPH_E,
+                tol_f=TOL_GRAPH_F_HARTREE if hartree else TOL_GRAPH_F,
             )
 
 
