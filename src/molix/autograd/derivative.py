@@ -83,7 +83,7 @@ import torch.nn as nn
 from tensordict import TensorDictBase
 
 from molix.autograd.variables import CELL_KEY, Key, _Variable, get_column, variable
-from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, POS_KEY, STRAIN_KEY
+from molix.schema import ENERGY_KEY, POS_KEY, STRAIN_KEY
 
 __all__ = ["Derivative"]
 
@@ -342,6 +342,7 @@ class Derivative(nn.Module):
                     frame[PAIR_DIST_KEY] = diff.norm(dim=-1)
                 if has_shifts:
                     frame[SHIFTS_KEY] = shifts
+            before = frozenset(frame.keys(include_nested=True, leaves_only=True))
             frame = self._call(frame, **energy_kwargs)
             energy = cast(torch.Tensor, frame[self.of])
             grads = torch.autograd.grad(
@@ -365,10 +366,15 @@ class Derivative(nn.Module):
             if has_shifts:
                 frame[SHIFTS_KEY] = shifts_buf
         if not create_graph:
-            # The single backward consumed the energy graph; returning it
-            # attached would be a dynamo break and a later backward's error.
-            frame[self.of] = energy.detach()
-            atomic = get_column(frame, ATOMIC_ENERGY_KEY)
-            if atomic is not None:
-                frame[ATOMIC_ENERGY_KEY] = atomic.detach()
+            # The single backward consumed the energy graph: every column the
+            # energy attached to it goes back detached (one left attached is a
+            # dynamo break and a later backward's error). The variables were
+            # restored to the caller's own buffers above and are not touched.
+            written = [
+                key
+                for key in frame.keys(include_nested=True, leaves_only=True)
+                if key not in before
+            ]
+            for key in (self.of, *written):
+                frame[key] = cast(torch.Tensor, frame[key]).detach()
         return frame

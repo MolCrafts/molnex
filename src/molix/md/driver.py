@@ -888,7 +888,14 @@ class MD:
                 self._adapter.unbind_work()
 
     def _cast_system(self, system: TensorDict) -> TensorDict:
-        """Bring ``atoms.pos`` / ``vel`` / ``mass`` (and cell) onto the run dtype/device."""
+        """Bring ``atoms.pos`` / ``vel`` / ``mass`` (and cell) onto the run dtype/device.
+
+        Also gives the system its ``graphs`` namespace, ``batch_size (1,)``: an
+        MD system is one graph, and every potential reads the graph count
+        there (``frame["graphs"].batch_size[0]``).
+        """
+        if "graphs" not in system.keys():
+            system["graphs"] = TensorDict({}, batch_size=[1], device=system.device)
         for key in (POS_KEY, VEL_KEY, MASS_KEY):
             tensor = system[key]
             if self.dtype is not None:
