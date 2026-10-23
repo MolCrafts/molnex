@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from molix.cli.doctor import CheckResult, Doctor, Status
+from molix.cli.profile import app as profile_app
 
 app = typer.Typer(
     name="molnex",
@@ -19,6 +20,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+app.add_typer(profile_app, name="profile")
 
 _console = Console()
 

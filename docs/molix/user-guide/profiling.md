@@ -12,6 +12,10 @@ stack, and none of them asks you to wire up a real training run first.
 | `TrainerProfiler` | How much per-step time does `Trainer` add on top of a bare loop? |
 | `DatasetProfiler` | What is in my dataset, and what does reading one sample cost? |
 
+For CUDA kernels and their derivatives, use the
+[native operator suite](#native-operator-profiling): `OperatorProfiler`,
+Nsight Systems and Nsight Compute, also available through `molnex profile`.
+
 All five have the same shape: **configuration goes into the constructor, data
 goes into `run()`, and `run()` returns a result dataclass that knows how to
 print itself.**
@@ -561,7 +565,129 @@ No unit conversion is performed and no units are guessed. Positions, distances
 and every target are printed exactly as the dataset stores them — if your
 positions are in Ångström and your energies in eV, that is what you are reading.
 
-## Where to Start
+## Native operator profiling
+
+`OperatorProfiler` handles a callable with fixed inputs: a forward op, forward
+plus adjoints, a directional second derivative, or an entire energy/force model.
+The caller defines these computations and checks numerical parity. The profiler
+does not infer a loss or change gradients, precision, inputs, or the model backend.
+
+The design separates four operations so diagnostic overhead cannot be mistaken
+for a performance regression:
+
+| Primitive | Purpose | Artifact |
+| --- | --- | --- |
+| `OperatorProfiler.prepare` | Optional fullgraph compilation, warmup, optional CUDA graph capture | First-call wall time and warmup/capture memory peaks |
+| `OperatorProfiler.benchmark` | CUDA-event timing without a tracing profiler | Raw groups, counts and latency statistics |
+| `OperatorProfiler.trace` | PyTorch CPU/operator/device attribution | Chrome trace and event records |
+| `OperatorProfiler.capture` | Bounded CUDA profiler API window with an NVTX label | Input to an external Nsight process |
+| `NsightSystems` | CUDA/NVTX timeline, including graph nodes | `.nsys-rep` and kernel/API CSV |
+| `NsightCompute` | Selected kernel counters: throughput, memory, occupancy, warp stalls | `.ncu-rep`, raw metric CSV/JSON |
+
+Example workload, run inside a GPU allocation:
+
+```python
+from pathlib import Path
+import json
+import torch
+from molix.profiler import OperatorProfiler, OperatorProtocol
+
+profiler = OperatorProfiler("cuda:0", OperatorProtocol())
+inputs = (torch.randn(1024, 128, device="cuda"),)
+identity = profiler.fingerprint({"x": inputs[0]})
+prepared = profiler.prepare(lambda x: x.sin(), inputs, compile=True, cuda_graph=True)
+
+# Choose one mode per process; do not time inside a tracing profiler.
+measurement = profiler.benchmark(prepared)
+Path("timing.json").write_text(json.dumps({"inputs": identity, **measurement}, indent=2))
+# For a Torch trace instead:
+# events = profiler.trace(prepared, Path("trace.json"))
+# For a workload launched through Nsight instead:
+# profiler.capture(prepared, iterations=1)
+```
+
+Default timing uses 30 warmups and five groups, each containing at least 100
+calls and 200 ms of GPU time. Compilation and first execution are recorded
+together as first-call wall time and excluded from steady-state timing. Peak
+memory includes warmup and capture. Graph outputs alias graph-owned storage;
+clone them before another replay when comparing results.
+Each latency sample is the mean per call within one group; its percentiles
+describe variation between groups, not the tail latency of individual calls.
+CUDA-event intervals include gaps between launches; use the timeline to
+distinguish host enqueue overhead from time spent inside kernels.
+
+The CLI forwards the command after `--` without shell interpolation. The target
+must call `capture` after preparation. Run tools separately; never nest Torch,
+Nsight Systems and Nsight Compute collectors.
+
+```bash
+molnex profile doctor
+molnex profile nsys --output /scratch/run/timeline -- python workload.py --capture
+molnex profile summarize /scratch/run/timeline/stats.json --iterations 3 --top 20
+molnex profile ncu --output /scratch/run/counters --kernel product_kernel \
+  --launches 4 -- python workload.py --capture
+molnex profile ptxas build.log --pattern 'adjoint_kernel.*Li128E' --demangle
+```
+
+`summarize` is the question asked after every capture — which kernels, how
+much per iteration of the workload — answered from `stats.json` (or the raw
+`stats.csv`): template arguments and parameter lists are stripped so the
+instantiations of one kernel stay readable, the CUDA API rows nsys lists among
+the kernels (`cudaDeviceSynchronize`, `cudaGraphLaunch`) are dropped, and the
+totals are divided by the iteration count the workload passed to
+`OperatorProfiler.capture`. The API is `NsightSystems.kernel_summary` /
+`format_summary`.
+
+`ptxas` reads a build log of a `-Xptxas=-v` compilation
+(`-DMOLNEX_EQUIVARIANCE_PTXAS_VERBOSE=ON` for the equivariance library) and
+lists registers, spill bytes and static shared memory per kernel entry
+(`molix.profiler.parse_ptxas`). Register pressure is what a timeline cannot
+show: a kernel at 255 registers that spills, or a launch bound that forces
+fewer registers and spills more, is found here before it is measured. Use
+`--demangle` for readable names when `c++filt` is installed; a parallel `make`
+can interleave the ptxas blocks of different translation units, `ninja` prints
+each job's output whole.
+
+`OperatorProfiler.compare(reference, candidate)` turns two `benchmark` records
+into a speed-up, flags whether their group means are separated at all, and
+whether they were taken in the same environment. Compare only records from the
+same GPU allocation and the exact same inputs: the reference kernel's own
+latency moved by 20 % between nodes on one day's runs, more than many of the
+differences under test.
+
+Each capture creates a new output directory containing `capture.json`, stdout,
+stderr and the original NVIDIA report. Existing directories are rejected.
+NVIDIA CSV output is also normalized into `stats.json` (Systems) and
+`metrics.json` (Compute), retaining kernel identity, metric names and units.
+Open the original reports in `nsys-ui` or `ncu-ui` for timeline/source inspection.
+Timeouts kill the owned process group. Missing tools, permission failures,
+nonzero exit codes and missing reports fail visibly and retain their records.
+Hardware counters may require cluster administrator permission; the suite does
+not change driver settings or GPU clocks. Tool paths can be supplied with
+`--executable`. Capture timeout defaults to 600 seconds and can be bounded with
+`--timeout`.
+
+Build the equivariance library with `-DMOLNEX_EQUIVARIANCE_LINEINFO=ON` when
+source-line attribution is needed. This emits line information without a CUDA
+debug build (`-G`); retain the exact source and binary used for the capture.
+
+The CUDA profiler API window excludes model loading, compilation and warmup,
+including when autograd launches kernels on another host thread. NVTX labels
+the window as `molnex.op`. Nsight Compute uses a kernel-name regular expression,
+bounded launch count and no clock/cache manipulation. Replay and counter
+instrumentation can still change execution; use the uninstrumented benchmark
+for speed claims. See the official [Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+and [Nsight Compute CLI guide](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html).
+
+For an optimization experiment, retain frozen inputs and their fingerprints,
+source and native-library hashes, tool/environment versions, correctness
+budgets and results. Measure old/new implementations on the same GPU allocation
+and exact inputs. Use timelines to select expensive kernels, counters to form
+a hypothesis, then repeat correctness and uninstrumented timing. Profile
+forward, adjoints and second derivatives separately; also measure the complete
+energy/force workload before changing production dispatch.
+
+## Choosing a profiler
 
 Working outwards from the data usually converges fastest. Run `DatasetProfiler`
 first to learn what the records look like and whether sizes are skewed; then

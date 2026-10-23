@@ -77,6 +77,9 @@ from molix.profiler.module import (
     ReportSpec,
     Timing,
 )
+from molix.profiler.nsight import KernelCost, NsightCompute, NsightSystems
+from molix.profiler.operator import OperatorProfiler, OperatorProtocol, PreparedOperator
+from molix.profiler.ptxas import KernelResources, parse_ptxas
 from molix.profiler.task import TaskProfiler, TaskResult
 from molix.profiler.trainer import TrainerProfiler, TrainerResult
 
@@ -88,11 +91,18 @@ __all__ = [
     "DatasetProfiler",
     "DatasetResult",
     "Hotspot",
+    "KernelCost",
+    "KernelResources",
     "Measurement",
     "Memory",
     "MockBatch",
     "MockModel",
     "MockSource",
+    "NsightCompute",
+    "NsightSystems",
+    "OperatorProfiler",
+    "OperatorProtocol",
+    "PreparedOperator",
     "ProfileSpec",
     "ProfileSweep",
     "Profiler",
@@ -105,4 +115,5 @@ __all__ = [
     "TrainerProfiler",
     "TrainerResult",
     "mock_node_feature_loss",
+    "parse_ptxas",
 ]
