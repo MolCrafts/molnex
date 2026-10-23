@@ -49,6 +49,7 @@ from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
 from molrep.embedding.radial import AgnesiTransform, BesselRBF
+from molrep.equivariance import ChannelWiseTensorProduct
 from molrep.interaction.product import irreps_from_l_max, sh_irreps_from_l_max
 from molzoo.encoder import ElementTable
 from molzoo.mace.coupling import MaceO3
@@ -412,10 +413,19 @@ class MACEEncoder(ElementTable, nn.Module):
             One node-feature tensor per interaction layer, each ``(N, …)``.
         """
         envelope = cutoff if self.pass_cutoff_to_interaction else None
+        # A native tensor product sums over the edge schedule (CSR by target
+        # and by source): built once here, shared by every layer, forward and
+        # adjoints. cuEq takes no schedule.
+        schedule = None
+        if any(isinstance(block.conv_tp, ChannelWiseTensorProduct) for block in self.interactions):
+            n_nodes = node_feats.shape[0]
+            schedule = ChannelWiseTensorProduct.schedule(
+                edge_index[:, 0], edge_index[:, 1], n_nodes, n_nodes
+            )
         per_layer: list[torch.Tensor] = []
         for i in range(self.num_interactions):
             node_feats, sc = self.interactions[i](
-                elements, node_feats, edge_attrs, edge_feats, edge_index, envelope
+                elements, node_feats, edge_attrs, edge_feats, edge_index, envelope, schedule
             )
             node_feats = self.products[i](node_feats, sc, elements)
             per_layer.append(node_feats)

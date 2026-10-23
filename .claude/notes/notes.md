@@ -2458,3 +2458,130 @@ upstream pickled module by `getattr` (the allowed boundary);
 `test_rondo/conftest.py::excite` and `joint.py:242` keep a `getattr`.
 
 **Status.** active.
+
+<!-- mol:note:topic:native-channelwise-csr -->
+## Native indexed ChannelWiseTensorProduct — CSR schedule, compile-time terms, fused adjoints (2026-10-23)
+
+Operator ask (2026-10-23 evening): own the algorithm, data flow, scheduling and
+differentiation of `molrep.equivariance.ChannelWiseTensorProduct`; reuse a
+mature primitive only where it wins end-to-end; evaluate beating cuEq. The
+morning's grouped-atomics backend (below, superseded) was 5–8× slower than cuEq
+on the op; this is its replacement. Still opt-in: MACE constructs cuEq's
+operation by default; the benchmark harness swaps `conv_tp` only.
+
+**Design.** `csrc/equivariance/terms.hpp` enumerates every Clebsch–Gordan
+term at compile time for MACE's natural-parity O3 family
+(`U×0e+U×1o+…+U×L1`, `0e+…+L2`, filter `0e+…+L2`; L1 0..3, L2 2..3,
+U 32/64/128) from the selection rule of the real spherical-harmonic basis
+(`m3 ∈ {±(|m1|+|m2|), ±||m1|−|m2||}`, cosine/sine type by the factors' types,
+zonal factor passes the other's m through) — verified against cue for every
+l ≤ 4: 0 violations, 1164 candidates for 1158 non-zeros. The CG *values* come
+from cue's descriptor at construction and travel as kernel parameters
+(constant-bank FMA operands; no device buffer, no per-call copy). cue sorts the
+output irreps by l3 and the weight segments follow (wi == oi); both sides map
+path → sorted segment and the Python descriptor refuses any descriptor whose
+structure differs. Kernels (`channelwise.cuh`): `product` — one CTA per
+target row, one thread per channel, the row's incoming edges summed in
+registers in the schedule's stable order and written once; `adjoints` — one
+fused pass by target returning (ga, gb, gw): the cotangent row is read once per
+node (it is four times an edge's weights at MACE widths), gw/gb written per
+edge, ga written per edge and summed by source (`segment_sum`); the same kernel
+with `second=True` and the cotangents (da, db, dw) is the exact double backward
+in one launch (fp64: two passes, grad_g and the edge adjoints, because 340
+registers do not fit). `schedule` — CSR by target and by source via CUB's
+narrow-key radix sort (⌈log2 rows⌉ bits) + a binary-search rowptr, int32,
+built once per batch (the MACE encoder builds it in `layer_features` and
+threads `schedule=` through the interaction blocks when `conv_tp` is native).
+Per-chunk shared-memory staging of edge ids, source rows and the angular rows
+removes the dependent chain order → source → row and the per-edge scalar
+registers; the edge loop is unrolled 2× for the product and first order so the
+next edge's loads overlap the contraction; rows split over up to 8 CTAs
+(`row_splits`, partials reduced) so 193 atoms still fill the device. No
+atomics anywhere: bitwise reproducible, deterministic mode honoured.
+Autograd: `product.backward = adjoints`, `adjoints.backward = adjoints(second)`;
+third order raises. Meta kernels for both; fullgraph Inductor and CUDA-graph
+replay tested.
+
+**What cuEq does (nsys of its uniform_1d):** no sort — three JIT kernels
+(fwd 1.25, bwd 1.09, bwd_bwd 1.80 ms at the layer-1 wat1544 shape), the bwd
+with atomics; each ~3× above the HBM roofline (w is 959 MB per pass).
+
+**Standing (job 4314788 = v7, the delivered kernels; fp32 unless noted;
+same-job pairs, GH200, MACE-MatPES official weights, capacity edges, TF32
+off).** Layer-1 wat1544 (E = 187 316): forward 0.48 vs 1.05 ms (2.2×; cuEq's
+forward varies 1.05–1.25 across nodes, ours 0.48–0.50); forward+backward 1.68
+vs 2.18 (1.29×); +second 4.39 vs 4.72 (1.08×); fp64 1.15× / 1.00× / 0.75×
+(second order after the two-pass split). Full E/F, Inductor fullgraph +
+CUDA graph, schedule built once per forward: 4425 atoms 19.7 vs 22.9 ms
+(1.16×), 1544 atoms 7.69 vs 8.40 (1.09×), 193 atoms 1.59 vs 1.50 (0.95×);
+fp64 1.09× / 1.04× / 0.90×. Correctness vs cuEq: normalized RMS ≤ 5e-15
+(fp64), ≤ 5e-6 (fp32) on every cell; 32/32 GPU tests incl. gradgradcheck,
+fullgraph explain, CUDA-graph replay with in-place index changes, bitwise
+reproducibility. Kernel times per call (fp32, L1=1, v7 nsys): product
+0.371 ms, first-order adjoints 1.066 + segment_sum 0.129, second order 2.062
++ 0.129; schedule ≈ 45 µs. Registers (fp32, L1=1, U=128): product 122,
+first-order 161, second-order 255, no spills; the fp64 first order spills
+104 B at 255 and the fp64 second-order edge pass 292 B. Launch-bound
+calibration (job 4314633): forcing the first-order float adjoint to 128
+registers spills and loses 8 %; the fp64 product at 168 spills and loses 20 %
+— kept at 3 / 2 CTAs per SM. Version trail (records/v1..v7): v1 CSR +
+compile-time terms (op 5–8× faster than the old backend, full E/F 0.9×
+cuEq); v2 fused adjoints; v3 shared-memory index staging; v4 2× edge unroll +
+row splits + the hoisted schedule; v5 angular rows in shared memory; v6 fp64
+two-pass second order; v7 launch bounds.
+
+**Open.** 193 atoms is occupancy-bound (one CTA per row, ~2 µs per
+serialised edge even at 3 CTAs per row); the second-order float kernel is at
+255 registers (2 CTAs/SM) and 1.15× cuEq's bwd_bwd; fp64 second order 0.78×.
+The default backend stays cuEq until the operator decides. Evidence, snapshots
+and job scripts:
+`/nobackup/proj/disk/teoroo/personal/jicli594/work/lab/projects/molnex-cwtp-csr/20261023/`
+(`records/v1..v7`, `summarize.py`, `jobs/v1.sbatch` with SNAP/OUT/BUILD).
+
+<!-- mol:note:topic:native-channelwise-hopper -->
+## Superseded: the grouped-atomics channelwise backend (2026-10-23 morning)
+
+Kept for the record; the kernel is gone from the tree (only the experiment
+snapshots under `molnex-cueq-replacement/20261023/` and
+`molnex-op-profiler/20261023/` retain it). It grouped cue's CG paths by
+destination, ran one CTA per (group, edge tile) with atomics into the node rows
+and re-read every operand once per group; after tiling and metadata staging it
+was still 2.5–3.1× slower than cuEq on full E/F and 5–8× on the op (jobs
+4303158, 4309927, 4310025, 4310029). Its validation apparatus — paired
+microbenchmarks on frozen frames, `report.py` / `audit.py` fingerprints, the
+C++ AOTI adjoint smoke — carried over to the replacement above.
+
+<!-- mol:note:topic:native-op-profiling -->
+## Native operator profiler and first Hopper optimization (2026-10-23)
+
+`molix.profiler.OperatorProfiler` separates preparation (fullgraph compilation,
+warmup and optional CUDA graph), CUDA-event timing, Torch tracing, and a bounded
+CUDA profiler API/NVTX capture window. The caller defines forward/adjoint/second
+derivative workloads and numerical checks. Default timing is five groups of at
+least 100 calls and 200 ms each after 30 warmups; reported percentiles describe
+group averages. First-call time and warmup/capture memory peaks are separate.
+Use exact tensor fingerprints, including intermediate features and derivative
+directions, rather than assuming a frozen molecular frame implies bitwise
+identical intermediate inputs after atomic aggregation.
+
+`molnex profile doctor`, `nsys` and `ncu` expose the independent NVIDIA wrappers.
+They retain raw reports, stdout/stderr, tool versions and argv; export CSV plus
+normalized JSON; reject reused output directories; and kill their owned process
+group on capture timeout. Workloads call `OperatorProfiler.capture` after
+preparation. Profilers are separate runs, never a source of speedup claims.
+`MOLNEX_EQUIVARIANCE_LINEINFO=ON` adds line information without `-G`. See
+`docs/molix/user-guide/profiling.md` for the reusable API and CLI examples.
+
+GH200 calibration artifacts, immutable candidate snapshots, scheduler scripts
+and raw reports are under
+`/nobackup/proj/disk/teoroo/personal/jicli594/work/lab/projects/molnex-op-profiler/20261023/`.
+The latest candidate is `snapshot-dispatch` / `build-dispatch`, with measurements
+in `release/`; `final/` is an earlier candidate before size dispatch, not the
+delivered result. `report.py` verifies same-allocation old/new/cuEq comparisons,
+exact frame/operand fingerprints, correctness budgets and timing protocols.
+`audit.py` additionally checks source/library hashes, reports and job exits.
+
+The kernel-level findings of that first optimisation round (tiles, staged
+metadata, size dispatch; 12–17 % on the old backend) are superseded by the
+rewrite in topic `native-channelwise-csr`; the profiler, its CLI wrappers and
+the paired-measurement protocol are what remains in use.

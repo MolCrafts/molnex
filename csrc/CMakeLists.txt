@@ -9,6 +9,11 @@
 #           process without Python (upstream registers them in Python only).
 #           Built only with -DCUEQ_OPS_LIBRARY=<.../cuequivariance_ops/lib/libcue_ops.so>;
 #           never loaded next to cuequivariance_ops_torch (both define the schemas).
+#   equivariance/  molnex_equivariance: the indexed ChannelWiseTensorProduct of
+#           MACE's natural-parity O3 family as compile-time term tables over a
+#           CSR edge schedule (no atomics, deterministic). Enable
+#           -DMOLNEX_EQUIVARIANCE_ENABLE_CUDA=ON. Its own namespace coexists
+#           with upstream cuEquivariance for parity.
 #
 #   cmake -S csrc -B build/csrc-$(uname -m) -DMOLNEX_OP_ENABLE_CUDA=ON \
 #         -DTorch_DIR=$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')/Torch \
@@ -28,6 +33,11 @@ if(NOT TORCH_FOUND)
 endif()
 
 add_subdirectory(molix)
+
+option(MOLNEX_EQUIVARIANCE_ENABLE_CUDA "Build the native channelwise tensor product" OFF)
+if(MOLNEX_EQUIVARIANCE_ENABLE_CUDA)
+  add_subdirectory(equivariance)
+endif()
 
 set(CUEQ_OPS_LIBRARY "" CACHE FILEPATH "cuEquivariance's libcue_ops.so; empty skips csrc/cueq")
 if(CUEQ_OPS_LIBRARY)

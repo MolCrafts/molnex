@@ -137,6 +137,7 @@ import torch.nn.functional as F
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
 from molrep import cueq
 from molrep.embedding.mlp import MomentNormalizedMLP, normalize2mom
+from molrep.equivariance import EdgeSchedule
 from molzoo.checkpoint import ConvertedWeight
 from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
 
@@ -225,10 +226,14 @@ class _CueqChannelwiseBlockMixin:
         *,
         source_features: torch.Tensor | None = None,
         target_features: torch.Tensor | None = None,
+        schedule: EdgeSchedule | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Evaluate the official indexed cuEq convolution and its scalar density.
 
-        The density is ``None`` for a block without a density head.
+        The density is ``None`` for a block without a density head. ``schedule``
+        is the batch's CSR edge schedule for a native
+        :class:`molrep.equivariance.ChannelWiseTensorProduct`, built once per
+        forward by the encoder and shared by every layer; cuEq ignores it.
 
         cuEq is the sole owner of CG, contraction, scatter and autograd: the
         radial weights are handed to the indexed tensor product together with
@@ -258,6 +263,7 @@ class _CueqChannelwiseBlockMixin:
             indices_1=source,
             indices_out=target,
             size_out=num_nodes,
+            **({"schedule": schedule} if schedule is not None else {}),
         )
         if edge_density is None:
             return message, None
@@ -787,6 +793,7 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: torch.Tensor | None,
+        schedule: EdgeSchedule | None = None,
     ) -> torch.Tensor:
         """Normalised aggregated message ``(N, target.dim)``."""
         node_up = self.linear_up(node_feats)
@@ -796,6 +803,7 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
             edge_feats,
             edge_index,
             cutoff,
+            schedule=schedule,
         )
         return self._normalize(self.linear(message), density)
 
@@ -849,6 +857,7 @@ class _FirstLayerSkip:
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: torch.Tensor | None = None,
+        schedule: EdgeSchedule | None = None,
     ) -> tuple[torch.Tensor, None]:
         """Run one first-layer interaction.
 
@@ -860,11 +869,13 @@ class _FirstLayerSkip:
             edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
+            schedule: The batch's edge schedule for a native tensor product
+                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
 
         Returns:
             ``(message (N, target_irreps.dim), None)``.
         """
-        message = self._message(node_feats, edge_attrs, edge_feats, edge_index, cutoff)
+        message = self._message(node_feats, edge_attrs, edge_feats, edge_index, cutoff, schedule)
         return self.skip_tp(message, elements), None
 
 
@@ -896,6 +907,7 @@ class _ResidualSkip:
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: torch.Tensor | None = None,
+        schedule: EdgeSchedule | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one residual interaction.
 
@@ -907,12 +919,14 @@ class _ResidualSkip:
             edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
+            schedule: The batch's edge schedule for a native tensor product
+                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
 
         Returns:
             ``(message (N, target_irreps.dim), skip (N, hidden_irreps.dim))``.
         """
         sc = self.skip_tp(node_feats, elements)
-        message = self._message(node_feats, edge_attrs, edge_feats, edge_index, cutoff)
+        message = self._message(node_feats, edge_attrs, edge_feats, edge_index, cutoff, schedule)
         return message, sc
 
 
@@ -1058,6 +1072,7 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: torch.Tensor | None = None,
+        schedule: EdgeSchedule | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one residual non-linear interaction layer.
 
@@ -1069,6 +1084,8 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             edge_index: ``(E, 2)`` with ``[:, 0]`` = source, ``[:, 1]`` = target
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
+            schedule: The batch's edge schedule for a native tensor product
+                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
 
         Returns:
             ``(message (N, target_irreps.dim), skip (N, hidden_dim))``.
@@ -1087,6 +1104,7 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
             cutoff,
             source_features=source_emb,
             target_features=target_emb,
+            schedule=schedule,
         )
         message = self.linear_1(message) / (density * self.beta + self.alpha)
         message = message + node_feats_res
