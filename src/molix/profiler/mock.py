@@ -9,8 +9,8 @@ Provides two generators:
 - :class:`MockSource` — implements the
   indexable-source protocol (``__len__`` / ``__getitem__``) and returns plain
   ``{"Z": ..., "pos": ...}`` sample dicts.  Used with
-  :class:`~molix.profiler.task.TaskProfiler` and
-  :class:`~molix.profiler.dataloader.DataLoaderProfiler`.
+  :class:`~molix.profiler.task.Profiler` and
+  :class:`~molix.profiler.dataloader.Profiler`.
 
 Example::
 
@@ -263,7 +263,7 @@ class MockModel(nn.Module):
     single scalar multiply, so a Trainer loop wrapped around it spends
     essentially all its time in framework machinery (Step dispatch, hooks,
     batch moves, TrainState writes), not model FLOPs. That is exactly what
-    :class:`~molix.profiler.trainer.TrainerProfiler` needs to isolate the
+    :class:`~molix.profiler.trainer.Profiler` needs to isolate the
     Trainer's own per-step overhead.
 
     One scalar :class:`~torch.nn.Parameter` keeps the autograd graph real so

@@ -11,12 +11,12 @@ before timing begins, so a two-phase transform is measured in its fitted state.
 
 Example::
 
-    from molix.profiler.task import TaskProfiler
+    from molix.profiler import task
     from molix.profiler.mock import MockSource
     from molix.neighbor import NeighborList
 
     source = MockSource(n_samples=500, n_atoms=(5, 20))
-    profiler = TaskProfiler(NeighborList(cutoff=5.0))
+    profiler = task.Profiler(NeighborList(cutoff=5.0))
     result = profiler.run(source, n_samples=100)
     result.print_report()
 """
@@ -34,7 +34,7 @@ from molix.profiler._utils import Timer, TimingStat, _fmt_table
 
 
 @dataclass
-class TaskResult:
+class Result:
     """Profiling results for a single pipeline task.
 
     Attributes:
@@ -80,7 +80,7 @@ class TaskResult:
 # ---------------------------------------------------------------------------
 
 
-class TaskProfiler:
+class Profiler:
     """Profile a single sample transform.
 
     Measures the wall-clock time of ``task.execute(sample)`` in isolation,
@@ -94,7 +94,7 @@ class TaskProfiler:
 
     Example::
 
-        profiler = TaskProfiler(NeighborList(cutoff=5.0))
+        profiler = task.Profiler(NeighborList(cutoff=5.0))
 
         # Mock source
         result = profiler.run(MockSource(n_samples=500, n_atoms=(5, 20)), n_samples=100)
@@ -113,7 +113,7 @@ class TaskProfiler:
         source: object,
         n_samples: int = 100,
         n_warmup: int = 10,
-    ) -> TaskResult:
+    ) -> Result:
         """Run the task profiler on ``source``.
 
         Args:
@@ -123,7 +123,7 @@ class TaskProfiler:
             n_warmup: Number of samples to discard at the start.
 
         Returns:
-            :class:`TaskResult` with timing statistics.
+            :class:`Result` with timing statistics.
 
         Raises:
             TypeError: *task* has neither an ``execute`` method nor a
@@ -167,7 +167,7 @@ class TaskProfiler:
                 times_ms.append(t.elapsed * 1000)
         desc = getattr(source, "describe", lambda: type(source).__name__)()
 
-        return TaskResult(
+        return Result(
             task_name=task_name,
             task_id=str(task_id),
             timing=TimingStat.from_list(times_ms),

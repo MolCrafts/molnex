@@ -211,7 +211,7 @@ class NsightSystems(NsightTool):
         readable; CUDA API rows nsys lists among the kernels
         (``cudaDeviceSynchronize``, ``cudaGraphLaunch``) are dropped. The
         workload's iteration count is the caller's: the capture window is
-        theirs (``OperatorProfiler.capture(iterations=…)``).
+        theirs (``operator.Profiler.capture(iterations=…)``).
         """
         if iterations < 1:
             raise ValueError("iterations must be positive")

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from tensordict import TensorDict
 
-from molix.profiler import MockBatch, MockSource
+from molix.profiler.mock import MockBatch, MockSource
 
 
 def _shapes(batch: TensorDict) -> tuple[tuple[int, ...], ...]:

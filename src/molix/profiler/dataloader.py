@@ -12,11 +12,11 @@ scheduling, collation, and pin_memory overhead.
 
 Example::
 
-    from molix.profiler.dataloader import DataLoaderProfiler
+    from molix.profiler import dataloader
     from molix.profiler.mock import MockSource
 
     source = MockSource(n_samples=2000, n_atoms=(5, 20))
-    profiler = DataLoaderProfiler(batch_size=32, num_workers=4)
+    profiler = dataloader.Profiler(batch_size=32, num_workers=4)
     result = profiler.run(source, n_batches=100)
     result.print_report()
 """
@@ -39,7 +39,7 @@ from molix.profiler._utils import TimingStat, ValueStat, _fmt_table, batch_count
 
 
 @dataclass
-class DataLoaderResult:
+class Result:
     """Profiling results for a DataLoader.
 
     Attributes:
@@ -164,7 +164,7 @@ class _ListDataset(Dataset):
         return self._samples[idx]
 
 
-class DataLoaderProfiler:
+class Profiler:
     """Profile DataLoader batch-production throughput.
 
     Measures the time spent waiting for each batch using the inter-batch gap
@@ -181,7 +181,7 @@ class DataLoaderProfiler:
 
     Example::
 
-        profiler = DataLoaderProfiler(batch_size=32, num_workers=4)
+        profiler = dataloader.Profiler(batch_size=32, num_workers=4)
 
         # Mock data
         result = profiler.run(MockSource(n_samples=2000, n_atoms=(5, 20)))
@@ -211,7 +211,7 @@ class DataLoaderProfiler:
         data: object,
         n_batches: int = 50,
         n_warmup: int = 5,
-    ) -> DataLoaderResult:
+    ) -> Result:
         """Run the DataLoader throughput measurement.
 
         Args:
@@ -229,7 +229,7 @@ class DataLoaderProfiler:
             n_warmup: Number of initial batches to discard.
 
         Returns:
-            :class:`DataLoaderResult` with timing and throughput statistics.
+            :class:`Result` with timing and throughput statistics.
         """
         desc = getattr(data, "describe", lambda: type(data).__name__)()
 
@@ -269,7 +269,7 @@ class DataLoaderProfiler:
         mean_atoms = sum(atom_counts) / len(atom_counts) if atom_counts else 0.0
         mean_graphs = sum(graph_counts) / len(graph_counts) if graph_counts else 0.0
 
-        return DataLoaderResult(
+        return Result(
             load_time=timing,
             throughput_graphs_per_sec=mean_graphs / mean_load_s if mean_load_s > 0 else 0.0,
             throughput_atoms_per_sec=mean_atoms / mean_load_s if mean_load_s > 0 else 0.0,

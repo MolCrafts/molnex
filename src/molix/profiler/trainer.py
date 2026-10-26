@@ -1,7 +1,7 @@
 """Trainer-loop overhead profiler.
 
 Unlike :class:`~molix.profiler.module.Profiler` (which times a model in
-isolation), :class:`TrainerProfiler` profiles the **Trainer's own per-step
+isolation), :class:`Profiler` profiles the **Trainer's own per-step
 machinery** — Step-protocol dispatch, hook calls, batch moves, TrainState
 writes, the optimizer/scheduler/eval-cadence bookkeeping — by driving a real
 :class:`~molix.core.trainer.Trainer` over a near-zero-compute
@@ -11,14 +11,14 @@ functions, surfacing framework hotspots.
 
 Example::
 
-    from molix.profiler import TrainerProfiler
+    from molix.profiler import trainer
 
-    result = TrainerProfiler().run(n_steps=2000)
+    result = trainer.Profiler().run(n_steps=2000)
     result.print_report()        # per-step wall + top framework hotspots
 
     # price hook dispatch by adding hooks
     from molix.hooks import StepSpeedHook
-    TrainerProfiler(hooks=[StepSpeedHook()]).run(n_steps=2000).print_report()
+    trainer.Profiler(hooks=[StepSpeedHook()]).run(n_steps=2000).print_report()
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from molix.profiler.mock import MockBatch, MockModel, mock_node_feature_loss
 
 
 @dataclass
-class TrainerResult:
+class Result:
     """Trainer-loop profiling results.
 
     Attributes:
@@ -111,7 +111,7 @@ class _ReplayDataModule:
         return iter(self._batches[:1])
 
 
-class TrainerProfiler:
+class Profiler:
     """Profile the Trainer loop's per-step framework overhead.
 
     Args:
@@ -156,7 +156,7 @@ class TrainerProfiler:
         n_warmup: int = 50,
         batch=None,
         top: int = 15,
-    ) -> TrainerResult:
+    ) -> Result:
         """Run the Trainer loop and attribute per-step wall time to functions.
 
         Args:
@@ -167,7 +167,7 @@ class TrainerProfiler:
             top: Number of hotspot rows to keep.
 
         Returns:
-            A :class:`TrainerResult`.
+            A :class:`Result`.
         """
         if batch is None:
             factory = MockBatch(n_atoms=32, n_pairs=128, n_graphs=4, device=str(self.device))
@@ -201,7 +201,7 @@ class TrainerProfiler:
         hotspots = self._extract_hotspots(trainer_pr, base_pr, n_steps, top)
         overhead = max(0.0, trainer_wall - base_wall)
 
-        return TrainerResult(
+        return Result(
             n_steps=n_steps,
             device=str(self.device),
             n_hooks=len(self.hooks),

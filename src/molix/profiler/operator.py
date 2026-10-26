@@ -59,7 +59,7 @@ class PreparedOperator:
         return self.output
 
 
-class OperatorProfiler:
+class Profiler:
     """Measure one already-defined forward, adjoint or force-training workload.
 
     Compilation/capture, latency measurement, Torch tracing, and external-tool
@@ -71,7 +71,7 @@ class OperatorProfiler:
         self.device = torch.device(device)
         self.protocol = protocol
         if self.device.type != "cuda":
-            raise ValueError("OperatorProfiler requires an explicit CUDA device")
+            raise ValueError("the operator Profiler requires an explicit CUDA device")
 
     @staticmethod
     def fingerprint(inputs: Mapping[str, torch.Tensor]) -> dict[str, dict[str, Any]]:

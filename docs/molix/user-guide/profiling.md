@@ -6,14 +6,14 @@ stack, and none of them asks you to wire up a real training run first.
 
 | Profiler | Question it answers |
 | --- | --- |
-| `TaskProfiler` | How long does one preprocessing task take per sample? |
-| `ProfileSweep` / `Profiler` | What do concrete model/data/runtime configurations cost? |
-| `DataLoaderProfiler` | How long does the consumer block waiting for the next batch? |
-| `TrainerProfiler` | How much per-step time does `Trainer` add on top of a bare loop? |
-| `DatasetProfiler` | What is in my dataset, and what does reading one sample cost? |
+| `task.Profiler` | How long does one preprocessing task take per sample? |
+| `module.ProfileSweep` / `module.Profiler` | What do concrete model/data/runtime configurations cost? |
+| `dataloader.Profiler` | How long does the consumer block waiting for the next batch? |
+| `trainer.Profiler` | How much per-step time does `Trainer` add on top of a bare loop? |
+| `dataset.Profiler` | What is in my dataset, and what does reading one sample cost? |
 
 For CUDA kernels and their derivatives, use the
-[native operator suite](#native-operator-profiling): `OperatorProfiler`,
+[native operator suite](#native-operator-profiling): `operator.Profiler`,
 Nsight Systems and Nsight Compute, also available through `molnex profile`.
 
 All five have the same shape: **configuration goes into the constructor, data
@@ -21,17 +21,17 @@ goes into `run()`, and `run()` returns a result dataclass that knows how to
 print itself.**
 
 ```python
-from molix.profiler import DatasetProfiler
+from molix.profiler import dataset
 
-profiler = DatasetProfiler(n_samples=200)   # configuration
+profiler = dataset.Profiler(n_samples=200)   # configuration
 result = profiler.run(dataset)              # data
 result.print_report()                       # prints to stdout, returns None
 ```
 
 Every field on a result object is a plain attribute, so anything the report
 prints can also be asserted on in a script — `result.avg_num_neighbors` from
-`DatasetResult`, `result.timing.p95_ms` from `TaskResult`,
-`result.overhead_ms_per_step` from `TrainerResult`, and so on.
+`dataset.Result`, `result.timing.p95_ms` from `task.Result`,
+`result.overhead_ms_per_step` from `trainer.Result`, and so on.
 
 This suite is not the same thing as `ProfilerHook` in `molix.hooks`. That hook
 wraps `torch.profiler` around a *live* training run and writes a Chrome trace
@@ -80,7 +80,7 @@ and graph counts are fixed or drawn from ranges on every call, which is how you
 stress-test a module against variable input shapes.
 
 ```python
-from molix.profiler import MockBatch, MockSource
+from molix.profiler.mock import MockBatch, MockSource
 
 source = MockSource(n_samples=500, n_atoms=(5, 20), seed=0)
 sample = source[0]                     # {"Z": (N,), "pos": (N, 3)}
@@ -98,26 +98,27 @@ different shape sequence per instance.
 `MockModel` is the third stand-in: an `nn.Module` that honours the encoder
 contract (reads `atoms.pos`, writes `atoms.node_features` `(N, 1, n_features)`)
 with one scalar multiply and one scalar `Parameter`. Its compute is negligible,
-which is exactly what `TrainerProfiler` needs. Its companion loss,
+which is exactly what `trainer.Profiler` needs. Its companion loss,
 `mock_node_feature_loss`, sums those features so `backward()` reaches the
 parameter.
 
-## TaskProfiler
+## task.Profiler
 
 A *task* is one transform step: anything with an `execute(sample)` method (such
 as `molix.data.NeighborList`, or a `molix.data.BatchTask` over an
 already-collated batch) or any plain callable. Dispatch is structural, and a
 task carrying a callable `fit` is fitted once over the whole source before
-timing starts. `TaskProfiler` times `task.execute(...)` on its own, with no
+timing starts. `task.Profiler` times `task.execute(...)` on its own, with no
 DataLoader, workers or collation in the picture.
 
 ```python
 from molix.data import NeighborList
-from molix.profiler import MockSource, TaskProfiler
+from molix.profiler import task
+from molix.profiler.mock import MockSource
 
 source = MockSource(n_samples=500, n_atoms=(5, 20), seed=0)
 
-result = TaskProfiler(NeighborList(cutoff=5.0)).run(source, n_samples=100, n_warmup=10)
+result = task.Profiler(NeighborList(cutoff=5.0)).run(source, n_samples=100, n_warmup=10)
 result.print_report()
 
 print(result.timing.p95_ms)
@@ -128,7 +129,7 @@ argument. Any object with `__len__` and `__getitem__` works — a `MockSource` o
 a real dataset. Indices wrap modulo the source length, so
 `n_samples` may exceed the number of distinct samples available.
 
-`TaskResult` carries `task_name`, `task_id` (the task's cache-key identity, e.g.
+`task.Result` carries `task_name`, `task_id` (the task's cache-key identity, e.g.
 `nlist:cut=5.0:max=512:pbc=False:sym=True`), the `timing` statistics in
 milliseconds, `n_samples`, and `data_description`. The report is a single
 "Execute time" row with mean, std, p50, p95, min and max.
@@ -147,7 +148,7 @@ each `ProfileSpec` is one concrete point, `Profiler` measures it, and its
 Pydantic `Report` is the serialisable result.
 
 ```python
-from molix.profiler import Profiler, ProfilerConfig, ProfileSweep
+from molix.profiler.module import Profiler, ProfilerConfig, ProfileSweep
 from molzoo.pinet import PiNetPotential, PiNetSpec
 
 sweep = ProfileSweep(
@@ -290,9 +291,9 @@ reported as zero, because raw tensors carry no atom or graph counts.
 
 -->
 
-## DataLoaderProfiler
+## dataloader.Profiler
 
-`DataLoaderProfiler` measures **stall time**: how long the consumer of a
+`dataloader.Profiler` measures **stall time**: how long the consumer of a
 `DataLoader` blocks waiting for the next batch to arrive. It uses the
 inter-batch gap technique — the wall-clock elapsed from the moment the loop
 finishes with batch *i* to the moment batch *i+1* is handed over. That interval
@@ -300,9 +301,10 @@ covers worker scheduling, sample reads, collation and pinning, which is exactly
 the time a training step cannot overlap with compute.
 
 ```python
-from molix.profiler import DataLoaderProfiler, MockSource
+from molix.profiler import dataloader
+from molix.profiler.mock import MockSource
 
-profiler = DataLoaderProfiler(batch_size=32, num_workers=4, pin_memory=True)
+profiler = dataloader.Profiler(batch_size=32, num_workers=4, pin_memory=True)
 result = profiler.run(MockSource(n_samples=2000, n_atoms=(5, 20), seed=0), n_batches=100)
 result.print_report()
 ```
@@ -326,7 +328,7 @@ With `num_workers > 0` the loader is built with the `spawn` start method and a
 top-level picklable collate object, so the profiler works under `spawn` and
 `forkserver` where a closure would fail to pickle.
 
-`DataLoaderResult` reports `load_time` (the stall statistics),
+`dataloader.Result` reports `load_time` (the stall statistics),
 `throughput_graphs_per_sec` and `throughput_atoms_per_sec`, and the per-batch
 size distributions `batch_graph_stats` and `batch_atom_stats` — the latter is
 the one to watch when batches are size-heterogeneous, because a large `std`
@@ -337,9 +339,9 @@ more workers or `persistent_workers=True`.
 If the loader yields no batch beyond the warmup window, `run()` raises
 `RuntimeError` rather than reporting statistics over an empty sample.
 
-## TrainerProfiler
+## trainer.Profiler
 
-The other four profilers measure work you asked for. `TrainerProfiler` measures
+The other four profilers measure work you asked for. `trainer.Profiler` measures
 the work you did not: the per-step cost of the `Trainer` machinery itself —
 `Step` protocol dispatch, hook calls, batch device transfer, `TrainState`
 writes, and the optimizer/scheduler/eval-cadence bookkeeping.
@@ -351,9 +353,9 @@ and that cost is not the Trainer's fault. So the profiler measures a raw loop
 with no Trainer at all and subtracts it.
 
 ```python
-from molix.profiler import TrainerProfiler
+from molix.profiler import trainer
 
-result = TrainerProfiler(device="cpu").run(n_steps=2000, n_warmup=50, top=15)
+result = trainer.Profiler(device="cpu").run(n_steps=2000, n_warmup=50, top=15)
 result.print_report()
 
 print(result.overhead_ms_per_step)
@@ -367,7 +369,7 @@ you actually train with to price hook dispatch.
 ```python
 from molix.hooks import StepSpeedHook
 
-TrainerProfiler(hooks=[StepSpeedHook()], device="cpu").run(n_steps=2000).print_report()
+trainer.Profiler(hooks=[StepSpeedHook()], device="cpu").run(n_steps=2000).print_report()
 ```
 
 `run(n_steps, n_warmup, batch, top)` drives a real `Trainer` for one epoch over
@@ -409,13 +411,13 @@ and the optimizer appear in both runs at roughly equal cost and cancel out,
 leaving framework machinery — the loop body, the `Step` wrapper, device
 transfer, hook dispatch, state writes — at the top.
 
-The same numbers are available on `TrainerResult` as `n_steps`, `device`,
+The same numbers are available on `trainer.Result` as `n_steps`, `device`,
 `n_hooks`, `wall_ms_per_step`, `steps_per_sec`, `baseline_ms_per_step`,
 `overhead_ms_per_step`, `model_name` and the `hotspots` list of dicts.
 
-## DatasetProfiler
+## dataset.Profiler
 
-`DatasetProfiler` characterises the data itself rather than the loop around it.
+`dataset.Profiler` characterises the data itself rather than the loop around it.
 Point it at anything that yields **molpy frames** — the at-rest tier of
 the two-tier data contract, so `sample["Z"]`, `sample["pos"]`,
 `sample["pair_index"]`, `sample["targets"]["U0"]` — and it answers four
@@ -425,7 +427,7 @@ the fields laid out, and what do the labels look like.
 ```python
 import torch
 
-from molix.profiler import DatasetProfiler
+from molix.profiler import dataset
 
 
 def ring(i: int) -> dict:
@@ -444,7 +446,7 @@ def ring(i: int) -> dict:
     }
 
 
-result = DatasetProfiler(n_samples=20).run([ring(i) for i in range(100)])
+result = dataset.Profiler(n_samples=20).run([ring(i) for i in range(100)])
 result.print_report()
 
 assert result.counts_exact          # size stats cover all 100 records
@@ -567,7 +569,7 @@ positions are in Ångström and your energies in eV, that is what you are readin
 
 ## Native operator profiling
 
-`OperatorProfiler` handles a callable with fixed inputs: a forward op, forward
+`operator.Profiler` handles a callable with fixed inputs: a forward op, forward
 plus adjoints, a directional second derivative, or an entire energy/force model.
 The caller defines these computations and checks numerical parity. The profiler
 does not infer a loss or change gradients, precision, inputs, or the model backend.
@@ -577,10 +579,10 @@ for a performance regression:
 
 | Primitive | Purpose | Artifact |
 | --- | --- | --- |
-| `OperatorProfiler.prepare` | Optional fullgraph compilation, warmup, optional CUDA graph capture | First-call wall time and warmup/capture memory peaks |
-| `OperatorProfiler.benchmark` | CUDA-event timing without a tracing profiler | Raw groups, counts and latency statistics |
-| `OperatorProfiler.trace` | PyTorch CPU/operator/device attribution | Chrome trace and event records |
-| `OperatorProfiler.capture` | Bounded CUDA profiler API window with an NVTX label | Input to an external Nsight process |
+| `operator.Profiler.prepare` | Optional fullgraph compilation, warmup, optional CUDA graph capture | First-call wall time and warmup/capture memory peaks |
+| `operator.Profiler.benchmark` | CUDA-event timing without a tracing profiler | Raw groups, counts and latency statistics |
+| `operator.Profiler.trace` | PyTorch CPU/operator/device attribution | Chrome trace and event records |
+| `operator.Profiler.capture` | Bounded CUDA profiler API window with an NVTX label | Input to an external Nsight process |
 | `NsightSystems` | CUDA/NVTX timeline, including graph nodes | `.nsys-rep` and kernel/API CSV |
 | `NsightCompute` | Selected kernel counters: throughput, memory, occupancy, warp stalls | `.ncu-rep`, raw metric CSV/JSON |
 
@@ -590,9 +592,9 @@ Example workload, run inside a GPU allocation:
 from pathlib import Path
 import json
 import torch
-from molix.profiler import OperatorProfiler, OperatorProtocol
+from molix.profiler.operator import OperatorProtocol, Profiler
 
-profiler = OperatorProfiler("cuda:0", OperatorProtocol())
+profiler = Profiler("cuda:0", OperatorProtocol())
 inputs = (torch.randn(1024, 128, device="cuda"),)
 identity = profiler.fingerprint({"x": inputs[0]})
 prepared = profiler.prepare(lambda x: x.sin(), inputs, compile=True, cuda_graph=True)
@@ -635,7 +637,7 @@ much per iteration of the workload — answered from `stats.json` (or the raw
 instantiations of one kernel stay readable, the CUDA API rows nsys lists among
 the kernels (`cudaDeviceSynchronize`, `cudaGraphLaunch`) are dropped, and the
 totals are divided by the iteration count the workload passed to
-`OperatorProfiler.capture`. The API is `NsightSystems.kernel_summary` /
+`operator.Profiler.capture`. The API is `NsightSystems.kernel_summary` /
 `format_summary`.
 
 `ptxas` reads a build log of a `-Xptxas=-v` compilation
@@ -648,7 +650,7 @@ fewer registers and spills more, is found here before it is measured. Use
 can interleave the ptxas blocks of different translation units, `ninja` prints
 each job's output whole.
 
-`OperatorProfiler.compare(reference, candidate)` turns two `benchmark` records
+`operator.Profiler.compare(reference, candidate)` turns two `benchmark` records
 into a speed-up, flags whether their group means are separated at all, and
 whether they were taken in the same environment. Compare only records from the
 same GPU allocation and the exact same inputs: the reference kernel's own
@@ -689,10 +691,10 @@ energy/force workload before changing production dispatch.
 
 ## Choosing a profiler
 
-Working outwards from the data usually converges fastest. Run `DatasetProfiler`
+Working outwards from the data usually converges fastest. Run `dataset.Profiler`
 first to learn what the records look like and whether sizes are skewed; then
-`TaskProfiler` on any preprocessing step that looks expensive; then
-`DataLoaderProfiler` to see whether batch production keeps up; then
-`Profiler` to compare model-only and end-to-end costs and inspect its hotspots;
-and finally `TrainerProfiler` if per-step time still exceeds what the model and
+`task.Profiler` on any preprocessing step that looks expensive; then
+`dataloader.Profiler` to see whether batch production keeps up; then
+`module.Profiler` to compare model-only and end-to-end costs and inspect its hotspots;
+and finally `trainer.Profiler` if per-step time still exceeds what the model and
 the loader together explain.

@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from molix.profiler import Profiler, ProfilerConfig, ProfileSpec, ProfileSweep
+from molix.profiler.module import Profiler, ProfilerConfig, ProfileSpec, ProfileSweep
 
 
 class _Counter(nn.Module):

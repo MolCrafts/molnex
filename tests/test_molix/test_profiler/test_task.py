@@ -1,4 +1,4 @@
-"""Unit tests for :class:`molix.profiler.task.TaskProfiler`.
+"""Unit tests for :class:`molix.profiler.task.Profiler`.
 
 Mirrors ``src/molix/profiler/task.py``, which had no test module of its own
 — the dispatch it performs was entirely unpinned.
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from molix.profiler.task import TaskProfiler
+from molix.profiler.task import Profiler
 
 # ---------------------------------------------------------------------------
 # Stubs — one behaviour each, so a failure names the dispatch branch it broke
@@ -111,11 +111,11 @@ class _NotATask:
 # ---------------------------------------------------------------------------
 
 
-class TestTaskProfiler:
+class TestProfiler:
     def test_execute_object_is_timed_through_execute(self) -> None:
         """A task carrying ``execute`` is dispatched through it, once per sample."""
         task = _ExecuteTask()
-        result = TaskProfiler(task).run(_Source(n=4), n_samples=3, n_warmup=1)
+        result = Profiler(task).run(_Source(n=4), n_samples=3, n_warmup=1)
 
         assert task.seen == [0, 1, 2, 3]  # warmup + measured, cycling the source
         assert result.n_samples == 3
@@ -126,7 +126,7 @@ class TestTaskProfiler:
     def test_plain_callable_is_timed_through_call(self) -> None:
         """A task with no ``execute`` falls back to calling the task itself."""
         task = _CallableTask()
-        result = TaskProfiler(task).run(_Source(n=4), n_samples=3, n_warmup=1)
+        result = Profiler(task).run(_Source(n=4), n_samples=3, n_warmup=1)
 
         assert task.seen == [0, 1, 2, 3]
         assert result.n_samples == 3
@@ -134,7 +134,7 @@ class TestTaskProfiler:
     def test_execute_wins_when_task_is_also_callable(self) -> None:
         """``execute`` takes precedence over ``__call__`` when both exist."""
         task = _ExecuteAndCallableTask()
-        TaskProfiler(task).run(_Source(n=2), n_samples=2, n_warmup=0)
+        Profiler(task).run(_Source(n=2), n_samples=2, n_warmup=0)
 
         assert task.via_execute == [0, 1]
         assert task.via_call == []
@@ -142,7 +142,7 @@ class TestTaskProfiler:
     def test_fit_runs_once_over_the_whole_source_before_timing(self) -> None:
         """A callable ``fit`` is invoked once, with every sample, before timing."""
         task = _FittableTask()
-        TaskProfiler(task).run(_Source(n=4), n_samples=2, n_warmup=0)
+        Profiler(task).run(_Source(n=4), n_samples=2, n_warmup=0)
 
         assert task.fitted == [{"i": 0}, {"i": 1}, {"i": 2}, {"i": 3}]
         assert task.calls == ["fit", "execute", "execute"]
@@ -150,10 +150,10 @@ class TestTaskProfiler:
     def test_non_callable_task_raises_type_error(self) -> None:
         """A task that is neither runnable nor callable is rejected, not skipped."""
         with pytest.raises(TypeError, match="_NotATask"):
-            TaskProfiler(_NotATask()).run(_Source(n=2), n_samples=1, n_warmup=0)
+            Profiler(_NotATask()).run(_Source(n=2), n_samples=1, n_warmup=0)
 
     def test_task_id_falls_back_to_type_name(self) -> None:
         """Without a ``task_id`` attribute the report is keyed by the type name."""
-        result = TaskProfiler(_CallableTask()).run(_Source(n=2), n_samples=1, n_warmup=0)
+        result = Profiler(_CallableTask()).run(_Source(n=2), n_samples=1, n_warmup=0)
 
         assert result.task_id == "_CallableTask"

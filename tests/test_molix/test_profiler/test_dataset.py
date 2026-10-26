@@ -1,4 +1,4 @@
-"""Tests for :class:`molix.profiler.dataset.DatasetProfiler`.
+"""Tests for :class:`molix.profiler.dataset.Profiler`.
 
 Every fixture is built from **literal** sample dicts (no RNG), so the sizes
 asserted below are analytic constants of the fixture, not measured values.
@@ -13,8 +13,8 @@ import torch
 
 from molix.data.dataset import BaseDataset
 from molix.profiler.dataset import (
-    DatasetProfiler,
-    DatasetResult,
+    Profiler,
+    Result,
     TargetStat,
     _flatten_leaves,
 )
@@ -113,18 +113,18 @@ def ring_dataset() -> _CountingDataset:
 
 
 # ---------------------------------------------------------------------------
-# DatasetProfiler
+# Profiler
 # ---------------------------------------------------------------------------
 
 
-class TestDatasetProfiler:
+class TestProfiler:
     """Config in ``__init__``, data in ``run()``; exact cache stats + sampled access."""
 
     def test_run_uses_exact_cache_counts(self, ring_dataset):
         """Size stats come from the packed pointers — all 100 records, not the 5 sampled."""
-        result = DatasetProfiler(n_samples=5).run(ring_dataset)
+        result = Profiler(n_samples=5).run(ring_dataset)
 
-        assert isinstance(result, DatasetResult)
+        assert isinstance(result, Result)
         assert result.counts_exact is True
         assert result.n_total == _N_RECORDS
         assert result.max_atoms == ring_dataset.max_atoms == _MAX_ATOMS
@@ -140,7 +140,7 @@ class TestDatasetProfiler:
         """The access loop is bounded by ``n_samples`` (+ warmup), never ``n_total``."""
         ds = _CountingDataset([_record(i) for i in range(_N_RECORDS)])
 
-        result = DatasetProfiler(n_samples=5, n_warmup=3).run(ds)
+        result = Profiler(n_samples=5, n_warmup=3).run(ds)
 
         assert result.n_sampled == 5
         assert result.cold_access_ms > 0.0
@@ -152,9 +152,9 @@ class TestDatasetProfiler:
         """A ``list[dict]`` has no packed pointers: degrade audibly, never raise."""
         records = [_record(i, n=4) for i in range(10)]
 
-        result = DatasetProfiler(n_samples=5).run(records)
+        result = Profiler(n_samples=5).run(records)
 
-        assert isinstance(result, DatasetResult)
+        assert isinstance(result, Result)
         assert result.counts_exact is False
         assert result.fields_exact is False
         assert result.n_total == 10
@@ -175,7 +175,7 @@ class TestDatasetProfiler:
         with pytest.raises(ValueError):
             BaseDataset.nrows_of(ds, "pairs")  # precondition: no edges table, exact path refuses
 
-        result = DatasetProfiler(n_samples=3).run(ds)
+        result = Profiler(n_samples=3).run(ds)
 
         assert result.edge_stats is None
         assert result.warnings
@@ -183,27 +183,27 @@ class TestDatasetProfiler:
     def test_run_rejects_empty_dataset(self):
         """Empty input is a user error, and the message must say what to pass instead."""
         with pytest.raises(ValueError, match="FrameDataset"):
-            DatasetProfiler().run([])
+            Profiler().run([])
 
     def test_init_rejects_degenerate_config(self):
         """``n_samples <= 0`` / ``stride <= 0`` are rejected at construction."""
         with pytest.raises(ValueError, match="n_samples"):
-            DatasetProfiler(n_samples=0)
+            Profiler(n_samples=0)
         with pytest.raises(ValueError, match="stride"):
-            DatasetProfiler(stride=0)
+            Profiler(stride=0)
 
 
 # ---------------------------------------------------------------------------
-# DatasetResult
+# Result
 # ---------------------------------------------------------------------------
 
 
-class TestDatasetResult:
+class TestResult:
     """The report is a sectioned frame; diagnostics are ``[WARN]`` lines, never raises."""
 
     def test_print_report_sections(self, ring_dataset, capsys):
         """All five sections and the 72-char rule are present."""
-        DatasetProfiler(n_samples=5).run(ring_dataset).print_report()
+        Profiler(n_samples=5).run(ring_dataset).print_report()
 
         out = capsys.readouterr().out
         assert "─" * 72 in out
@@ -216,7 +216,7 @@ class TestDatasetResult:
         samples[3]["targets"]["U0"] = torch.tensor([float("nan")], dtype=torch.float32)
         ds = _CountingDataset(samples)
 
-        result = DatasetProfiler(n_samples=8).run(ds)
+        result = Profiler(n_samples=8).run(ds)
         result.print_report()
 
         assert all(isinstance(t, TargetStat) for t in result.targets)

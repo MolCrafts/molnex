@@ -5,10 +5,10 @@ yielding **flat sample dicts** (the raw-sample tier of the two-tier data
 contract): :class:`~molix.data.frame_dataset.FrameDataset` /
 :class:`~molix.data.dataset.SubsetDataset`, a
 :class:`~molix.profiler.mock.MockSource`, or a plain ``Sequence[dict]``.
-Complements :class:`~molix.profiler.dataloader.DataLoaderProfiler`, which
+Complements :class:`~molix.profiler.dataloader.Profiler`, which
 times batch *throughput* rather than the data itself.
 
-:meth:`DatasetProfiler.run` merges two paths:
+:meth:`Profiler.run` merges two paths:
 
 1. **Exact fast path** — when
    :meth:`~molix.data.dataset.BaseDataset.nrows_of` can read table lengths
@@ -33,9 +33,9 @@ are printed exactly as the dataset stores them.
 
 Example::
 
-    from molix.profiler import DatasetProfiler
+    from molix.profiler import dataset
 
-    result = DatasetProfiler(n_samples=500).run(train_dataset)
+    result = dataset.Profiler(n_samples=500).run(train_dataset)
     result.print_report()
     result.avg_num_neighbors  # exact, straight off the packed pointers
 """
@@ -185,7 +185,7 @@ class TargetStat:
 
 
 @dataclass
-class DatasetResult:
+class Result:
     """Profiling results for a dataset.
 
     Attributes:
@@ -477,7 +477,7 @@ def _or_default(data: object, attr: str, default: float) -> float:
         return default
 
 
-class DatasetProfiler:
+class Profiler:
     """Profile a dataset's sizes, access cost, field layout and labels.
 
     Args:
@@ -485,7 +485,7 @@ class DatasetProfiler:
         stride: Step between inspected indices — ``stride > 1`` spreads the
             sample across an ordered dataset instead of reading a prefix.
         n_warmup: Accesses discarded before the timed ones, so page-in and
-            allocator warm-up do not land in :attr:`DatasetResult.access_ms`
+            allocator warm-up do not land in :attr:`Result.access_ms`
             (they show up in ``cold_access_ms`` instead).
 
     Raises:
@@ -493,7 +493,7 @@ class DatasetProfiler:
 
     Example::
 
-        profiler = DatasetProfiler(n_samples=500, stride=4)
+        profiler = dataset.Profiler(n_samples=500, stride=4)
         profiler.run(cached_dataset).print_report()
         profiler.run([sample_a, sample_b]).print_report()   # plain Sequence
     """
@@ -513,7 +513,7 @@ class DatasetProfiler:
         self.stride = stride
         self.n_warmup = max(0, n_warmup)
 
-    def run(self, data: object) -> DatasetResult:
+    def run(self, data: object) -> Result:
         """Profile *data* and return the grouped result.
 
         Args:
@@ -523,9 +523,9 @@ class DatasetProfiler:
                 layout for free.
 
         Returns:
-            :class:`DatasetResult`. Everything diagnostic — non-finite
+            :class:`Result`. Everything diagnostic — non-finite
             labels, size skew, missing ``edge_ptr``, inexact sections — lands
-            in :attr:`DatasetResult.warnings`, not in an exception.
+            in :attr:`Result.warnings`, not in an exception.
 
         Raises:
             ValueError: *data* is empty, or exposes no ``__len__`` /
@@ -542,7 +542,7 @@ class DatasetProfiler:
         targets, target_warnings = self._target_diagnostics(sampled.target_values, sizes.atom_stats)
 
         bytes_stat = ValueStat.from_list(sampled.byte_counts)
-        return DatasetResult(
+        return Result(
             n_total=n_total,
             n_sampled=len(indices),
             counts_exact=sizes.counts_exact,
