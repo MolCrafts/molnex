@@ -7,12 +7,13 @@ edge geometry — are in :mod:`molrep`):
 - :class:`ProductTypeEmbedding` — ``[E_c(t_s) ‖ E_n(t_t)] ⊙ W b``.
 - :class:`WeightedChannels` — per-(channel, irrep) weighting of the
   spherical-harmonic basis (``MakeWeightedChannels``), optionally summed
-  into the centre atoms by cuEquivariance's indexed output.
-- :class:`Contracter` — the path-channel-coupled ``u,iu,ju,ku+ijk``
-  cuEquivariance tensor product; weights ``(u, P)`` with paths enumerated
-  ``(out, in1, in2)``, so an official ``Contracter.weights`` loads as is.
+  into the centre atoms (:class:`molrep.equivariance.WeightedChannels`).
+- :class:`Contracter` — the path-channel-coupled ``u,iu,ju,ku+ijk`` tensor
+  product (:class:`molrep.equivariance.Contracter`); weights ``(u, P)`` with
+  paths enumerated ``(out, in1, in2)``, so an official ``Contracter.weights``
+  loads as is.
 
-Tensor features are cuEquivariance ``ir_mul``, flattened ``(rows, D · u)``.
+Tensor features are ``ir_mul``, flattened ``(rows, D · u)``.
 
 Reference:
     Musaelian et al. "Learning Local Equivariant Representations for
@@ -25,14 +26,13 @@ Reference:
 
 from __future__ import annotations
 
-import itertools
 import math
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 
-from molrep import cueq
+import molrep.eq as meq
+from molrep import equivariance
 from molrep.embedding.mlp import ScalarMLPFunction
 
 
@@ -85,20 +85,17 @@ class WeightedChannels(nn.Module):
     of irrep ``r`` in ``channel`` ``c`` takes the weight ``w[c, r]``. Weights
     arrive channel-major, ``(E, u · R)`` read as ``(E, u, R)`` — the layout of
     Allegro's ``MakeWeightedChannels(weight_individual_irreps=True)``. The
-    output is cuEquivariance ``ir_mul``, flattened ``(E, D · u)``.
+    output is ``ir_mul``, flattened ``(E, D · u)``. With ``index`` /
+    ``num_rows`` the rows are summed into ``index`` (the Allegro environment
+    sum), so the ``(E, D · u)`` message is never built.
 
-    One cuEquivariance segmented polynomial, subscripts ``",u,u"``: operand 0
-    is the basis as ``D`` scalar segments, operand 1 the weights as ``R``
-    segments of ``(u,)`` (irrep-major, so the channel-major input is
-    transposed per call), the output ``D`` segments of ``(u,)``; one path per
-    component ``d`` joins ``(d, irrep(d), d)`` with coefficient 1. With
-    ``index`` / ``num_rows`` the rows are summed into ``index`` by cue's
-    indexed output (the Allegro environment sum), so the ``(E, D · u)``
-    message is never built.
+    The contraction is :class:`molrep.equivariance.WeightedChannels`, which
+    reads the weights irrep-major; the transpose is a view.
 
     Args:
         irrep_dims: Dimension ``2l + 1`` of each irrep of the basis, in order.
         channels: Output multiplicity ``u``.
+        dtype: Floating dtype of the coefficient table.
 
     Reference:
         ``allegro/nn/_strided/_channels.py::MakeWeightedChannels``.
@@ -109,17 +106,7 @@ class WeightedChannels(nn.Module):
         self.channels = int(channels)
         self.num_irreps = len(irrep_dims)
         self.weight_numel = self.channels * self.num_irreps
-        d = cue.SegmentedTensorProduct.from_subscripts(",u,u")
-        for _ in range(self.num_irreps):
-            d.add_segment(1, (self.channels,))
-        for r, dim in enumerate(irrep_dims):
-            for _ in range(dim):
-                component = d.add_segment(0, ())
-                d.add_segment(2, (self.channels,))
-                d.add_path(component, r, component, c=1.0)
-        self.op = cueq.SegmentedPolynomial(
-            cue.SegmentedPolynomial.eval_last_operand(d), math_dtype=dtype
-        )
+        self.op = equivariance.WeightedChannels(list(irrep_dims), self.channels, dtype=dtype)
 
     def forward(
         self,
@@ -147,26 +134,26 @@ class WeightedChannels(nn.Module):
         if (index is None) != (num_rows is None):
             raise ValueError("index and num_rows come together")
         rows = weights.shape[0]
-        w = weights.view(rows, self.channels, self.num_irreps).transpose(1, 2).reshape(rows, -1)
+        weight = weights.view(rows, self.channels, self.num_irreps).transpose(1, 2)
         if index is None:
-            return self.op([basis, w])[0]
-        return self.op(
-            [basis, w],
-            output_shapes={0: basis.new_empty((num_rows, 0))},
-            output_indices={0: index},
-        )[0]
+            return self.op(basis, weight)
+        return self.op(basis, weight, index, num_rows)
 
 
 class Contracter(nn.Module):
     """Path-channel-coupled ``u,iu,ju,ku+ijk`` tensor product.
+
+    The contraction is :class:`molrep.equivariance.Contracter`; this module
+    owns the parameter in Allegro's layout, ``weights`` ``(channels, paths)``
+    with paths enumerated ``(out, in1, in2)``, so an official
+    ``Contracter.weights`` loads as is.
 
     Args:
         irreps_in1: Irreps of the pair operand, one copy each (``"0e+1o+…"``).
         irreps_in2: Irreps of the gathered atom operand, one copy each.
         irreps_out: Irreps of the output, one copy each (order preserved).
         channels: Shared multiplicity ``u`` of every operand.
-        method: cuEquivariance kernel method (``"uniform_1d"`` or
-            ``"fused_tp"``); see :mod:`molrep.cueq`.
+        dtype: Floating dtype of the parameter and the coefficient table.
 
     Raises:
         ValueError: If no path connects the inputs to the outputs.
@@ -175,36 +162,17 @@ class Contracter(nn.Module):
     def __init__(
         self,
         *,
-        irreps_in1: cue.Irreps,
-        irreps_in2: cue.Irreps,
-        irreps_out: cue.Irreps,
+        irreps_in1: meq.Irreps,
+        irreps_in2: meq.Irreps,
+        irreps_out: meq.Irreps,
         channels: int,
-        method: str = "uniform_1d",
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
         u = int(channels)
-        d = cue.SegmentedTensorProduct.from_subscripts("u,iu,ju,ku+ijk")
-        for _, ir in irreps_in1:
-            d.add_segment(1, (ir.dim, u))
-        for _, ir in irreps_in2:
-            d.add_segment(2, (ir.dim, u))
-        for _, ir in irreps_out:
-            d.add_segment(3, (ir.dim, u))
-        num_paths = 0
-        for (i3, (_, ir3)), (i1, (_, ir1)), (i2, (_, ir2)) in itertools.product(
-            enumerate(irreps_out), enumerate(irreps_in1), enumerate(irreps_in2)
-        ):
-            if ir3 in ir1 * ir2:
-                for cg in cue.clebsch_gordan(ir1, ir2, ir3):
-                    d.add_path(None, i1, i2, i3, c=cg)
-                    num_paths += 1
-        if num_paths == 0:
-            raise ValueError(f"no tensor-product path {irreps_in1} x {irreps_in2} -> {irreps_out}")
-        self.num_paths = num_paths
-        poly = cue.SegmentedPolynomial.eval_last_operand(d).flatten_coefficient_modes()
-        self.tp = cueq.SegmentedPolynomial(poly, method=method, math_dtype=dtype)
-        self.weights = nn.Parameter(torch.empty(u, num_paths, dtype=dtype))
+        self.op = equivariance.Contracter(irreps_in1, irreps_in2, irreps_out, u, dtype=dtype)
+        self.num_paths = self.op.weight_segments
+        self.weights = nn.Parameter(torch.empty(u, self.num_paths, dtype=dtype))
         nn.init.uniform_(self.weights, -math.sqrt(3.0), math.sqrt(3.0))
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
@@ -218,5 +186,4 @@ class Contracter(nn.Module):
         Returns:
             ``(E, D_out · u)`` ``ir_mul``.
         """
-        weights = self.weights.transpose(0, 1).reshape(1, -1)
-        return self.tp([weights, x1, x2], input_indices={2: index})[0]
+        return self.op(x1, x2, self.weights.transpose(0, 1), index)

@@ -6,12 +6,13 @@ cuEquivariance fixes its precision at construction.
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import pytest
 import torch
 
+import molrep.eq as meq
+import molrep.eq.torch as cuet
 from molix.F.scatter import scatter_sum
-from molrep import cueq
+from molrep.equivariance import Linear
 from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
 from molzoo.mace.layers import (
     AgnosticInteraction,
@@ -91,6 +92,12 @@ def residual_layer():
     )
 
 
+def _edge_messages(conv_tp, up, edge_attrs, tp_weights, source):
+    """One product per edge, ``(E, irreps_out.dim)``: each edge scattered onto its own row."""
+    own = torch.arange(source.shape[0], device=source.device)
+    return conv_tp(up, edge_attrs, tp_weights, indices_1=source, indices_out=own, size_out=len(own))
+
+
 def _density_message(layer, graph):
     """The pre-fusion formulation: gather ``x[source]`` → per-edge TP → scatter on ``target``.
 
@@ -104,7 +111,7 @@ def _density_message(layer, graph):
     density = scatter_sum(
         torch.tanh(layer.density_fn(graph["edge_feats"]) ** 2), target, dim=0, dim_size=n
     )
-    mji = layer.conv_tp(up[source], graph["edge_attrs"], tp_weights)
+    mji = _edge_messages(layer.conv_tp, up, graph["edge_attrs"], tp_weights, source)
     message = scatter_sum(mji, target, dim=0, dim_size=n)
     return layer.linear(message) / (density + 1.0)
 
@@ -199,7 +206,7 @@ def _agnostic_message(layer, graph):
     n = graph["node_feats"].shape[0]
     up = layer.linear_up(graph["node_feats"])
     tp_weights = layer.conv_tp_weights(graph["edge_feats"])
-    mji = layer.conv_tp(up[source], graph["edge_attrs"], tp_weights)
+    mji = _edge_messages(layer.conv_tp, up, graph["edge_attrs"], tp_weights, source)
     message = scatter_sum(mji, target, dim=0, dim_size=n)
     return layer.linear(message) / AVG_NUM_NEIGHBORS
 
@@ -272,7 +279,7 @@ def _residual_message(layer: ResidualInteraction, graph: dict) -> torch.Tensor:
     )
     tp_weights = layer.conv_tp_weights(edge_feats)
     density = scatter_sum(torch.tanh(layer.density_fn(edge_feats) ** 2), target, dim=0, dim_size=n)
-    mji = layer.conv_tp(up[source], graph["edge_attrs"], tp_weights)
+    mji = _edge_messages(layer.conv_tp, up, graph["edge_attrs"], tp_weights, source)
     message = scatter_sum(mji, target, dim=0, dim_size=n)
     message = layer.linear_1(message) / (density * layer.beta + layer.alpha)
     message = message + layer.linear_res(up)
@@ -284,10 +291,10 @@ class TestPartitionGate:
 
     def test_splits_scalars_gates_gated(self):
         """``8x0e+8x1o`` → scalars ``8x0e``, one gate per gated multiplet, gated ``8x1o``."""
-        scalars, gates, gated = _partition_gate(cue.Irreps("O3", TARGET))
-        assert scalars == cue.Irreps("O3", f"{FEATURES}x0e")
-        assert gates == cue.Irreps("O3", f"{FEATURES}x0e")
-        assert gated == cue.Irreps("O3", f"{FEATURES}x1o")
+        scalars, gates, gated = _partition_gate(meq.Irreps("O3", TARGET))
+        assert scalars == meq.Irreps("O3", f"{FEATURES}x0e")
+        assert gates == meq.Irreps("O3", f"{FEATURES}x0e")
+        assert gated == meq.Irreps("O3", f"{FEATURES}x1o")
 
 
 class TestResidualInteraction:
@@ -312,7 +319,10 @@ class TestResidualInteraction:
     def test_cuda_matches_explicit_gather_scatter(self, layer, graph) -> None:
         """molix scatter on GPU matches the explicit gather → TP → scatter route."""
         layer = layer.cuda()
-        gpu = {k: v.cuda() if torch.is_tensor(v) else v for k, v in graph.items()}
+        gpu = {
+            k: (_elements(v.index.cuda()) if isinstance(v, ElementIndex) else v.cuda())
+            for k, v in graph.items()
+        }
         out, _ = layer(**gpu)
         assert torch.allclose(out, _residual_message(layer, gpu), atol=1e-10)
 
@@ -390,10 +400,10 @@ def _pair(irreps_in: str, num_elements: int, irreps_out: str):
     The product's flat weight reaches the module the way an official
     checkpoint's does: through the boundary conversion.
     """
-    i1, i3 = cue.Irreps("O3", irreps_in), cue.Irreps("O3", irreps_out)
-    attrs = cue.Irreps("O3", f"{num_elements}x0e")
-    product = cueq.FullyConnectedTensorProduct(
-        i1, attrs, i3, layout=cue.ir_mul, dtype=torch.float64
+    i1, i3 = meq.Irreps("O3", irreps_in), meq.Irreps("O3", irreps_out)
+    attrs = meq.Irreps("O3", f"{num_elements}x0e")
+    product = cuet.FullyConnectedTensorProduct(
+        i1, attrs, i3, layout=meq.ir_mul, dtype=torch.float64, method="naive"
     )
     linear = ElementLinear(i1, attrs, i3, dtype=torch.float64)
     with torch.no_grad():
@@ -431,19 +441,19 @@ class TestElementLinear:
     def test_attributes_must_be_scalars(self):
         with pytest.raises(ValueError, match="Cx0e"):
             ElementLinear(
-                cue.Irreps("O3", "4x0e"),
-                cue.Irreps("O3", "2x0e+1x1o"),
-                cue.Irreps("O3", "4x0e"),
+                meq.Irreps("O3", "4x0e"),
+                meq.Irreps("O3", "2x0e+1x1o"),
+                meq.Irreps("O3", "4x0e"),
                 dtype=torch.float64,
             )
 
 
 class TestOneHotLinear:
     def test_equals_the_linear_over_a_one_hot(self):
-        """The row lookup is ``cuet.Linear(one_hot)`` with the linear's own weight."""
+        """The row lookup is ``Linear(one_hot)`` with the linear's own weight."""
         torch.manual_seed(0)
-        attrs, out = cue.Irreps("O3", "7x0e"), cue.Irreps("O3", "5x0e")
-        linear = cueq.Linear(attrs, out, layout=cue.ir_mul, dtype=torch.float64)
+        attrs, out = meq.Irreps("O3", "7x0e"), meq.Irreps("O3", "5x0e")
+        linear = Linear(attrs, out, layout=meq.ir_mul, dtype=torch.float64)
         lookup = OneHotLinear(attrs, out, dtype=torch.float64)
         with torch.no_grad():
             lookup.weight.copy_(one_hot_weight(lookup, linear.weight.detach()))
@@ -454,7 +464,7 @@ class TestOneHotLinear:
     def test_weight_is_the_row_table(self):
         """``(C, F)``: the lookup indexes the weight directly, no per-call view."""
         lookup = OneHotLinear(
-            cue.Irreps("O3", "7x0e"), cue.Irreps("O3", "5x0e"), dtype=torch.float64
+            meq.Irreps("O3", "7x0e"), meq.Irreps("O3", "5x0e"), dtype=torch.float64
         )
         assert lookup.weight.shape == (7, 5)
 
@@ -465,7 +475,7 @@ class TestOneHotLinear:
     def test_rejects_anything_but_scalars_to_scalars(self, irreps_in, irreps_out):
         with pytest.raises(ValueError, match="x0e"):
             OneHotLinear(
-                cue.Irreps("O3", irreps_in), cue.Irreps("O3", irreps_out), dtype=torch.float64
+                meq.Irreps("O3", irreps_in), meq.Irreps("O3", irreps_out), dtype=torch.float64
             )
 
 

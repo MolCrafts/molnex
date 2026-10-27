@@ -80,8 +80,12 @@ class ModuleStub(nn.Module):
 
 
 class StubUnpickler(pickle.Unpickler):
-    """``pickle.Unpickler`` that resolves torch / stdlib / numpy / cuEquivariance
+    """``pickle.Unpickler`` that resolves torch / stdlib / numpy / molrep.eq
     globals and stubs every other class as a :class:`ModuleStub` subclass.
+
+    Official checkpoints name classes under ``cuequivariance`` and
+    ``cuequivariance_torch``. Those paths load from :mod:`molrep.eq` and
+    :mod:`molrep.eq.torch`.
 
     One policy for every reader. Tensors stored outside the pickle (a zip's
     ``.data/`` records) come through ``persistent_load``, supplied by the
@@ -100,8 +104,10 @@ class StubUnpickler(pickle.Unpickler):
         "_codecs",
         "copyreg",
         "numpy",
-        "cuequivariance",
-        "cuequivariance_torch",
+    )
+    _FRONTEND: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("cuequivariance_torch", "molrep.eq.torch"),
+        ("cuequivariance", "molrep.eq"),
     )
     _stubs: ClassVar[dict[tuple[str, str], type]] = {}
 
@@ -113,7 +119,15 @@ class StubUnpickler(pickle.Unpickler):
             self.persistent_load = persistent_load
 
     def find_class(self, module: str, name: str) -> Any:
-        if module.split(".")[0] in self._ROOTS:
+        for old, new in self._FRONTEND:
+            if module == old or module.startswith(old + "."):
+                module = new + module[len(old) :]
+                break
+        if (
+            module.split(".")[0] in self._ROOTS
+            or module == "molrep.eq"
+            or module.startswith("molrep.eq.")
+        ):
             return super().find_class(module, name)
         key = (module, name)
         if key not in StubUnpickler._stubs:
@@ -345,7 +359,7 @@ class CheckpointRemap:
             )
 
         mismatched: list[str] = []
-        import cuequivariance_torch as cuet
+        from molrep.equivariance import Linear
 
         modules = dict(model.named_modules())
         for key, value in renamed.items():
@@ -359,7 +373,7 @@ class CheckpointRemap:
             owner, _, leaf = key.rpartition(".")
             shared_linear_axis = (
                 leaf == "weight"
-                and isinstance(modules.get(owner), cuet.Linear)
+                and isinstance(modules.get(owner), Linear)
                 and (
                     (value.ndim == 1 and tuple(want) == (1, value.numel()))
                     or (len(want) == 1 and tuple(value.shape) == (1, own[key].numel()))

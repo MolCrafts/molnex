@@ -31,6 +31,9 @@ namespace molnex::equivariance {
 
 // The coefficient table travels as a kernel parameter: constant bank, read as
 // an FMA operand, no per-call device copy, captured by value in a CUDA graph.
+// Kernels take it ``__grid_constant__``: the unrolled term loop reaches it
+// through a reference, and without the annotation the compiler copies the
+// whole table into local memory (a multi-kilobyte stack frame per thread).
 template <typename T, int NT>
 struct Coefficients {
   T c[NT];
@@ -108,38 +111,43 @@ __device__ __forceinline__ void row_range(const int32_t* __restrict__ rowptr, in
 template <typename T, bool Heavy>
 constexpr int kMinBlocks = sizeof(T) == 4 ? (Heavy ? 2 : 4) : 2;
 
+// ``channels`` is the row stride of the channel operands; a CTA of ``U`` threads
+// walks it in tiles of ``U`` (one tile at MACE's 128, eight at OMol's 1024
+// first-layer width), re-walking the row's edges per tile.
 template <typename T, int L1, int L2, int U>
 __global__ void __launch_bounds__(U, kMinBlocks<T, false>) product_kernel(
     const T* __restrict__ a, const T* __restrict__ b, const T* __restrict__ w,
     const int64_t* __restrict__ source, const int32_t* __restrict__ order,
     const int32_t* __restrict__ rowptr, T* __restrict__ out, int64_t rows_a,
-    int64_t edges, Coefficients<T, Config<L1, L2>::NT> coef) {
+    int64_t edges, int64_t channels, const __grid_constant__ Coefficients<T, Config<L1, L2>::NT> coef) {
   using Cfg = Config<L1, L2>;
   constexpr int NA = Cfg::NA, NB = Cfg::NB, NP = Cfg::NP, NK = Cfg::NK;
   const int64_t n = blockIdx.x, rows = gridDim.x;
-  const int c = threadIdx.x;
   int32_t begin, end;
   row_range(rowptr, n, edges, begin, end);
   __shared__ int32_t s_edge[U], s_source[U];
   __shared__ T s_b[U * NB];
-  T acc[NK];
+  for (int64_t c0 = 0; c0 < channels; c0 += U) {
+    const int64_t c = c0 + threadIdx.x;
+    T acc[NK];
 #pragma unroll
-  for (int k = 0; k < NK; ++k) acc[k] = T(0);
-  for_each_edge<U, 2, NB, T>(source, order, b, nullptr, begin, end, edges, rows_a, s_edge,
-                             s_source, s_b, nullptr, [&](int64_t e, int64_t s, int q) {
-    const T* bv = s_b + q * NB;
-    T av[NA], wv[NP];
+    for (int k = 0; k < NK; ++k) acc[k] = T(0);
+    for_each_edge<U, 2, NB, T>(source, order, b, nullptr, begin, end, edges, rows_a, s_edge,
+                               s_source, s_b, nullptr, [&](int64_t e, int64_t s, int q) {
+      const T* bv = s_b + q * NB;
+      T av[NA], wv[NP];
 #pragma unroll
-    for (int i = 0; i < NA; ++i) av[i] = a[(s * NA + i) * U + c];
+      for (int i = 0; i < NA; ++i) av[i] = a[(s * NA + i) * channels + c];
 #pragma unroll
-    for (int p = 0; p < NP; ++p) wv[p] = w[(e * NP + p) * U + c];
-    for_each_term<Cfg::NT>([&]<int t>() {
-      constexpr Term m = kTable<L1, L2>[t];
-      acc[m.k] += coef.c[t] * (av[m.i] * bv[m.j]) * wv[m.p];
+      for (int p = 0; p < NP; ++p) wv[p] = w[(e * NP + p) * channels + c];
+      for_each_term<Cfg::NT>([&]<int t>() {
+        constexpr Term m = kTable<L1, L2>[t];
+        acc[m.k] += coef.c[t] * (av[m.i] * bv[m.j]) * wv[m.p];
+      });
     });
-  });
 #pragma unroll
-  for (int k = 0; k < NK; ++k) out[((blockIdx.y * rows + n) * NK + k) * U + c] = acc[k];
+    for (int k = 0; k < NK; ++k) out[((blockIdx.y * rows + n) * NK + k) * channels + c] = acc[k];
+  }
 }
 
 // ``out[n] = Σ_k partial[k, n]`` over the gridDim.y partials of a split kernel.
@@ -158,13 +166,16 @@ __global__ void reduce_partials_kernel(const T* __restrict__ partial, T* __restr
 // ``red`` is the CTA's scratch; lanes ``c < N`` receive the sums.
 template <typename T, int N, int U>
 __device__ __forceinline__ void reduce_channels(T (&values)[N], T (*red)[N], int c) {
-  constexpr int kWarps = U / 32;
+  // A CTA narrower than a warp (U = 8, 16: tiny models) is one partial warp.
+  constexpr int kWarps = U < 32 ? 1 : U / 32;
+  constexpr int kLanes = U < 32 ? U : 32;
+  constexpr unsigned kMask = U < 32 ? (1u << U) - 1u : 0xffffffffu;
   const int lane = c % 32, warp = c / 32;
 #pragma unroll
   for (int j = 0; j < N; ++j) {
     T v = values[j];
 #pragma unroll
-    for (int off = 16; off > 0; off /= 2) v += __shfl_xor_sync(0xffffffffu, v, off);
+    for (int off = kLanes / 2; off > 0; off /= 2) v += __shfl_xor_sync(kMask, v, off);
     if (lane == 0) red[warp][j] = v;
   }
   __syncthreads();
@@ -198,23 +209,26 @@ __global__ void __launch_bounds__(U, Second || sizeof(T) == 8 ? 2 : 3) adjoint_k
     const T* __restrict__ dw, const int64_t* __restrict__ source,
     const int32_t* __restrict__ order, const int32_t* __restrict__ rowptr,
     T* __restrict__ ga_edge, T* __restrict__ gb, T* __restrict__ gw,
-    T* __restrict__ grad_g, int64_t rows_a, int64_t edges,
-    Coefficients<T, Config<L1, L2>::NT> coef) {
+    T* __restrict__ grad_g, int64_t rows_a, int64_t edges, int64_t channels,
+    const __grid_constant__ Coefficients<T, Config<L1, L2>::NT> coef) {
   using Cfg = Config<L1, L2>;
   constexpr int NA = Cfg::NA, NB = Cfg::NB, NP = Cfg::NP, NK = Cfg::NK;
-  constexpr int kWarps = U / 32;
+  constexpr int kWarps = U < 32 ? 1 : U / 32;
   __shared__ T red[kWarps][NB];
   __shared__ int32_t s_edge[U], s_source[U];
   __shared__ T s_b[U * NB], s_db[Second ? U * NB : 1];
   const int64_t n = blockIdx.x, rows = gridDim.x;
-  const int c = threadIdx.x;
   int32_t begin, end;
   row_range(rowptr, n, edges, begin, end);
   constexpr bool kEdge = Part != 1, kGradG = Second && Part != 2;
+  for (int64_t c0 = 0; c0 < channels; c0 += U) {
+  const int64_t c = c0 + threadIdx.x;
+  // The angular adjoint sums over every channel: the tiles add up in gb.
+  const bool first_tile = c0 == 0;
   T gv[kEdge ? NK : 1];
   if constexpr (kEdge) {
 #pragma unroll
-    for (int k = 0; k < NK; ++k) gv[k] = g[(n * NK + k) * U + c];
+    for (int k = 0; k < NK; ++k) gv[k] = g[(n * NK + k) * channels + c];
   }
   T acc_g[kGradG ? NK : 1];
 #pragma unroll
@@ -225,9 +239,9 @@ __global__ void __launch_bounds__(U, Second || sizeof(T) == 8 ? 2 : 3) adjoint_k
     const T* bv = s_b + q * NB;
     T av[NA], wv[NP], ga[NA], gbv[NB], gwv[NP];
 #pragma unroll
-    for (int i = 0; i < NA; ++i) av[i] = a[(s * NA + i) * U + c];
+    for (int i = 0; i < NA; ++i) av[i] = a[(s * NA + i) * channels + c];
 #pragma unroll
-    for (int p = 0; p < NP; ++p) wv[p] = w[(e * NP + p) * U + c];
+    for (int p = 0; p < NP; ++p) wv[p] = w[(e * NP + p) * channels + c];
 #pragma unroll
     for (int i = 0; i < NA; ++i) ga[i] = T(0);
 #pragma unroll
@@ -246,9 +260,9 @@ __global__ void __launch_bounds__(U, Second || sizeof(T) == 8 ? 2 : 3) adjoint_k
       const T* dbv = s_db + q * NB;
       T dav[NA], dwv[NP];
 #pragma unroll
-      for (int i = 0; i < NA; ++i) dav[i] = da[(s * NA + i) * U + c];
+      for (int i = 0; i < NA; ++i) dav[i] = da[(s * NA + i) * channels + c];
 #pragma unroll
-      for (int p = 0; p < NP; ++p) dwv[p] = dw[(e * NP + p) * U + c];
+      for (int p = 0; p < NP; ++p) dwv[p] = dw[(e * NP + p) * channels + c];
       for_each_term<Cfg::NT>([&]<int t>() {
         constexpr Term m = kTable<L1, L2>[t];
         if constexpr (kGradG) {
@@ -270,17 +284,22 @@ __global__ void __launch_bounds__(U, Second || sizeof(T) == 8 ? 2 : 3) adjoint_k
     }
     if constexpr (kEdge) {
 #pragma unroll
-      for (int i = 0; i < NA; ++i) ga_edge[(e * NA + i) * U + c] = ga[i];
+      for (int i = 0; i < NA; ++i) ga_edge[(e * NA + i) * channels + c] = ga[i];
 #pragma unroll
-      for (int p = 0; p < NP; ++p) gw[(e * NP + p) * U + c] = gwv[p];
-      reduce_channels<T, NB, U>(gbv, red, c);
-      if (c < NB) gb[e * NB + c] = gbv[0];
+      for (int p = 0; p < NP; ++p) gw[(e * NP + p) * channels + c] = gwv[p];
+      reduce_channels<T, NB, U>(gbv, red, int(threadIdx.x));
+      if (threadIdx.x < NB) {
+        if (first_tile) gb[e * NB + threadIdx.x] = gbv[0];
+        else gb[e * NB + threadIdx.x] += gbv[0];
+      }
     }
   });
   if constexpr (kGradG) {
 #pragma unroll
-    for (int k = 0; k < NK; ++k) grad_g[((blockIdx.y * rows + n) * NK + k) * U + c] = acc_g[k];
+    for (int k = 0; k < NK; ++k)
+      grad_g[((blockIdx.y * rows + n) * NK + k) * channels + c] = acc_g[k];
   }
+  }  // channel tiles
 }
 
 // ``out[r, :] = Σ_{q in segment r} values[order[q], :]`` in the schedule's order.

@@ -67,12 +67,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDictBase
 
+import molrep.eq as meq
 from molix.autograd import Derivative, Potential
 from molix.schema import ENERGY_KEY
 from molpot.heads.multipole import PermMultipoleHead, PermMultipoleHeadSpec
@@ -108,7 +108,7 @@ class TensorTrackEncoder(Protocol):
     expose_tensor_track: bool
     l_max: int
     output_dim: int
-    tensor_track_irreps: cue.Irreps
+    tensor_track_irreps: meq.Irreps
 
     def __call__(self, frame: TensorDictBase) -> TensorDictBase:
         """Write the edge features onto ``frame`` and return it."""

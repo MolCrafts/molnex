@@ -1,16 +1,14 @@
-"""Spherical harmonics of edge directions, on cuEquivariance.
+"""Spherical harmonics of edge directions.
 
-:class:`SphericalHarmonics` wraps ``cuequivariance_torch.SphericalHarmonics``
-(``O3`` convention, ``cue.ir_mul`` channel order
-``[Y_0^0, Y_1^{-1}, Y_1^0, Y_1^1, Y_2^{-2}, …]``). Forces go through the
-autograd :class:`molix.autograd.Derivative` (first and second derivatives —
-force training is a double backward), which the cuEquivariance module
-supports; the earlier pure-torch monomial evaluation existed only for
-functorch transforms molnex no longer uses.
+:class:`SphericalHarmonics` normalises the direction when asked and evaluates
+:class:`molrep.equivariance.SphericalHarmonics` (cuEquivariance's ``O3``
+convention, ``ir_mul`` channel order ``[Y_0^0, Y_1^{-1}, Y_1^0, Y_1^1,
+Y_2^{-2}, …]``). Forces go through the autograd
+:class:`molix.autograd.Derivative` (first and second derivatives — force
+training is a double backward), which the native polynomial supports.
 
 Reference:
-    Real spherical harmonics in the cuEquivariance ``O3`` convention
-    (``cuequivariance_torch.SphericalHarmonics``).
+    Real spherical harmonics in the cuEquivariance ``O3`` convention.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field
 
-from molrep import cueq
+from molrep import equivariance
 
 
 class SphericalHarmonicsSpec(BaseModel):
@@ -28,13 +26,14 @@ class SphericalHarmonicsSpec(BaseModel):
     Defines parameters for computing spherical harmonics Y_l^m from 3D vectors.
 
     Attributes:
-        l_max: Maximum angular momentum number. Must be non-negative.
-            Output will contain all orders from l=0 to l=l_max.
+        l_max: Maximum angular momentum number, ``0..3`` (the degrees the
+            native polynomial evaluates; MACE's and Allegro's ``l_max`` are at
+            most 3). Output will contain all orders from l=0 to l=l_max.
         normalize: Whether to use normalized spherical harmonics. Defaults to True.
             Normalized harmonics satisfy orthonormality on the unit sphere.
     """
 
-    l_max: int = Field(..., ge=0)
+    l_max: int = Field(..., ge=0, le=3)
     normalize: bool = True
 
     @property
@@ -57,7 +56,7 @@ class SphericalHarmonicsSpec(BaseModel):
 
 
 class SphericalHarmonics(nn.Module):
-    """Spherical harmonics ``Y_l^m`` up to ``l_max`` of 3-vectors (cuEquivariance).
+    """Spherical harmonics ``Y_l^m`` up to ``l_max`` of 3-vectors.
 
     Args:
         l_max: Maximum angular momentum.
@@ -74,11 +73,11 @@ class SphericalHarmonics(nn.Module):
         self.config = SphericalHarmonicsSpec(l_max=l_max, normalize=normalize)
         self.l_max = int(self.config.l_max)
         self.normalize = bool(self.config.normalize)
-        self.sh = cueq.SphericalHarmonics(
-            self.config.ls, normalize=self.normalize, math_dtype=dtype
-        )
+        self.sh = equivariance.SphericalHarmonics(self.config.ls, dtype=dtype)
 
     def forward(self, vectors: torch.Tensor) -> torch.Tensor:
         """Evaluate on ``vectors`` ``(..., 3)``; returns ``(..., (l_max + 1)²)``."""
         flat = vectors.reshape(-1, 3)
+        if self.normalize:
+            flat = torch.nn.functional.normalize(flat, dim=1)
         return self.sh(flat).reshape(*vectors.shape[:-1], -1)

@@ -9,11 +9,11 @@ the l=1 / l=2 collapse with ``expected scalar type Float but found Double``.
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import pytest
 import torch
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molpot.heads import PermMultipoleHead
 
 #: Floating dtype every module under test is built at.
@@ -22,7 +22,7 @@ DTYPE = torch.float64
 #: Encoder tensor-track irreps with the uniform multiplicity the head
 #: requires, carrying both the ``1o`` block the dipole readout slices and
 #: the ``2e`` block the quadrupole readout slices.
-TENSOR_IRREPS = cue.Irreps(cue.O3, [(4, "0e"), (4, "1o"), (4, "2e")])
+TENSOR_IRREPS = meq.Irreps(meq.O3, [(4, "0e"), (4, "1o"), (4, "2e")])
 
 #: Which ``(charge, dipole, quadrupole)`` combinations to sweep. ``dipole``
 #: and ``quadrupole`` are the flags that construct a ``cuet.Linear``.

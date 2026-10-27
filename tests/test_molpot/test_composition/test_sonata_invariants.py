@@ -23,11 +23,11 @@ from __future__ import annotations
 
 import math
 
-import cuequivariance as cue
-import cuequivariance_torch as cuet
 import torch
 from tensordict import TensorDict
 
+import molrep.eq as meq
+import molrep.eq.torch as cuet
 from molpot.composition import Sonata
 from tests.conftest import (
     permute_graph,
@@ -89,8 +89,8 @@ def _rotate_l2_via_cuet(theta: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     else:
         alpha = torch.atan2(R[0, 1], R[2, 1])
         gamma = torch.atan2(R[1, 0], -R[1, 2])
-    out_irreps = cue.Irreps(cue.O3, [(1, "2e")])
-    rot = cuet.Rotation(out_irreps, layout=cue.ir_mul).to(theta.dtype)
+    out_irreps = meq.Irreps(meq.O3, [(1, "2e")])
+    rot = cuet.Rotation(out_irreps, layout=meq.ir_mul).to(theta.dtype)
     n = theta.shape[0]
     g = torch.full((n,), float(gamma), dtype=theta.dtype, device=theta.device)
     b = torch.full((n,), float(beta), dtype=theta.dtype, device=theta.device)

@@ -1,10 +1,11 @@
 """Construction-time lowering of a cuEquivariance channelwise descriptor onto the native term table.
 
-The native kernels are compiled for MACE's natural-parity O3 family —
+The term table covers MACE's natural-parity O3 family —
 ``irreps_in1 = U×0e + U×1o + … + U×L1``, ``irreps_in2 = 0e + 1o + … + L2`` and
 the output filter ``0e + … + L2`` — with every Clebsch–Gordan *position*
-enumerated at compile time by the selection rule of the real spherical-harmonic
-basis (``csrc/equivariance/channelwise.cuh``). This module builds cuEquivariance's
+enumerated by the selection rule of the real spherical-harmonic basis (the
+CUDA kernels enumerate the same table at compile time,
+``csrc/equivariance/channelwise.cuh``). This module builds cuEquivariance's
 descriptor for the requested irreps, checks that it has exactly that structure
 (path order, segment layout, every non-zero coefficient inside the rule's
 candidate set) and reads the coefficient *values* off it in the kernel's term
@@ -15,38 +16,88 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-import cuequivariance as cue
 import numpy as np
 
-#: Channel multiplicities the kernels are instantiated for (one thread per channel).
-CHANNELS = (32, 64, 128)
-#: Highest node-feature order and highest angular / output order instantiated.
-L1_MAX = 3
-L2_RANGE = (2, 3)
+import molrep.eq as meq
+
+#: What the CUDA kernels are instantiated for (``csrc/equivariance/dispatch.cuh``):
+#: channel multiplicities (one thread per channel), node orders and angular /
+#: output orders. The term table itself is built for any uniform multiplicity
+#: and any ``(l1, l2)``; the CPU reference evaluates all of them, the CUDA
+#: operator refuses what it has no kernel for.
+CUDA_CHANNELS = (8, 16, 32, 64, 128)  # and any multiple of 128, in tiles of 128
+CUDA_CONFIGS = ((0, 1), (1, 1), (0, 2), (1, 2), (2, 2), (3, 2), (0, 3), (1, 3), (2, 3), (3, 3))
 
 
-def natural_irreps(mul: int, lmax: int) -> cue.Irreps:
+def natural_irreps(mul: int, lmax: int) -> meq.Irreps:
     """``mul×0e + mul×1o + … + mul×lmax`` with parity ``(-1)^l``."""
-    return cue.Irreps(
+    return meq.Irreps(
         "O3", "+".join(f"{mul}x{l}{'e' if l % 2 == 0 else 'o'}" for l in range(lmax + 1))
     )
 
 
-def candidate_m3(m1: int, m2: int) -> list[int]:
+def candidate_m3(m1: int, m2: int, odd: bool = False) -> list[int]:
     """Output components ``m3`` at which a real-basis product ``(m1, m2)`` can be non-zero.
 
-    Cosine-type (``m ≥ 0``) factors of the same type combine to cosine type at
-    ``|m1|+|m2|`` and ``||m1|−|m2||``; mixed types combine to sine type
-    (``m < 0``); a zonal factor (``m = 0``) leaves the other's ``m`` unchanged.
+    For an even ``l1 + l2 + l3`` (``odd=False``, the natural-parity couplings)
+    factors of the same type — both cosine (``m ≥ 0``) or both sine — combine
+    to cosine type at ``|m1|+|m2|`` and ``||m1|−|m2||``, mixed types to sine
+    type (``m < 0``), and a zonal factor (``m = 0``) leaves the other's ``m``
+    unchanged. For an odd sum (the antisymmetric couplings, ``1 × 1 → 1``) the
+    types swap and the zonal pass-through is negated. The same rule is
+    ``csrc/equivariance/cg.hpp``; verified against cuEquivariance's O3 tables
+    for every ``l ≤ 3`` (34 classes, 611 non-zeros, no violation).
     """
     if m1 == 0:
-        return [m2]
+        return [-m2 if odd else m2]
     if m2 == 0:
-        return [m1]
+        return [-m1 if odd else m1]
     s, d = abs(m1) + abs(m2), abs(abs(m1) - abs(m2))
-    if (m1 > 0) == (m2 > 0):
+    if ((m1 > 0) == (m2 > 0)) != odd:
         return [s, d]
     return [-s] + ([-d] if d else [])
+
+
+#: Highest ``l`` of the compile-time Clebsch–Gordan classes (``cg.hpp``).
+CG_LMAX = 3
+
+
+def cg_classes() -> list[tuple[int, int, int]]:
+    """Every coupling ``(l1, l2, l3)`` with ``l ≤ 3`` the triangle rule allows, in table order."""
+    return [
+        (l1, l2, l3)
+        for l1 in range(CG_LMAX + 1)
+        for l2 in range(CG_LMAX + 1)
+        for l3 in range(CG_LMAX + 1)
+        if abs(l1 - l2) <= l3 <= l1 + l2
+    ]
+
+
+def cg_positions(l1: int, l2: int, l3: int) -> list[tuple[int, int, int]]:
+    """Candidate ``(m1 + l1, m2 + l2, m3 + l3)`` of one class, in the kernel's order."""
+    odd = (l1 + l2 + l3) % 2 == 1
+    return [
+        (m1 + l1, m2 + l2, m3 + l3)
+        for m1 in range(-l1, l1 + 1)
+        for m2 in range(-l2, l2 + 1)
+        for m3 in candidate_m3(m1, m2, odd)
+        if abs(m3) <= l3
+    ]
+
+
+def cg_class_id(l1: int, l2: int, l3: int) -> int:
+    """The id a path carries, ``(l1, l2, l3)`` in base 4 (``cg.hpp``)."""
+    return (l1 * (CG_LMAX + 1) + l2) * (CG_LMAX + 1) + l3
+
+
+def cg_offsets() -> dict[tuple[int, int, int], int]:
+    """Start of each class in the flat coefficient table."""
+    offsets, total = {}, 0
+    for cls in cg_classes():
+        offsets[cls] = total
+        total += len(cg_positions(*cls))
+    offsets[("total",)] = total
+    return offsets
 
 
 def paths(l1_max: int, l2_max: int) -> Iterator[tuple[int, int, int, int, int]]:
@@ -105,26 +156,25 @@ class ChannelwiseDescriptor:
             cuEquivariance descriptor does not have the enumerated structure.
     """
 
-    def __init__(self, irreps_in1: cue.Irreps, irreps_in2: cue.Irreps, filter_irreps_out) -> None:
-        if irreps_in1.irrep_class != cue.O3 or irreps_in2.irrep_class != cue.O3:
+    def __init__(self, irreps_in1: meq.Irreps, irreps_in2: meq.Irreps, filter_irreps_out) -> None:
+        if irreps_in1.irrep_class != meq.O3 or irreps_in2.irrep_class != meq.O3:
             raise ValueError("native channelwise supports O3 only")
         muls = {mi.mul for mi in irreps_in1}
         if len(muls) != 1:
             raise ValueError("native channelwise requires one uniform channel multiplicity")
         channels = muls.pop()
-        if channels not in CHANNELS:
-            raise ValueError(f"native channelwise supports channels {CHANNELS}, got {channels}")
         l1, l2 = len(irreps_in1) - 1, len(irreps_in2) - 1
-        if l1 > L1_MAX or irreps_in1 != natural_irreps(channels, l1):
+        if l1 < 0 or irreps_in1 != natural_irreps(channels, l1):
             raise ValueError(
-                f"native channelwise requires node irreps {natural_irreps(channels, L1_MAX)} "
-                f"or a prefix of it, got {irreps_in1}"
+                f"native channelwise requires node irreps {channels}x0e+{channels}x1o+… "
+                f"(natural parity), got {irreps_in1}"
             )
-        if l2 not in L2_RANGE or irreps_in2 != natural_irreps(1, l2):
+        if l2 < 0 or irreps_in2 != natural_irreps(1, l2):
             raise ValueError(
-                f"native channelwise requires angular irreps 0e+1o+2e[+3o], got {irreps_in2}"
+                f"native channelwise requires angular irreps 0e+1o+2e+… (natural parity), "
+                f"got {irreps_in2}"
             )
-        expression = cue.descriptors.channelwise_tensor_product(
+        expression = meq.descriptors.channelwise_tensor_product(
             irreps_in1, irreps_in2, filter_irreps_out
         )
         polynomial = expression.polynomial

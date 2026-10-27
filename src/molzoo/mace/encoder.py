@@ -40,11 +40,11 @@ Reference:
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
@@ -130,7 +130,7 @@ class MACEEncoder(ElementTable, nn.Module):
 
         # ---- embeddings ----
         self.node_embedding = OneHotLinear(
-            cue.Irreps("O3", node_attrs_irreps), cue.Irreps("O3", feat0), dtype=dtype
+            meq.Irreps("O3", node_attrs_irreps), meq.Irreps("O3", feat0), dtype=dtype
         )
         self.spherical_harmonics = SphericalHarmonics(l_max=l_max, dtype=dtype)
         # normalize=False + eps=0 + trainable reproduces MACE's BesselBasis exactly.
@@ -413,15 +413,12 @@ class MACEEncoder(ElementTable, nn.Module):
             One node-feature tensor per interaction layer, each ``(N, …)``.
         """
         envelope = cutoff if self.pass_cutoff_to_interaction else None
-        # A native tensor product sums over the edge schedule (CSR by target
-        # and by source): built once here, shared by every layer, forward and
-        # adjoints. cuEq takes no schedule.
-        schedule = None
-        if any(isinstance(block.conv_tp, ChannelWiseTensorProduct) for block in self.interactions):
-            n_nodes = node_feats.shape[0]
-            schedule = ChannelWiseTensorProduct.schedule(
-                edge_index[:, 0], edge_index[:, 1], n_nodes, n_nodes
-            )
+        # The tensor product sums over the edge schedule (CSR by target and by
+        # source): built once here, shared by every layer, forward and adjoints.
+        n_nodes = node_feats.shape[0]
+        schedule = ChannelWiseTensorProduct.schedule(
+            edge_index[:, 0], edge_index[:, 1], n_nodes, n_nodes
+        )
         per_layer: list[torch.Tensor] = []
         for i in range(self.num_interactions):
             node_feats, sc = self.interactions[i](

@@ -41,13 +41,13 @@ from __future__ import annotations
 
 import math
 
-import cuequivariance as cue
-import cuequivariance_torch as cuet
 import pytest
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+import molrep.eq as meq
+import molrep.eq.torch as cuet
 from molpot.heads import PermMultipoleHead
 from molzoo.allegro import AllegroEncoder, AllegroSpec
 from tests.conftest import (
@@ -94,11 +94,11 @@ def _rotate_l2(features: torch.Tensor, gamma: float, beta: float, alpha: float) 
     """Apply the Wigner ``D⁽²⁾(R)`` representation to a ``(N, 5)`` tensor.
 
     The 5 components are interpreted as a single ``1·2e`` channel in
-    ``cue.ir_mul`` layout, which is the same convention
+    ``meq.ir_mul`` layout, which is the same convention
     :class:`PermMultipoleHead` writes its quadrupole output in.
     """
-    out_irreps = cue.Irreps(cue.O3, [(1, "2e")])
-    rot = cuet.Rotation(out_irreps, layout=cue.ir_mul).to(features.dtype)
+    out_irreps = meq.Irreps(meq.O3, [(1, "2e")])
+    rot = cuet.Rotation(out_irreps, layout=meq.ir_mul).to(features.dtype)
     n = features.shape[0]
     g = torch.full((n,), gamma, dtype=features.dtype, device=features.device)
     b = torch.full((n,), beta, dtype=features.dtype, device=features.device)

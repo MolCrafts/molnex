@@ -126,13 +126,15 @@ A missing or mistyped field is refused — the message names it; a field this
 reader does not know is ignored. The device is read from the package itself
 (`AOTI_DEVICE_KEY`), not from this file.
 
-`op_libraries` names the native libraries that register the package's
-non-ATen operators (a cuEquivariance model needs `molnex_cueq_ops`), each with
-the upstream requirement its binding was built against. `ModelArtifact::open`
-loads every one before the package: `lib<name>.so` from the directories of
-`MOLNEX_OP_LIBRARY_PATH` (colon-separated) or, when that is unset, the dynamic
-loader's own search. A library that is missing, or that reports another
-requirement through `molnex_op_library_requirement()`, is refused.
+`op_libraries` names molnex's native libraries that register the package's
+non-ATen operators — `molnex_opLib` for `molix::*` (neighbour pairs, PME,
+scatter) and `molnex_equivariance` for `molnex_equivariance::*` (the MACE and
+Allegro tensor products) — each with the requirement string it reports.
+`ModelArtifact::open` loads every one before the package: `lib<name>.so` or
+`lib<name>.<machine>.so` from the directories of `MOLNEX_OP_LIBRARY_PATH`
+(colon-separated) or, when that is unset, the dynamic loader's own search. A
+library that is missing, or that reports another requirement through
+`molnex_op_library_requirement()`, is refused.
 
 ## Deploying a model
 
@@ -457,8 +459,8 @@ cmake --build build/plugin-$(uname -m) -j        # → build/plugin-<arch>/molne
 
 # at runtime
 export LD_LIBRARY_PATH="$(dirname $LMP_LIB):$LD_LIBRARY_PATH"
-# op libraries the metadata lists: build/csrc-<arch>/{molix,cueq} (activate.sh sets this)
-export MOLNEX_OP_LIBRARY_PATH=/path/to/build/csrc-<arch>/molix:/path/to/build/csrc-<arch>/cueq
+# op libraries the metadata lists: build/csrc-<arch>/{molix,equivariance} (activate.sh sets this)
+export MOLNEX_OP_LIBRARY_PATH=/path/to/build/csrc-<arch>/molix:/path/to/build/csrc-<arch>/equivariance
 # in the LAMMPS input script:
 #   plugin load build/plugin-<arch>/molnexplugin.so
 #   pair_style molnex pinet_aspirin

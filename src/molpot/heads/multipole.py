@@ -53,19 +53,19 @@ from __future__ import annotations
 
 import math
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, ConfigDict, Field
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molpot.heads._common import scalar_mlp as _scalar_mlp
-from molrep import cueq
+from molrep.equivariance import Linear
 
 
 def _find_irrep_offset(
-    tensor_irreps: cue.Irreps,
-    target_ir: cue.Irrep,
+    tensor_irreps: meq.Irreps,
+    target_ir: meq.Irrep,
 ) -> int:
     """Locate ``target_ir``'s starting offset in an ``ir_mul`` flat layout.
 
@@ -133,7 +133,7 @@ class PermMultipoleHead(nn.Module):
     The two equivariant moment readouts share one structural recipe — slice
     the ``lℓ`` block of the encoder's tensor track, gate per-channel by an
     l=0 scalar projection of the edge features, collapse ``u·lℓ → 1·lℓ``
-    with :class:`cuet.Linear`, scatter to source atoms — so they are
+    with :class:`molrep.equivariance.Linear`, scatter to source atoms — so they are
     implemented as one private method (:meth:`_equivariant_moment_readout`)
     invoked twice, not as two separate sub-modules.
 
@@ -204,7 +204,7 @@ class PermMultipoleHead(nn.Module):
         out_charge_key: str = "atomic_charges",
         out_dipole_key: str = "atomic_dipoles",
         out_quadrupole_key: str = "atomic_quadrupoles",
-        tensor_irreps: cue.Irreps | None = None,
+        tensor_irreps: meq.Irreps | None = None,
         dtype: torch.dtype,
     ):
         super().__init__()
@@ -281,10 +281,10 @@ class PermMultipoleHead(nn.Module):
             self._mu_offset = _find_irrep_offset(tensor_irreps, G(1, -1))
             self._mu_size = 3 * self._u
             self.mu_proj = nn.Linear(cfg.input_dim, self._u, dtype=dtype)
-            self.mu_collapse = cueq.Linear(
-                irreps_in=cue.Irreps(G, [(self._u, "1o")]),
-                irreps_out=cue.Irreps(G, [(1, "1o")]),
-                layout=cue.ir_mul,
+            self.mu_collapse = Linear(
+                irreps_in=meq.Irreps(G, [(self._u, "1o")]),
+                irreps_out=meq.Irreps(G, [(1, "1o")]),
+                layout=meq.ir_mul,
                 dtype=dtype,
             )
 
@@ -299,10 +299,10 @@ class PermMultipoleHead(nn.Module):
                 ) from None
             self._theta_size = 5 * self._u
             self.theta_proj = nn.Linear(cfg.input_dim, self._u, dtype=dtype)
-            self.theta_collapse = cueq.Linear(
-                irreps_in=cue.Irreps(G, [(self._u, "2e")]),
-                irreps_out=cue.Irreps(G, [(1, "2e")]),
-                layout=cue.ir_mul,
+            self.theta_collapse = Linear(
+                irreps_in=meq.Irreps(G, [(self._u, "2e")]),
+                irreps_out=meq.Irreps(G, [(1, "2e")]),
+                layout=meq.ir_mul,
                 dtype=dtype,
             )
 
@@ -311,7 +311,7 @@ class PermMultipoleHead(nn.Module):
         cls,
         spec: PermMultipoleHeadSpec,
         *,
-        tensor_irreps: cue.Irreps | None = None,
+        tensor_irreps: meq.Irreps | None = None,
         dtype: torch.dtype,
     ) -> "PermMultipoleHead":
         """Construct from a spec.
@@ -423,7 +423,7 @@ class PermMultipoleHead(nn.Module):
         block_size: int,  # = (2ℓ+1) * u
         out_dim: int,  # = 2ℓ + 1
         scalar_proj: nn.Module,  # F → u  (l=0, rotation-invariant)
-        collapse: nn.Module,  # cueq.Linear(u·lℓ → 1·lℓ)
+        collapse: nn.Module,  # Linear(u·lℓ → 1·lℓ)
     ) -> torch.Tensor:
         r"""Inlined PaiNN-style scalar-gated lℓ readout.
 
@@ -444,7 +444,7 @@ class PermMultipoleHead(nn.Module):
             * scalar gating is l=0 (rotation-invariant).
             * channel-wise multiplication of an l=0 scalar with an lℓ
               vector lives in lℓ.
-            * ``cuet.Linear`` between two ``mul × lℓ`` channel
+            * ``molrep.equivariance.Linear`` between two ``mul × lℓ`` channel
               multiplicities is the equivariant linear map for that irrep.
             * scatter-sum is rotation-invariant in the index reduction.
         """
@@ -458,7 +458,7 @@ class PermMultipoleHead(nn.Module):
         gate = scalar_proj(scalar_feats)  # (E, u)
         gated = gate.unsqueeze(-1) * v_l  # (E, u, 2ℓ+1)
 
-        # Repack to ir_mul layout (2ℓ+1, u) for cuet.Linear.
+        # Repack to ir_mul layout (2ℓ+1, u) for the equivariant Linear.
         gated_ir_mul = gated.transpose(1, 2).reshape(E, block_size)
         edge_out = collapse(gated_ir_mul)  # (E, 2ℓ+1)
 

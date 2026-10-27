@@ -13,10 +13,10 @@ Covers:
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import pytest
 import torch
 
+import molrep.eq as meq
 from molpot.heads import HardnessHead, PolarizabilityHead
 
 #: Floating dtype every module under test is built at.
@@ -98,7 +98,7 @@ class TestPolarizabilityHeadIsotropic:
 
 def _build_anisotropic_head(input_dim: int = 4, mul: int = 3) -> PolarizabilityHead:
     """Construct an aniso head for tests, with simple ``l=0 + l=1 + l=2`` irreps."""
-    irreps = cue.Irreps(cue.O3, [(mul, "0e"), (mul, "1o"), (mul, "2e")])
+    irreps = meq.Irreps(meq.O3, [(mul, "0e"), (mul, "1o"), (mul, "2e")])
     return PolarizabilityHead(
         input_dim=input_dim,
         hidden_dim=8,

@@ -64,7 +64,8 @@ void launch_product(const ProductArgs& x) {
       <<<dim3(unsigned(rows), unsigned(x.splits)), U, 0, at::cuda::getCurrentCUDAStream()>>>(
       x.a.const_data_ptr<T>(), x.b.const_data_ptr<T>(), x.w.const_data_ptr<T>(),
       x.source.const_data_ptr<int64_t>(), x.order.const_data_ptr<int32_t>(),
-      x.rowptr.const_data_ptr<int32_t>(), x.out.mutable_data_ptr<T>(), x.a.size(0), edges, coef);
+      x.rowptr.const_data_ptr<int32_t>(), x.out.mutable_data_ptr<T>(), x.a.size(0), edges,
+      x.channels, coef);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -79,7 +80,7 @@ void launch_adjoint_part(const AdjointArgs& x, const Coefficients<T, Config<L1, 
       x.source.const_data_ptr<int64_t>(), x.order.const_data_ptr<int32_t>(),
       x.rowptr.const_data_ptr<int32_t>(), x.ga_edge.mutable_data_ptr<T>(),
       x.gb.mutable_data_ptr<T>(), x.gw.mutable_data_ptr<T>(),
-      Second ? x.grad_g.mutable_data_ptr<T>() : nullptr, x.a.size(0), edges, coef);
+      Second ? x.grad_g.mutable_data_ptr<T>() : nullptr, x.a.size(0), edges, x.channels, coef);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -105,10 +106,15 @@ template <int L1, int L2>
 void run_product(const ProductArgs& x) {
   AT_DISPATCH_FLOATING_TYPES(x.out.scalar_type(), "channelwise_product", [&] {
     switch (x.channels) {
+      case 8: launch_product<scalar_t, L1, L2, 8>(x); break;
+      case 16: launch_product<scalar_t, L1, L2, 16>(x); break;
       case 32: launch_product<scalar_t, L1, L2, 32>(x); break;
       case 64: launch_product<scalar_t, L1, L2, 64>(x); break;
       case 128: launch_product<scalar_t, L1, L2, 128>(x); break;
-      default: TORCH_CHECK(false, "unsupported channel multiplicity ", x.channels);
+      default:
+        // Wider rows: 128-thread CTAs in channel tiles.
+        TORCH_CHECK(x.channels % 128 == 0, "unsupported channel multiplicity ", x.channels);
+        launch_product<scalar_t, L1, L2, 128>(x);
     }
   });
 }
@@ -117,17 +123,23 @@ template <int L1, int L2>
 void run_adjoint(const AdjointArgs& x) {
   AT_DISPATCH_FLOATING_TYPES(x.a.scalar_type(), "channelwise_adjoint", [&] {
     switch (x.channels) {
+      case 8: launch_adjoint<scalar_t, L1, L2, 8>(x); break;
+      case 16: launch_adjoint<scalar_t, L1, L2, 16>(x); break;
       case 32: launch_adjoint<scalar_t, L1, L2, 32>(x); break;
       case 64: launch_adjoint<scalar_t, L1, L2, 64>(x); break;
       case 128: launch_adjoint<scalar_t, L1, L2, 128>(x); break;
-      default: TORCH_CHECK(false, "unsupported channel multiplicity ", x.channels);
+      default:
+        // Wider rows: 128-thread CTAs in channel tiles.
+        TORCH_CHECK(x.channels % 128 == 0, "unsupported channel multiplicity ", x.channels);
+        launch_adjoint<scalar_t, L1, L2, 128>(x);
     }
   });
 }
 
-// Explicit instantiations: one translation unit per (L1, L2).
+// Explicit instantiations: one translation unit per (L1, L2). L2 = 1 serves
+// the tiny l_max = 1 models of the test tier; production MACE is L2 = 3.
 #define MOLNEX_EQUIVARIANCE_CONFIGS(X) \
-  X(0, 2) X(1, 2) X(2, 2) X(3, 2) X(0, 3) X(1, 3) X(2, 3) X(3, 3)
+  X(0, 1) X(1, 1) X(0, 2) X(1, 2) X(2, 2) X(3, 2) X(0, 3) X(1, 3) X(2, 3) X(3, 3)
 #define MOLNEX_EQUIVARIANCE_DECLARE(L1, L2)                     \
   extern template void run_product<L1, L2>(const ProductArgs&); \
   extern template void run_adjoint<L1, L2>(const AdjointArgs&);

@@ -2,10 +2,10 @@
 
 A symmetric contraction's weights are coefficients in a basis of coupled
 products, and that basis depends on the phase of every Clebsch-Gordan tensor
-it is built from. cuEquivariance's ``cue.O3`` and the convention MACE trains in
+it is built from. cuEquivariance's ``meq.O3`` and the convention MACE trains in
 agree for every coupling into ``l <= 1`` but not beyond, so a MACE checkpoint
-whose product emits ``2e`` (MACE-POLAR-1-L) evaluated with ``cue.O3`` returns a
-plausible, wrong ``l = 2`` channel. :class:`MaceO3` is ``cue.O3`` with MACE's
+whose product emits ``2e`` (MACE-POLAR-1-L) evaluated with ``meq.O3`` returns a
+plausible, wrong ``l = 2`` channel. :class:`MaceO3` is ``meq.O3`` with MACE's
 Clebsch-Gordan tensors; the irreps, their order and the parity rule are
 unchanged.
 
@@ -32,8 +32,9 @@ from collections.abc import Iterator
 from functools import cache
 from math import factorial, sqrt
 
-import cuequivariance as cue
 import numpy as np
+
+import molrep.eq as meq
 
 
 def _complex_cg(l1: int, l2: int, l3: int) -> np.ndarray:
@@ -128,11 +129,11 @@ def real_coupling(l1: int, l2: int, l3: int) -> np.ndarray:
     return out
 
 
-class MaceO3(cue.O3):
-    """``cue.O3`` with the Clebsch-Gordan phases MACE checkpoints were trained in."""
+class MaceO3(meq.O3):
+    """``meq.O3`` with the Clebsch-Gordan phases MACE checkpoints were trained in."""
 
     def __mul__(rep1: MaceO3, rep2: MaceO3) -> Iterator[MaceO3]:  # noqa: N805
-        return [MaceO3(l=ir.l, p=ir.p) for ir in cue.O3.__mul__(rep1, rep2)]
+        return [MaceO3(l=ir.l, p=ir.p) for ir in meq.O3.__mul__(rep1, rep2)]
 
     @classmethod
     def clebsch_gordan(cls, rep1: MaceO3, rep2: MaceO3, rep3: MaceO3) -> np.ndarray:

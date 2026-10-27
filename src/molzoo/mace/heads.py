@@ -8,7 +8,7 @@ attach, and how many:
 
 - :class:`JointFeatureEmbedding` — MACE's ``GenericJointEmbedding`` (OMOL
   charge/spin conditioning), configured by :class:`JointFeatureSpec`.
-- :class:`LinearReadout` — one ``cuet.Linear`` onto ``1x0e``.
+- :class:`LinearReadout` — one ``molrep.equivariance.Linear`` onto ``1x0e``.
 - :class:`NonLinearReadout` — bias-free ``Linear → c·SiLU → Linear``.
 - :class:`NonLinearBiasReadout` — ``Linear → SiLU → biased linear → SiLU →
   biased linear``. ``out_mul`` is 1 for an energy and 2 when a caller wants
@@ -29,14 +29,14 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel, Field
 
-from molrep import cueq
+import molrep.eq as meq
 from molrep.embedding.mlp import normalize2mom
+from molrep.equivariance import Linear
 
 
 class JointFeatureSpec(BaseModel):
@@ -200,10 +200,10 @@ class NonLinearBiasReadout(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        self.linear_1 = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
-            cue.Irreps("O3", f"{mlp_dim}x0e"),
-            layout=cue.ir_mul,
+        self.linear_1 = Linear(
+            meq.Irreps("O3", irreps_in),
+            meq.Irreps("O3", f"{mlp_dim}x0e"),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
         self._act_cst = normalize2mom(F.silu)
@@ -230,7 +230,7 @@ class NonLinearBiasReadout(nn.Module):
 class LinearReadout(nn.Module):
     """Equivariant linear projection of node features to a per-atom scalar.
 
-    MACE's ``LinearReadoutBlock``: one ``cuet.Linear`` onto ``1x0e``. Used for
+    MACE's ``LinearReadoutBlock``: one ``molrep.equivariance.Linear`` onto ``1x0e``. Used for
     every interaction layer except the last, where the non-linear readout
     (:class:`NonLinearReadout`) takes over.
 
@@ -245,10 +245,10 @@ class LinearReadout(nn.Module):
 
     def __init__(self, *, irreps_in: str, dtype: torch.dtype) -> None:
         super().__init__()
-        self.linear = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
-            cue.Irreps("O3", "1x0e"),
-            layout=cue.ir_mul,
+        self.linear = Linear(
+            meq.Irreps("O3", irreps_in),
+            meq.Irreps("O3", "1x0e"),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
 
@@ -267,7 +267,7 @@ class LinearReadout(nn.Module):
 class NonLinearReadout(nn.Module):
     """Bias-free gated non-linear scalar readout (MACE ``NonLinearReadoutBlock``).
 
-    ``Linear → c·SiLU → Linear``, both equivariant ``cuet.Linear`` layers with no
+    ``Linear → c·SiLU → Linear``, both equivariant ``molrep.equivariance.Linear`` layers with no
     bias; ``c`` is the moment normalisation constant (``normalize2mom``). This is the readout on
     the **last** interaction layer of the MACE-MP / MatPES foundation models.
 
@@ -287,16 +287,16 @@ class NonLinearReadout(nn.Module):
 
     def __init__(self, *, irreps_in: str, mlp_dim: int = 16, dtype: torch.dtype) -> None:
         super().__init__()
-        self.linear_1 = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
-            cue.Irreps("O3", f"{mlp_dim}x0e"),
-            layout=cue.ir_mul,
+        self.linear_1 = Linear(
+            meq.Irreps("O3", irreps_in),
+            meq.Irreps("O3", f"{mlp_dim}x0e"),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
-        self.linear_2 = cueq.Linear(
-            cue.Irreps("O3", f"{mlp_dim}x0e"),
-            cue.Irreps("O3", "1x0e"),
-            layout=cue.ir_mul,
+        self.linear_2 = Linear(
+            meq.Irreps("O3", f"{mlp_dim}x0e"),
+            meq.Irreps("O3", "1x0e"),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
         self._act_cst = normalize2mom(F.silu)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import pytest
 import torch
 
+import molrep.eq as meq
 from molix.F.scatter import scatter_sum_compile_safe
 from molzoo.allegro.layers import Contracter, ProductTypeEmbedding, WeightedChannels
 from tests.test_molzoo.test_allegro.conftest import DTYPE
@@ -60,8 +60,12 @@ class TestWeightedChannels:
                 index=torch.tensor([0]),
             )
 
+    def test_rejects_a_narrow_dtype(self):
+        with pytest.raises(ValueError, match="float32 or float64"):
+            WeightedChannels(irrep_dims=[1], channels=1, dtype=torch.float16)
 
-SH = cue.Irreps("O3", "1x0e+1x1o+1x2e")
+
+SH = meq.Irreps("O3", "1x0e+1x1o+1x2e")
 
 
 U = 3
@@ -70,7 +74,7 @@ U = 3
 def _contracter(out: str = "1x0e+1x1o+1x2e") -> Contracter:
     torch.manual_seed(0)
     return Contracter(
-        irreps_in1=SH, irreps_in2=SH, irreps_out=cue.Irreps("O3", out), channels=U, dtype=DTYPE
+        irreps_in1=SH, irreps_in2=SH, irreps_out=meq.Irreps("O3", out), channels=U, dtype=DTYPE
     )
 
 
@@ -99,12 +103,18 @@ class TestContracter:
             tp(x1, x2, torch.tensor([2, 0])), tp(x1, x2[[2, 0]], torch.tensor([0, 1]))
         )
 
+    def test_rejects_a_narrow_dtype(self):
+        with pytest.raises(ValueError, match="float32 or float64"):
+            Contracter(
+                irreps_in1=SH, irreps_in2=SH, irreps_out=SH, channels=U, dtype=torch.float16
+            )
+
     def test_no_path_raises(self):
         with pytest.raises(ValueError, match="no tensor-product path"):
             Contracter(
-                irreps_in1=cue.Irreps("O3", "1x0e"),
-                irreps_in2=cue.Irreps("O3", "1x0e"),
-                irreps_out=cue.Irreps("O3", "1x1o"),
+                irreps_in1=meq.Irreps("O3", "1x0e"),
+                irreps_in2=meq.Irreps("O3", "1x0e"),
+                irreps_out=meq.Irreps("O3", "1x1o"),
                 channels=U,
                 dtype=DTYPE,
             )

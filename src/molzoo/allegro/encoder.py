@@ -33,12 +33,12 @@ from __future__ import annotations
 
 import math
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModuleBase
 
+import molrep.eq as meq
 from molrep.embedding.angular import SphericalHarmonics
 from molrep.embedding.cutoff import PolynomialCutoff
 from molrep.embedding.geometry import edge_lengths, edge_vectors
@@ -112,7 +112,7 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
         )
 
         # ---- tensor embedding ----
-        sh_irreps = cue.Irreps("O3", sh_irreps_from_l_max(spec.l_max))
+        sh_irreps = meq.Irreps("O3", sh_irreps_from_l_max(spec.l_max))
         irrep_dims = [ir.dim for _, ir in sh_irreps]
         #: Fed unit vectors — the lengths are already in hand (no second norm).
         self.spherical_harmonics = SphericalHarmonics(
@@ -132,7 +132,7 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
                 f"irreps pruning trimmed the first layer input ({schedule[0]} vs {sh_irreps})"
             )
         # ``layer_features`` reads the scalars as ``tensor[:, :u]``.
-        assert all(irreps[0].ir == cue.O3(0, 1) for irreps in schedule), schedule
+        assert all(irreps[0].ir == meq.O3(0, 1) for irreps in schedule), schedule
         self.tps = nn.ModuleList()
         self.latents = nn.ModuleList()
         for layer, (irreps_in, irreps_out) in enumerate(zip(schedule, schedule[1:])):
@@ -142,7 +142,6 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
                     irreps_in2=sh_irreps,
                     irreps_out=irreps_out,
                     channels=u,
-                    method=spec.tp_method,
                     dtype=dtype,
                 )
             )
@@ -158,10 +157,10 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
                 )
             )
         #: Irreps of the last layer's output at multiplicity ``u`` (``ir_mul``).
-        self.tensor_track_irreps = cue.Irreps("O3", [(u, ir) for _, ir in schedule[-1]])
+        self.tensor_track_irreps = meq.Irreps("O3", [(u, ir) for _, ir in schedule[-1]])
 
     @staticmethod
-    def _layer_irreps(spec: AllegroSpec) -> list[cue.Irreps]:
+    def _layer_irreps(spec: AllegroSpec) -> list[meq.Irreps]:
         """Tensor-track irreps per layer boundary, one copy each (upstream pruning).
 
         Forward: from the allowed set (``l ≤ l_max``; both parities when
@@ -175,15 +174,15 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
         Returns:
             ``num_layers + 1`` irreps; entry 0 is the first layer's input.
         """
-        sh = cue.Irreps("O3", sh_irreps_from_l_max(spec.l_max))
+        sh = meq.Irreps("O3", sh_irreps_from_l_max(spec.l_max))
         allowed = (
-            cue.Irreps("O3", "+".join(f"1x{l}{p}" for l in range(spec.l_max + 1) for p in "eo"))
+            meq.Irreps("O3", "+".join(f"1x{l}{p}" for l in range(spec.l_max + 1) for p in "eo"))
             if spec.parity
             else sh
         )
-        scalar = cue.Irreps("O3", "1x0e")
+        scalar = meq.Irreps("O3", "1x0e")
 
-        def reachable(arg: cue.Irreps, ir: cue.Irrep) -> bool:
+        def reachable(arg: meq.Irreps, ir: meq.Irrep) -> bool:
             return any(ir in a * e for _, a in arg for _, e in sh)
 
         schedule = [sh]
@@ -191,13 +190,13 @@ class AllegroEncoder(ElementTable, TensorDictModuleBase):
             last = layer == spec.num_layers - 1
             candidates = scalar if last and not spec.expose_tensor_track else allowed
             schedule.append(
-                cue.Irreps("O3", [(1, ir) for _, ir in candidates if reachable(schedule[-1], ir)])
+                meq.Irreps("O3", [(1, ir) for _, ir in candidates if reachable(schedule[-1], ir)])
             )
         pruned = [schedule[-1]]
         for arg in reversed(schedule[:-1]):
             out = pruned[-1]
             keep = [(1, a) for _, a in arg if any(any(o in a * e for _, o in out) for _, e in sh)]
-            pruned.append(cue.Irreps("O3", keep))
+            pruned.append(meq.Irreps("O3", keep))
         return list(reversed(pruned))
 
     # ------------------------------------------------------------ primitives

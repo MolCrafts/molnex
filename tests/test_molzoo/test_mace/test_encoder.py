@@ -14,11 +14,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import cuequivariance as cue
 import pytest
 import torch
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molix.compile import Compiler
 from molzoo.mace.encoder import MACEEncoder
 from tests.conftest import (
@@ -184,7 +184,7 @@ class TestMACEEncoder:
         """A sequence, not a stacked tensor — MatPES layer widths differ; fp64 rows per atom."""
         feats = matpes_encoder.layer_features(**_layer_inputs(matpes_encoder, cluster))
         assert [tuple(f.shape) for f in feats] == [
-            (len(CLUSTER_Z), cue.Irreps("O3", irreps).dim) for irreps in matpes_encoder.layer_irreps
+            (len(CLUSTER_Z), meq.Irreps("O3", irreps).dim) for irreps in matpes_encoder.layer_irreps
         ]
         assert all(f.dtype == torch.float64 for f in feats)
 

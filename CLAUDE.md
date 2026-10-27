@@ -254,10 +254,18 @@ dependency surface.
 **Allowed third-party surface (hard).** Under `src/`, `tests/`, and in-repo
 `scripts/`: MolCrafts packages (`molpy`, `mollog`, …), PyTorch /
 TensorDict / torch ecosystem already in `pyproject.toml`, **numpy**, and
-**cuEquivariance** (`cuequivariance` / `cuequivariance_torch`). **No ASE, no
-e3nn, no mace-torch** (or other chemistry-ML wrappers). Extxyz I/O uses
-`molix.io.extxyz`; equivariance uses cue only. Upstream oracles live
-out-of-tree if ever needed — do not re-introduce those imports here.
+the equivariance frontend ported in-tree as `molrep.eq` / `molrep.eq.torch`
+(NVIDIA/cuEquivariance `49a741e`, 0.13.0, with its `scipy` / `sympy` /
+`networkx` / `opt_einsum` dependencies). No cuEquivariance package is a
+dependency of molnex's own code: do not import `cuequivariance` or
+`cuequivariance_torch` (ruff bans both); the kernel wheel
+`cuequivariance_ops_torch` is reached only by the ported frontend's own torch
+primitives (`molrep.eq.torch`), never on a model path — every contraction is
+`molrep.equivariance`.
+**No ASE, no e3nn, no mace-torch** (or other
+chemistry-ML wrappers). Extxyz I/O uses `molix.io.extxyz`. Upstream
+oracles live out-of-tree if ever needed — do not re-introduce those
+imports here.
 **No `lammps`, no `openmm`** Python imports either (user rule, 2026-09-07):
 anything that drives LAMMPS — subprocess `lmp` included — lives only under
 `interface/` (`interface/tests/`, ctest), never in `src/`, `tests/`, or
@@ -299,9 +307,10 @@ docstring: import a family from its subpackage, eagerly (`from molzoo.mace
 import MaceMatpes`), no lazy tables. **A block that serves one model lives in
 that model's package** (`layers.py`; MACE also `heads.py`, `coupling.py`);
 only generic components and operators (MLPs, radial bases, cutoffs, spherical
-harmonics, edge geometry, scatter, `interaction.product`, `molrep.cueq`) live
-in molrep (operator ruling 2026-10-15; MACE blocks moved 2026-10-16).
-Equivariant operations use cuEquivariance only.
+harmonics, edge geometry, scatter, `interaction.product`, `molrep.equivariance`)
+live in molrep (operator ruling 2026-10-15; MACE blocks moved 2026-10-16).
+Equivariant operations use cuEquivariance's descriptors (`molrep.eq`) on
+molnex's own kernels (`molrep.equivariance`).
 
 ```
 src/molix/autograd/potential.py    # Potential: abstract energy(frame); forward = the Derivative op
@@ -342,7 +351,7 @@ python -m pytest tests/ --cov=src --cov-report=term-missing
 
 Python >=3.12 required (pyproject pins >=3.12). Requires `torch>=2.14` and `tensordict>=0.14` (always use latest stable PyTorch; the native op lib is built with C++20, which torch 2.14 headers require).
 
-GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** molnex's native op libraries (`csrc/` → `build/csrc-aarch64/{molix,cueq}/`, on `MOLNEX_OP_LIBRARY_PATH`) against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
+GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs together on GH200 — `molrs/_lib.abi3.so` (`maturin develop --release`, aarch64 toolchain) **and** molnex's native op libraries (`csrc/` → `build/csrc-aarch64/{molix,equivariance}/`, on `MOLNEX_OP_LIBRARY_PATH`) against **this** interpreter's torch (`TORCH_CUDA_ARCH_LIST=9.0`). Login-node rustc overwrites the untagged molrs `.so` with x86-64; do not reuse a stale `.so`. Runtime `LD_LIBRARY_PATH` must include GCC 14 `lib64` + `torch/lib` + CUDA `lib64`. See `.claude/notes/notes.md` native-op-rebuild.
 
 ### Test layout rules
 
@@ -560,7 +569,7 @@ friendly for fixed-schema molecular data.
 ```
 molix.autograd (Derivative, Potential)
     ↓
-molrep.embedding (geometry / radial / cutoff / angular / mlp) · molrep.interaction.product · molrep.cueq
+molrep.embedding (geometry / radial / cutoff / angular / mlp) · molrep.interaction.product · molrep.equivariance
     │  └── molrep.heads (ScalarHead, …)
     │            ↑ (molpot.heads → molrep.embedding)
     ↓            │
@@ -578,7 +587,7 @@ molix.md (Langevin velocity-Verlet) ─→ molix.quant (T_eff / quantization sca
 molix.compile (Compiler, torch.compile / CUDA graphs)   [leaf execution util]
 molix.deploy (AtomEnergyModel contract, AtomEnergyAdapter, DeployMetadata) ─┐
 molix.export (one module per format: aoti.package / load / custom_op_namespaces) ─┴─→ interface/
-csrc/ (native op libraries: molix/, cueq/) ─→ interface/: runtime/ (format loaders, engine-free) ← lammps/ (pair_style molnex)
+csrc/ (native op libraries: molix/, equivariance/) ─→ interface/: runtime/ (format loaders, engine-free) ← lammps/ (pair_style molnex)
 ```
 
 One documented exception to the one-way rule: `molix.ff_export` imports
@@ -588,7 +597,7 @@ the only `molix → molpot` edge, recorded in `.claude/notes/architecture.md`.
 
 Notes on cross-package edges (verified against imports):
 - `molzoo` consumes `molrep.embedding` / `molrep.interaction.product` /
-  `molrep.cueq` and `molpot.heads` / `molpot.potentials` — never
+  `molrep.equivariance` and `molpot.heads` / `molpot.potentials` — never
   `molpot.derivation`; its energy products subclass `molix.autograd.Potential`
   (each family's energy product — `MaceMatpes` / `MaceOmol` / `MacePolar`,
   `AllegroPotential`, `PiNetPotential` — subclasses its encoder and is
@@ -623,9 +632,9 @@ Notes on cross-package edges (verified against imports):
   engine runs it. Callers compose adapter → `aoti.package` → metadata; there is
   no one-call export façade. On the C++ side `interface/runtime/` loads a
   format without knowing the engine, the native operator libraries it loads
-  are built from top-level `csrc/` (`csrc/molix`: molnex's own ops;
-  `csrc/cueq`: cuEquivariance's ops in C++ — internal only, git-ignored, never
-  published; upstream request NVIDIA/cuEquivariance#309), and
+  are built from top-level `csrc/` (`csrc/molix`: molnex's own neighbour /
+  PME / scatter ops; `csrc/equivariance`: the equivariant contractions,
+  namespace `molnex_equivariance`), and
   `interface/lammps/` is the only LAMMPS-aware layer; it converts the model's
   units with LAMMPS' own `utils::get_conversion_factor`. AOTI only — no
   TorchScript, no ML-IAP.
@@ -728,7 +737,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 
 - **Encoder body + product**: an encoder's `forward(td)` takes the post-collate batch, writes per-layer features `(N, layers, features)` under `atoms.node_features` (`pairs.edge_features` for Allegro) and exposes its primitives as methods; the named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, …) subclass the body and `molix.autograd.Potential` and own only `energy(frame)` + `forward`; reusable physics heads stay in molpot. Element-table validation is `molzoo.encoder.ElementTable`, spent once on the first eager call and folded out under tracing.
 - **Pydantic specs**: molzoo model specs are torch-free `BaseModel`s with `ConfigDict(extra="forbid")` — typed fields and validators, no `getattr(spec, …, default)` duck typing; official-archive configs (`MaceOfficialConfig`, `NequipConfig`) use `extra="ignore"` and declare only the fields that are read; molpot head specs that carry tensors use `ConfigDict(arbitrary_types_allowed=True, frozen=True)`
-- **cuEquivariance**: Tensor products use `cuequivariance` / `cuequivariance_torch` for GPU-accelerated equivariant operations. Edge convolutions always use cueq's indexed TP (conv fusion): global `indices_out` with `size_out=N`. Build every cue op through `molrep.cueq` — kernel methods pinned, so CUDA never runs cue's PyTorch fallback; no `use_fallback` / `method="naive"`; CPU may fall back (operator rule 2026-10-15, notes topic `cue-kernels-only`). Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message, and never add a local TP/CG kernel (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
+- **Equivariance**: group theory and descriptors are cuEquivariance's ported frontend `molrep.eq` / `molrep.eq.torch` (`import molrep.eq as meq`); every contraction runs on molnex's own operators in `molrep.equivariance` — `ChannelWiseTensorProduct`, `SymmetricContraction`, `SphericalHarmonics`, Allegro's `Contracter` and `WeightedChannels`, and `Linear` (one GEMM per irrep block over cue's linear descriptor, same flat `weight`) — on CUDA through `libmolnex_equivariance` (`csrc/equivariance`, namespace `molnex_equivariance`: deterministic, fused first and second adjoints, Meta kernels, loaded through `MOLNEX_OP_LIBRARY_PATH`) and on CPU through `molrep.equivariance.reference`, the same term table in plain PyTorch (tests and correctness only). The device of the tensor picks the path; there is no `method=` switch, no `use_fallback`, and no cuEquivariance kernel on any path (replacement completed 2026-10-26, notes topic `native-equivariance-default`; the earlier `cue-kernels-only` ruling is superseded). Precision is fixed at construction (`dtype=`), never cast. Edge convolutions are always indexed (conv fusion): global `indices_out` with `size_out=N`, the CSR edge schedule built once per batch by the encoder. Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
 - **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))`; base class `molix.autograd.Potential`, never `Derivative(<potential object>)`). `MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. There is no other force module: `Sonata`, `PotentialComposer`, `Rondo` and the model zoo are `Potential`s on this op; `HessianDerivation` owns its own leaf and calls `torch.autograd` directly. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
 - **Composed potentials**: `PotentialComposer` and `Sonata` are `molix.autograd.Potential`s — `energy` runs heads → terms → aggregation on the frame, `forward` is the `Derivative`
 - **Hook protocol**: Lifecycle callbacks (`on_train_start`, `on_epoch_end`, etc.) via `Hook` protocol

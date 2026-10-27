@@ -18,17 +18,17 @@ batch keys. This mirrors the molrep / molzoo encoder convention.
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field
 
+import molrep.eq as meq
 from molpot.heads._common import scalar_mlp as _scalar_mlp
-from molrep import cueq
+from molrep.equivariance import Linear
 
 
-def _find_irrep_offset(tensor_irreps: cue.Irreps, target_ir: cue.Irrep) -> int:
+def _find_irrep_offset(tensor_irreps: meq.Irreps, target_ir: meq.Irrep) -> int:
     offset = 0
     for mul, ir in tensor_irreps:
         if ir == target_ir:
@@ -86,7 +86,7 @@ def _equivariant_l_readout(
 
     Slices the ``lℓ`` block of the encoder's tensor track, gates per
     channel by an l=0 scalar projection of ``scalar_feats``, collapses
-    ``u·lℓ → 1·lℓ`` via ``cuet.Linear``, then scatter-sums to source
+    ``u·lℓ → 1·lℓ`` via ``molrep.equivariance.Linear``, then scatter-sums to source
     atoms.  Strictly SO(3)-equivariant under Wigner ``Dˡ(R)``.
     """
     e = tensor_feats.shape[0]
@@ -219,7 +219,7 @@ class PolarizabilityHead(nn.Module):
         hidden_dim: int = 128,
         anisotropic: bool = False,
         softplus_beta: float = 1.0,
-        tensor_irreps: cue.Irreps | None = None,
+        tensor_irreps: meq.Irreps | None = None,
         avg_num_neighbors: float | None = None,
         dtype: torch.dtype,
     ):
@@ -258,10 +258,10 @@ class PolarizabilityHead(nn.Module):
                 ) from None
             self._dev_size = 5 * self._u
             self.dev_proj = nn.Linear(input_dim, self._u, dtype=dtype)
-            self.dev_collapse = cueq.Linear(
-                irreps_in=cue.Irreps(G, [(self._u, "2e")]),
-                irreps_out=cue.Irreps(G, [(1, "2e")]),
-                layout=cue.ir_mul,
+            self.dev_collapse = Linear(
+                irreps_in=meq.Irreps(G, [(self._u, "2e")]),
+                irreps_out=meq.Irreps(G, [(1, "2e")]),
+                layout=meq.ir_mul,
                 dtype=dtype,  # was torch's default, not the model's, under fp64 builds
             )
 

@@ -34,11 +34,11 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-import cuequivariance as cue
 import pytest
 import torch
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molzoo.checkpoint import CheckpointRemap
 from molzoo.mace.checkpoint import (
     MACE_SKIP,
@@ -317,9 +317,9 @@ class TestCheckpointRemap:
 def test_element_linear_weight_refuses_an_equal_numel_in_another_shape() -> None:
     """The boundary takes the product's one flat row only — the module's own layout is not it."""
     linear = ElementLinear(
-        cue.Irreps("O3", "4x0e"),
-        cue.Irreps("O3", "3x0e"),
-        cue.Irreps("O3", "5x0e"),
+        meq.Irreps("O3", "4x0e"),
+        meq.Irreps("O3", "3x0e"),
+        meq.Irreps("O3", "5x0e"),
         dtype=torch.float64,
     )
     with pytest.raises(ValueError, match="flat weight"):
@@ -328,7 +328,7 @@ def test_element_linear_weight_refuses_an_equal_numel_in_another_shape() -> None
 
 def test_one_hot_weight_refuses_an_equal_numel_in_another_shape() -> None:
     """The boundary takes the linear's one flat row only — the ``(C, F)`` table is not it."""
-    lookup = OneHotLinear(cue.Irreps("O3", "3x0e"), cue.Irreps("O3", "5x0e"), dtype=torch.float64)
+    lookup = OneHotLinear(meq.Irreps("O3", "3x0e"), meq.Irreps("O3", "5x0e"), dtype=torch.float64)
     with pytest.raises(ValueError, match="flat weight"):
         one_hot_weight(lookup, lookup.weight.detach())
 

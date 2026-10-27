@@ -1,110 +1,132 @@
-"""MACE-compatible channelwise front end for the native contraction.
+"""Indexed channelwise tensor product for MACE's natural-parity O3 family.
 
-Only external per-edge weights, O3 ``ir_mul`` and MACE's natural-parity irreps
-family are supported (see :mod:`.descriptor`). Unsupported options fail
-explicitly; no cuEquivariance computation is called as a fallback. The
-constructor uses cuEquivariance only to build its descriptor.
+``out[target, l3 m3, c] += C(l1 m1, l2 m2 | l3 m3) · a[source, l1 m1, c] · b[e, l2 m2] ·
+w[e, path, c]`` over every path ``(l1, l2, l3)`` of cuEquivariance's ``channelwise_tensor_product``
+descriptor (see :mod:`.descriptor` for the family: ``U×0e+U×1o+…+U×L1``,
+``0e+1o+…+L2`` and the output filter ``0e+…+L2``; ``U`` in 32 / 64 / 128).
+Weights are external and per edge — the one way MACE uses the product — and
+the layout is ``ir_mul``. Anything else raises at construction.
 
-Build with ``-DMOLNEX_EQUIVARIANCE_ENABLE_CUDA=ON`` and point
-``MOLNEX_EQUIVARIANCE_LIBRARY`` to the resulting shared library, or install it
-into ``molrep/lib``. The kernels accept float32/float64 and uniform 32/64/128
-feature channels. Every reduction runs in a fixed order over the edge schedule
-— no atomics — so results are bitwise reproducible and PyTorch's deterministic
-mode is honoured.
+On a CUDA tensor the contraction runs ``molnex_equivariance::product`` over a
+CSR edge schedule: one CTA per target row, every reduction in a fixed order,
+no atomics, bitwise reproducible, with fused adjoints for the first and second
+derivative (:mod:`.backend`). On a CPU tensor the same term table is
+evaluated by :mod:`.reference`.
+
+Reference:
+    Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
+    Networks for Fast and Accurate Force Fields" NeurIPS 2022.
+    https://arxiv.org/abs/2206.07697
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple
-
-import cuequivariance as cue
 import torch
 from torch import nn
 
-from .backend import NativeBackend
+import molrep.eq as meq
+
+from . import reference
+from .backend import EdgeSchedule, NativeBackend
 from .descriptor import ChannelwiseDescriptor
 
-
-class EdgeSchedule(NamedTuple):
-    """CSR views of one edge list, by target and by source (``int32``).
-
-    Built once per batch (``ChannelWiseTensorProduct.schedule``) and shared by
-    every contraction of every layer — the forward sums over a node's incoming
-    edges, the node-operand adjoint over its outgoing ones.
-    """
-
-    order_t: torch.Tensor  #: edges sorted (stably) by target, ``(E,)``
-    rowptr_t: torch.Tensor  #: ``(rows_d + 1,)``
-    order_s: torch.Tensor  #: edges sorted (stably) by source, ``(E,)``
-    rowptr_s: torch.Tensor  #: ``(rows_a + 1,)``
+__all__ = ["ChannelWiseTensorProduct", "EdgeSchedule"]
 
 
 class ChannelWiseTensorProduct(nn.Module):
-    """The cuEq 0.12 channelwise signature, restricted to MACE's indexed subset."""
+    """The indexed channelwise product with external per-edge weights.
+
+    Args:
+        irreps_in1: Node operand irreps, ``U×0e+U×1o+…`` (natural parity).
+        irreps_in2: Angular operand irreps, ``0e+1o+…+L2``.
+        filter_irreps_out: Output filter, ``0e+…+L2`` (``None`` keeps the
+            descriptor's default, which the family check must accept).
+        layout: Must be ``meq.ir_mul``.
+        dtype: ``float32`` or ``float64``; the dtype of the coefficient buffer.
+        device: Device of the term-table buffers.
+
+    Attributes:
+        irreps_out: Output irreps, one segment per path.
+        weight_numel: Flat per-edge weight width.
+    """
 
     def __init__(
         self,
-        irreps_in1,
-        irreps_in2,
+        irreps_in1: meq.Irreps,
+        irreps_in2: meq.Irreps,
         filter_irreps_out=None,
         *,
-        layout=None,
-        layout_in1=None,
-        layout_in2=None,
-        layout_out=None,
-        shared_weights=True,
-        internal_weights=None,
-        device=None,
-        dtype=None,
-        math_dtype=None,
-        use_fallback=None,
-        method=None,
-    ):
+        layout=meq.ir_mul,
+        dtype: torch.dtype,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
-        if shared_weights or internal_weights not in (None, False):
-            raise ValueError("native channelwise requires external, unshared weights")
-        if any((value or layout) != cue.ir_mul for value in (layout_in1, layout_in2, layout_out)):
+        if layout != meq.ir_mul:
             raise ValueError("native channelwise requires ir_mul layout")
-        if method not in (None, "uniform_1d") or use_fallback not in (None, False):
-            raise ValueError("native channelwise has no cuEq execution fallback")
-        dtype = torch.get_default_dtype() if dtype is None else dtype
-        if dtype not in (torch.float32, torch.float64) or math_dtype not in (None, dtype):
-            raise ValueError("native channelwise requires matching float32 or float64 math dtype")
+        if dtype not in (torch.float32, torch.float64):
+            raise ValueError("native channelwise requires float32 or float64")
         self.descriptor = ChannelwiseDescriptor(irreps_in1, irreps_in2, filter_irreps_out)
         self.irreps_in1, self.irreps_in2 = irreps_in1, irreps_in2
         self.irreps_out = self.descriptor.irreps_out
         self.weight_numel = self.descriptor.weight_numel
-        self.shared_weights = False
-        self.internal_weights = False
-        self.register_parameter("weight", None)
+        self.channels = self.descriptor.channels
+        self.output_segments = self.descriptor.output_dim // self.channels
+        self.register_buffer(
+            "terms",
+            torch.tensor(self.descriptor.terms, dtype=torch.int64, device=device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "coefficients",
+            torch.tensor(self.descriptor.coefficients, dtype=dtype, device=device),
+            persistent=False,
+        )
         NativeBackend.load()
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.irreps_in1} x {self.irreps_in2} -> {self.irreps_out}, "
+            f"weight_numel={self.weight_numel}"
+        )
 
     @staticmethod
     def schedule(
         source: torch.Tensor, target: torch.Tensor, rows_source: int, rows_target: int
     ) -> EdgeSchedule:
         """The CSR edge schedule for ``(source, target)`` over the given row counts."""
-        return EdgeSchedule(
-            *torch.ops.molnex_equivariance.schedule(
-                source.contiguous(), target.contiguous(), rows_source, rows_target
+        if source.is_cuda:
+            return EdgeSchedule(
+                *torch.ops.molnex_equivariance.schedule(
+                    source.contiguous(), target.contiguous(), rows_source, rows_target
+                )
             )
-        )
+        return reference.schedule(source, target, rows_source, rows_target)
 
     def forward(
         self,
-        x1,
-        x2,
-        weight=None,
-        indices_1=None,
-        indices_2=None,
-        indices_out=None,
-        size_out=None,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        indices_1: torch.Tensor,
+        indices_out: torch.Tensor,
+        size_out: int,
         schedule: EdgeSchedule | None = None,
-    ):
-        if weight is None or indices_1 is None or indices_out is None or size_out is None:
-            raise ValueError("explicit weights, source/target indices and size_out are required")
-        if indices_2 is not None:
-            raise ValueError("indices_2 is not implemented")
+    ) -> torch.Tensor:
+        """Contract and sum into the target rows.
+
+        Args:
+            x1: Node operand ``(rows_1, irreps_in1.dim)``, ``ir_mul``.
+            x2: Angular operand ``(E, irreps_in2.dim)``.
+            weight: Per-edge weights ``(E, weight_numel)``.
+            indices_1: ``(E,)`` row of ``x1`` per edge (the source).
+            indices_out: ``(E,)`` output row per edge (the target).
+            size_out: Output row count.
+            schedule: The batch's edge schedule; built here when omitted.
+
+        Returns:
+            ``(size_out, irreps_out.dim)``, ``ir_mul``.
+        """
         if x1.ndim != 2 or x2.ndim != 2 or weight.ndim != 2:
             raise ValueError("operands must be matrices")
         if (x1.shape[1], x2.shape[1]) != self.descriptor.input_dims:
@@ -112,19 +134,32 @@ class ChannelWiseTensorProduct(nn.Module):
         if weight.shape[1] != self.weight_numel:
             raise ValueError("weight width differs from weight_numel")
         source, target = indices_1.contiguous(), indices_out.contiguous()
-        if schedule is None:
-            schedule = self.schedule(source, target, x1.shape[0], size_out)
         d = self.descriptor
-        return torch.ops.molnex_equivariance.product(
-            x1.contiguous(),
-            x2.contiguous(),
-            weight.contiguous(),
+        if x1.is_cuda:
+            if schedule is None:
+                schedule = self.schedule(source, target, x1.shape[0], size_out)
+            return torch.ops.molnex_equivariance.product(
+                x1.contiguous(),
+                x2.contiguous(),
+                weight.contiguous(),
+                source,
+                target,
+                *schedule,
+                d.coefficients,
+                size_out,
+                d.l1,
+                d.l2,
+                d.channels,
+            )
+        return reference.channelwise(
+            x1,
+            x2,
+            weight,
             source,
             target,
-            *schedule,
-            d.coefficients,
+            self.coefficients,
+            self.terms,
             size_out,
-            d.l1,
-            d.l2,
-            d.channels,
+            self.channels,
+            self.output_segments,
         )

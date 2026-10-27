@@ -38,7 +38,7 @@ class TestDeployMetadata:
             _metadata(**{field: value})
 
     def test_round_trip_and_the_written_document(self, tmp_path):
-        written = _metadata(op_libraries={"molnex_cueq_ops": "cuequivariance_ops_torch==0.12.0"})
+        written = _metadata(op_libraries={"molnex_equivariance": "molnex_equivariance==1"})
         path = written.write(tmp_path, "pinet")
         assert path.name == "pinet.json"
         document = json.loads(path.read_text())
@@ -58,15 +58,14 @@ class TestOpLibrariesFor:
     def test_aten_only_package_needs_no_library(self):
         assert DeployMetadata.op_libraries_for([]) == {}
 
-    def test_cuequivariance_maps_to_its_native_library_and_version(self, monkeypatch):
-        monkeypatch.setattr(metadata_module, "_installed_version", lambda package: "9.9.9")
-        assert DeployMetadata.op_libraries_for(["cuequivariance"]) == {
-            "molnex_cueq_ops": "cuequivariance_ops_torch==9.9.9"
+    def test_each_namespace_maps_to_the_requirement_its_library_reports(self, monkeypatch):
+        monkeypatch.setattr(
+            metadata_module, "_library_requirement", lambda library: f"{library}==7"
+        )
+        assert DeployMetadata.op_libraries_for(["molnex_equivariance", "molix"]) == {
+            "molnex_opLib": "molnex_opLib==7",
+            "molnex_equivariance": "molnex_equivariance==7",
         }
-
-    def test_molix_maps_to_the_requirement_its_library_reports(self, monkeypatch):
-        monkeypatch.setattr(metadata_module, "_molix_op_requirement", lambda: "molix_ops==7")
-        assert DeployMetadata.op_libraries_for(["molix"]) == {"molnex_opLib": "molix_ops==7"}
 
     def test_a_namespace_without_native_registration_is_refused(self):
         with pytest.raises(ValueError, match="no native registration"):

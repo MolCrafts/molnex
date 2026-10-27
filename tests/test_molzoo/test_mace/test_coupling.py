@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import itertools
 
-import cuequivariance as cue
 import numpy as np
 import pytest
 
+import molrep.eq as meq
 from molzoo.mace.coupling import MaceO3, real_coupling
 
 L_MAX = 4
@@ -22,7 +22,7 @@ def _triples():
 def _sign_against_cue(l1: int, l2: int, l3: int) -> int:
     p1, p2 = 1, 1
     ours = MaceO3.clebsch_gordan(MaceO3(l=l1, p=p1), MaceO3(l=l2, p=p2), MaceO3(l=l3, p=p1 * p2))
-    ref = cue.O3.clebsch_gordan(cue.O3(l1, p1), cue.O3(l2, p2), cue.O3(l3, p1 * p2))
+    ref = meq.O3.clebsch_gordan(meq.O3(l1, p1), meq.O3(l2, p2), meq.O3(l3, p1 * p2))
     if np.abs(ours - ref).max() < 1e-12:
         return 1
     if np.abs(ours + ref).max() < 1e-12:
@@ -33,14 +33,14 @@ def _sign_against_cue(l1: int, l2: int, l3: int) -> int:
 class TestMaceO3:
     @pytest.mark.parametrize("triple", list(_triples()))
     def test_coupling_is_cue_up_to_a_sign(self, triple):
-        """Same real basis as ``cue.O3``; only the phase of a coupling may differ."""
+        """Same real basis as ``meq.O3``; only the phase of a coupling may differ."""
         assert _sign_against_cue(*triple) != 0
 
     def test_conventions_agree_below_l2_and_split_above(self):
-        """Every coupling among ``l <= 1`` matches ``cue.O3``; ``(1, 2, 2)`` is negated.
+        """Every coupling among ``l <= 1`` matches ``meq.O3``; ``(1, 2, 2)`` is negated.
 
         That split is why MACE checkpoints whose products stop at ``1o``
-        loaded under ``cue.O3`` while MACE-POLAR-1-L, whose product emits
+        loaded under ``meq.O3`` while MACE-POLAR-1-L, whose product emits
         ``2e``, did not.
         """
         assert all(_sign_against_cue(*t) == 1 for t in _triples() if max(t) <= 1)

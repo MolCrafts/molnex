@@ -15,8 +15,9 @@ and readout primitives.
   and readouts.
 - [Embeddings](user-guide/embeddings.md): turn atomic numbers and scalar inputs
   into learned features.
-- [Native channelwise tensor product](user-guide/native-channelwise.md): the
-  opt-in CUDA implementation of MACE's indexed channelwise product.
+- [Equivariant operators](user-guide/equivariance.md): the channelwise
+  product, symmetric contraction, spherical harmonics, Allegro contractions
+  and linear map on molnex's own kernels, with the CPU reference.
 
 ## Explanation
 

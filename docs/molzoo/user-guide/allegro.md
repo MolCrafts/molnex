@@ -104,9 +104,9 @@ layout `(E, D·u)`.
 MLP shapes use upstream names: `scalar_embed_mlp_hidden_layers_{depth,width}`,
 `allegro_mlp_hidden_layers_{depth,width}`,
 `readout_mlp_hidden_layers_{depth,width}` and the matching `*_nonlinearity`.
-`zbl=True` adds the ZBL repulsion. MolNex-only fields: `expose_tensor_track`
-and `tp_method` (`"uniform_1d"` or `"fused_tp"`; both are cuEquivariance kernels —
-molnex has no PyTorch fallback, so the model needs a GPU with the kernels).
+`zbl=True` adds the ZBL repulsion. The one MolNex-only field is
+`expose_tensor_track`. The tensor products run on molnex's own kernels
+(`molrep.equivariance`) on CUDA and on their PyTorch reference on CPU.
 
 The pair-feature width is `F (L + 1)` (`encoder.output_dim`): the initial
 scalar slice plus one per layer.
@@ -343,10 +343,9 @@ For example `Allegro-OAM-L:0.1` (Zenodo record
 [16980200](https://zenodo.org/records/16980200); 89 elements, `r_max = 7 Å`,
 4 layers, `l_max = 3`). Notes:
 
-- `tp_method` is the one spec field `load` takes (`load(path, tp_method="fused_tp")`):
-  a kernel choice that leaves the weights alone. Everything else about the
-  architecture is the package's — `NequipPackage.read` fills a `NequipConfig`
-  from the module tree and `AllegroSpec.from_package` builds the spec from it.
+- The architecture is the package's — `NequipPackage.read` fills a
+  `NequipConfig` from the module tree and `AllegroSpec.from_package` builds
+  the spec from it; `load` takes no spec field.
 - Build precision is the `dtype` argument: an fp32 package loaded with
   `dtype=torch.float64` evaluates its fp32 weights in fp64.
 - molnex leaves PyTorch's fp32 matmul policy at its default (`"highest"`,
@@ -381,7 +380,6 @@ non-integer cutoff exponent; a radial embedding other than
 | `num_scalar_features` | scalar latent width `F` | `64`–`256`; sets `output_dim = F(L+1)` |
 | `num_tensor_features` | tensor channels `u` | `16`–`64` |
 | `per_type_energy_shifts` / `_scales` | per-type reference energy / spread | from a linear fit of energies on composition |
-| `tp_method` | kernel | `"uniform_1d"` (default) or `"fused_tp"`; no CPU path |
 
 ## 11. Spec Crosswalk
 

@@ -22,7 +22,8 @@ Shape shape_of(int64_t l1, int64_t l2) {
     return {Config<A, B>::NA, Config<A, B>::NB, Config<A, B>::NP, Config<A, B>::NK, Config<A, B>::NT};
   MOLNEX_EQUIVARIANCE_CONFIGS(MOLNEX_EQUIVARIANCE_SHAPE)
 #undef MOLNEX_EQUIVARIANCE_SHAPE
-  TORCH_CHECK(false, "unsupported (l1, l2) = (", l1, ", ", l2, "): l1 in 0..3, l2 in 2..3");
+  TORCH_CHECK(false, "unsupported (l1, l2) = (", l1, ", ", l2,
+              "): l1 in 0..3 and l2 in 2..3, or l1 in 0..1 and l2 = 1");
 }
 
 void check_operand(const at::Tensor& x, const at::Tensor& like, int64_t rows, int64_t width,
@@ -48,8 +49,10 @@ void check_common(const at::Tensor& a, const Shape& s, int64_t channels, const a
   TORCH_CHECK(a.is_cuda(), "operands must be CUDA tensors");
   TORCH_CHECK(a.scalar_type() == at::kFloat || a.scalar_type() == at::kDouble,
               "channelwise supports float32/float64 only");
-  TORCH_CHECK(channels == 32 || channels == 64 || channels == 128,
-              "unsupported channel multiplicity ", channels);
+  TORCH_CHECK(channels == 8 || channels == 16 || channels == 32 || channels == 64 ||
+                  (channels >= 128 && channels % 128 == 0),
+              "unsupported channel multiplicity ", channels,
+              " (8, 16, 32, 64 or a multiple of 128)");
   const int64_t edges = source.numel();
   check_operand(a, a, -1, s.na * channels, "a");
   check_operand(b, a, edges, s.nb, "b");

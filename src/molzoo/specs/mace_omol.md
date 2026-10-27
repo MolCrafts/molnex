@@ -260,9 +260,9 @@ below are relative to it); the shared pipeline is covered by
 
 ### 7.3 Engineering Benchmark
 
-Not claimed. The model runs on cuEquivariance's kernels only (`molrep.cueq`;
-no CPU path); throughput validation is out of scope for this spec (tracked in
-`scripts/omol_port/SPEC.md`).
+Not claimed. The model runs on molnex's own equivariance kernels
+(`molrep.equivariance`; the CPU reference serves tests only); throughput
+validation is out of scope for this spec (tracked in `scripts/omol_port/SPEC.md`).
 
 ### 7.4 Run Log
 

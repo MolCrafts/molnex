@@ -19,7 +19,7 @@ closed-shell singlet is ``M = 1``) — a multiplicity, not a count of unpaired
 electrons.
 
 The representation blocks the product is assembled from live here too, above
-the product, in native ``cue.ir_mul`` (no energy; GTO electrostatics are
+the product, in native ``meq.ir_mul`` (no energy; GTO electrostatics are
 :mod:`molpot.potentials.gto`). Submodule names match the official remap.
 
 - :class:`SparseUvuTensorProduct` — the sparse uvu product of the field path,
@@ -30,10 +30,10 @@ the product, in native ``cue.ir_mul`` (no energy; GTO electrostatics are
   runtime ``mul_ir`` transpose.
 - :class:`MultiLayerFeatureMixer` — sum of per-layer equivariant linears
   (official polar-1-M: two layers of ``512x0e+512x1o``, dim 2048).
-- :class:`EnvironmentDependentSpinSourceBlock` — a single ``cuet.Linear`` from
+- :class:`EnvironmentDependentSpinSourceBlock` — a single ``molrep.equivariance.Linear`` from
   node features onto two concatenated copies of ``Y_{l_max}``; Polar-1-M uses
   ``l_max=1`` so the flat output is ``(N, 8)`` and ``view (N, 2, 4)`` is one
-  spin channel of monopole + dipole. The ``cuet.Linear`` is registered bare,
+  spin channel of monopole + dipole. The ``molrep.equivariance.Linear`` is registered bare,
   never inside a wrapper module — a wrapper would prefix the checkpoint key as
   ``linear.linear.weight``.
 - :class:`AgnosticEmbeddedOneBodyVariableUpdate` /
@@ -54,19 +54,19 @@ import math
 from pathlib import Path
 from typing import Self
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tensordict import TensorDictBase
 
+import molrep.eq as meq
 from molix.F.scatter import scatter_sum_compile_safe
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
 from molpot.potentials.gto.features import GTOFieldFeatures
 from molpot.potentials.gto.fukui import FukuiEquilibration
 from molpot.potentials.gto.hartree import GTOHartreeEnergy
-from molrep import cueq
 from molrep.embedding.geometry import edge_lengths, edge_vectors
+from molrep.equivariance import Linear
 from molrep.interaction.product import irreps_from_l_max, sh_irreps_from_l_max
 from molzoo.mace.checkpoint import polar_keys
 from molzoo.mace.heads import NonLinearBiasReadout
@@ -75,7 +75,7 @@ from molzoo.mace.potential import MacePotential, Wrt
 from molzoo.mace.spec import MACEPolarSpec
 
 
-def _slices(irreps: cue.Irreps) -> list[tuple[int, int, int, int, int, int]]:
+def _slices(irreps: meq.Irreps) -> list[tuple[int, int, int, int, int, int]]:
     """``(start, stop, mul, l, p, dim)`` per irrep in ``ir_mul`` storage order."""
     out: list[tuple[int, int, int, int, int, int]] = []
     start = 0
@@ -101,9 +101,9 @@ class SparseUvuTensorProduct(nn.Module):
         self, irreps_in1: str, irreps_in2: str, irreps_out: str, *, dtype: torch.dtype
     ) -> None:
         super().__init__()
-        in1 = cue.Irreps("O3", irreps_in1)
-        in2 = cue.Irreps("O3", irreps_in2)
-        out = cue.Irreps("O3", irreps_out)
+        in1 = meq.Irreps("O3", irreps_in1)
+        in2 = meq.Irreps("O3", irreps_in2)
+        out = meq.Irreps("O3", irreps_out)
         self.irreps_in1 = in1
         self.irreps_in2 = in2
         self.irreps_out = out
@@ -211,7 +211,7 @@ class SparseUvuTensorProduct(nn.Module):
 
 
 class MultiLayerFeatureMixer(nn.Module):
-    """``tilde h = sum_t W^{(t)} h^{(t)}`` with one ``cuet.Linear`` per layer.
+    """``tilde h = sum_t W^{(t)} h^{(t)}`` with one ``molrep.equivariance.Linear`` per layer.
 
     Args:
         irreps: Node-feature irreps of every layer, e.g. ``"512x0e+512x1o"``.
@@ -227,10 +227,10 @@ class MultiLayerFeatureMixer(nn.Module):
         if num_layers < 1:
             raise ValueError(f"num_layers must be >= 1, got {num_layers}")
         self.num_layers = num_layers
-        ir = cue.Irreps("O3", irreps)
+        ir = meq.Irreps("O3", irreps)
         self.irreps_dim = ir.dim
         self.linears = nn.ModuleList(
-            [cueq.Linear(ir, ir, layout=cue.ir_mul, dtype=dtype) for _ in range(num_layers)]
+            [Linear(ir, ir, layout=meq.ir_mul, dtype=dtype) for _ in range(num_layers)]
         )
 
     def forward(self, all_node_feats: torch.Tensor) -> torch.Tensor:
@@ -289,10 +289,10 @@ class EnvironmentDependentSpinSourceBlock(nn.Module):
         # lands monopoles at [:, 0, 0] and [:, 1, 0].
         y = sh_irreps_from_l_max(l_max).replace(" ", "")
         irreps_out = f"{y}+{y}"
-        self.linear = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
-            cue.Irreps("O3", irreps_out),
-            layout=cue.ir_mul,
+        self.linear = Linear(
+            meq.Irreps("O3", irreps_in),
+            meq.Irreps("O3", irreps_out),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
 
@@ -313,20 +313,20 @@ class EnvironmentDependentSpinSourceBlock(nn.Module):
         return sources
 
 
-def _count_0e(irreps: cue.Irreps) -> int:
+def _count_0e(irreps: meq.Irreps) -> int:
     return sum(mi.mul for mi in irreps if mi.ir.l == 0 and int(mi.ir.p) == 1)
 
 
-def _lmax(irreps: cue.Irreps) -> int:
+def _lmax(irreps: meq.Irreps) -> int:
     return max((mi.ir.l for mi in irreps), default=0)
 
 
 def _mul_sh(l_max: int, mul: int) -> str:
-    y = cue.Irreps("O3", sh_irreps_from_l_max(l_max))
+    y = meq.Irreps("O3", sh_irreps_from_l_max(l_max))
     return "+".join(f"{mul * mi.mul}x{mi.ir}" for mi in y)
 
 
-def _join(mis: list[cue.MulIrrep]) -> str:
+def _join(mis: list[meq.MulIrrep]) -> str:
     return "+".join(f"{mi.mul}x{mi.ir}" for mi in mis) if mis else "0x0e"
 
 
@@ -339,11 +339,11 @@ class _LinearWithScalarBias(nn.Module):
 
     def __init__(self, irreps_in: str, irreps_out: str, *, dtype: torch.dtype) -> None:
         super().__init__()
-        out = cue.Irreps("O3", irreps_out)
-        self.linear = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
+        out = meq.Irreps("O3", irreps_out)
+        self.linear = Linear(
+            meq.Irreps("O3", irreps_in),
             out,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             dtype=dtype,
         )
         slices: list[tuple[int, int, int]] = []
@@ -386,14 +386,14 @@ class GeneralNonLinearBiasReadout(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        mlp = cue.Irreps("O3", mlp_irreps)
-        out = cue.Irreps("O3", irreps_out)
+        mlp = meq.Irreps("O3", mlp_irreps)
+        out = meq.Irreps("O3", irreps_out)
         out_ls = {(mi.ir.l, int(mi.ir.p)) for mi in out}
         scalars = [mi for mi in mlp if mi.ir.l == 0 and (mi.ir.l, int(mi.ir.p)) in out_ls]
         gated = [mi for mi in mlp if mi.ir.l > 0 and (mi.ir.l, int(mi.ir.p)) in out_ls]
-        irreps_scalars = cue.Irreps("O3", _join(scalars))
-        irreps_gated = cue.Irreps("O3", _join(gated))
-        irreps_gates = cue.Irreps("O3", "+".join(f"{mi.mul}x0e" for mi in gated) or "0x0e")
+        irreps_scalars = meq.Irreps("O3", _join(scalars))
+        irreps_gated = meq.Irreps("O3", _join(gated))
+        irreps_gates = meq.Irreps("O3", "+".join(f"{mi.mul}x0e" for mi in gated) or "0x0e")
         self.equivariant_nonlin = GatedNonlinearity(
             irreps_scalars,
             [F.silu],
@@ -403,10 +403,10 @@ class GeneralNonLinearBiasReadout(nn.Module):
             layout="ir_mul",
         )
         nonlin = self.equivariant_nonlin.irreps_in
-        self.linear_1 = cueq.Linear(
-            cue.Irreps("O3", irreps_in),
+        self.linear_1 = Linear(
+            meq.Irreps("O3", irreps_in),
             nonlin,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             dtype=dtype,
         )
         self.linear_mid = _LinearWithScalarBias(str(mlp), str(nonlin), dtype=dtype)
@@ -419,7 +419,7 @@ class GeneralNonLinearBiasReadout(nn.Module):
 
 
 class _AgnosticChargeBiasedLinearPotentialEmbedding(nn.Module):
-    """Sum of three ``cuet.Linear`` maps: potential + node feats + local charges."""
+    """Sum of three ``molrep.equivariance.Linear`` maps: potential + node feats + local charges."""
 
     def __init__(
         self,
@@ -430,23 +430,23 @@ class _AgnosticChargeBiasedLinearPotentialEmbedding(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        feats = cue.Irreps("O3", node_feats_irreps)
-        self.potential_linear = cueq.Linear(
-            cue.Irreps("O3", potential_irreps),
+        feats = meq.Irreps("O3", node_feats_irreps)
+        self.potential_linear = Linear(
+            meq.Irreps("O3", potential_irreps),
             feats,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             dtype=dtype,
         )
-        self.node_feats_linear = cueq.Linear(
+        self.node_feats_linear = Linear(
             feats,
             feats,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             dtype=dtype,
         )
-        self.charge_embedding = cueq.Linear(
-            cue.Irreps("O3", charges_irreps),
+        self.charge_embedding = Linear(
+            meq.Irreps("O3", charges_irreps),
             feats,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             dtype=dtype,
         )
 
@@ -486,8 +486,8 @@ class AgnosticEmbeddedOneBodyVariableUpdate(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        feats = cue.Irreps("O3", node_feats_irreps)
-        charges = cue.Irreps("O3", charges_irreps)
+        feats = meq.Irreps("O3", node_feats_irreps)
+        charges = meq.Irreps("O3", charges_irreps)
         n_0e = _count_0e(feats)
         invar = f"{n_0e}x0e"
         self.potential_embedding = _AgnosticChargeBiasedLinearPotentialEmbedding(
@@ -496,10 +496,10 @@ class AgnosticEmbeddedOneBodyVariableUpdate(nn.Module):
             charges_irreps=charges_irreps,
             dtype=dtype,
         )
-        self.source_embedding = cueq.Linear(
-            cue.Irreps("O3", node_attrs_irreps),
-            cue.Irreps("O3", invar),
-            layout=cue.ir_mul,
+        self.source_embedding = Linear(
+            meq.Irreps("O3", node_attrs_irreps),
+            meq.Irreps("O3", invar),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
         self.dot_products = SparseUvuTensorProduct(
@@ -568,7 +568,7 @@ class OneBodyMLPFieldReadout(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        n_0e = _count_0e(cue.Irreps("O3", node_feats_irreps))
+        n_0e = _count_0e(meq.Irreps("O3", node_feats_irreps))
         invar = f"{n_0e}x0e"
         self.linear_up_q = _LinearWithScalarBias(charges_irreps, node_feats_irreps, dtype=dtype)
         self.linear_up_v = _LinearWithScalarBias(potential_irreps, node_feats_irreps, dtype=dtype)

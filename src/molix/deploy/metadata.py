@@ -13,15 +13,16 @@ into its own unit system and decides its own ghost shell. Fields:
   depends on every atom within ``T * cutoff``.
 * ``energy_unit`` / ``length_unit`` — the model's units (``"eV"``,
   ``"angstrom"``); forces are ``energy_unit / length_unit``.
-* ``op_libraries`` — ``{library: requirement}``: native libraries that register
-  the non-ATen operators in the package, each with the upstream version its
-  binding was built against. Empty for a package of ATen operators only.
+* ``op_libraries`` — ``{library: requirement}``: molnex's native libraries that
+  register the non-ATen operators in the package (``molnex_opLib`` for
+  ``molix::*``, ``molnex_equivariance`` for ``molnex_equivariance::*``), each
+  with the requirement string it reports. Empty for a package of ATen
+  operators only.
 """
 
 from __future__ import annotations
 
 import ctypes
-import importlib.metadata
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
@@ -29,12 +30,12 @@ from pathlib import Path
 
 import torch
 
-#: Operator namespace → (native library that registers it for C++ callers,
-#: Python package whose installed version the binding must match). ``None``:
-#: molnex's own library, whose requirement is the string it reports.
-_NATIVE_OPS: dict[str, tuple[str, str | None]] = {
-    "cuequivariance": ("molnex_cueq_ops", "cuequivariance_ops_torch"),
-    "molix": ("molnex_opLib", None),
+#: Operator namespace → the native library that registers it for C++ callers.
+#: Both are molnex's own; each reports its requirement string through
+#: ``molnex_op_library_requirement``, which the C++ runtime checks on load.
+_NATIVE_OPS: dict[str, str] = {
+    "molix": "molnex_opLib",
+    "molnex_equivariance": "molnex_equivariance",
 }
 
 _DTYPES = {torch.float32: "float32", torch.float64: "float64"}
@@ -104,12 +105,8 @@ class DeployMetadata:
                     f"operators of namespace {namespace!r} have no native registration; "
                     "the package would need Python at run time"
                 )
-            library, package = _NATIVE_OPS[namespace]
-            libraries[library] = (
-                _molix_op_requirement()
-                if package is None
-                else f"{package}=={_installed_version(package)}"
-            )
+            library = _NATIVE_OPS[namespace]
+            libraries[library] = _library_requirement(library)
         return libraries
 
     def write(self, directory: str | Path, name: str = "model") -> Path:
@@ -139,28 +136,26 @@ class DeployMetadata:
         return cls(**document)
 
 
-def _molix_op_requirement() -> str:
-    """The requirement string molnex's loaded op library reports.
+def _library_requirement(library: str) -> str:
+    """The requirement string a built molnex op library reports.
 
-    ``molnex_op_library_requirement`` in ``src/molix/op/src/molix_library.cpp``;
-    the C++ runtime checks the library it loads against the same string.
+    ``molnex_op_library_requirement``, exported by ``csrc/molix`` and
+    ``csrc/equivariance``; the C++ runtime checks the library it loads against
+    the same string.
     """
-    from molix import _op_lib_path
+    if library == "molnex_opLib":
+        from molix import _op_lib_path
 
-    path = _op_lib_path()
+        path = _op_lib_path()
+    else:
+        from molrep.equivariance.backend import NativeBackend
+
+        path = NativeBackend.library_path()
     if path is None:
         raise ValueError(
-            "the package calls molix::* operators but molnex's native op library is "
+            f"the package calls operators of {library} but that native library is "
             "not built here (see csrc/CMakeLists.txt), so its version cannot be recorded"
         )
-    library = ctypes.CDLL(str(path))
-    library.molnex_op_library_requirement.restype = ctypes.c_char_p
-    return library.molnex_op_library_requirement().decode()
-
-
-def _installed_version(package: str) -> str:
-    """Installed version of the distribution that provides import package ``package``."""
-    distributions = importlib.metadata.packages_distributions().get(package)
-    if not distributions:
-        raise ValueError(f"{package} is not installed")
-    return importlib.metadata.version(distributions[0])
+    loaded = ctypes.CDLL(str(path))
+    loaded.molnex_op_library_requirement.restype = ctypes.c_char_p
+    return loaded.molnex_op_library_requirement().decode()

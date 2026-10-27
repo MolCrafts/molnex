@@ -49,12 +49,12 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-import cuequivariance as cue
 import numpy as np
 import torch
 from molpy import Box, Frame
 from tensordict import TensorDict
 
+import molrep.eq as meq
 from molix.data import TotalCharge
 from molix.data.collate import collate_molecules
 from molix.neighbor import NeighborList
@@ -902,7 +902,7 @@ def rotate_irreps_features_simple(
         Rotated features with same shape as input.
     """
     # Parse irreps
-    irreps_obj = cue.Irreps("O3", irreps)
+    irreps_obj = meq.Irreps("O3", irreps)
 
     n_nodes = features.shape[0]
     rotated = features.clone()

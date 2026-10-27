@@ -22,9 +22,11 @@ class TestSphericalHarmonicsSpec:
     """Test SphericalHarmonicsSpec configuration."""
 
     def test_invalid_l_max(self):
-        """Test validation for l_max."""
+        """Test validation for l_max: negative, and above the degrees the polynomial evaluates."""
         with pytest.raises(ValueError):
             SphericalHarmonicsSpec(l_max=-1)
+        with pytest.raises(ValueError):
+            SphericalHarmonicsSpec(l_max=4)
 
 
 class TestSphericalHarmonics:
@@ -134,25 +136,21 @@ class TestSphericalHarmonics:
         assert output.abs().mean() > 0.01
         assert output.abs().mean() < 10.0
 
-    def test_dtype_consistency(self):
-        """Test that output dtype matches input."""
-        sh = SphericalHarmonics(l_max=2, dtype=DTYPE)
-
-        # Float32
-        vec_f32 = torch.randn(10, 3, dtype=torch.float32)
-        out_f32 = sh(vec_f32)
-        assert out_f32.dtype == torch.float32
-
-        # Float64
-        vec_f64 = torch.randn(10, 3, dtype=torch.float64)
-        out_f64 = sh(vec_f64)
-        assert out_f64.dtype == torch.float64
+    def test_dtype_is_fixed_at_construction(self):
+        """The output has the build dtype; an input of another dtype is refused, not cast."""
+        for dtype in (torch.float32, torch.float64):
+            sh = SphericalHarmonics(l_max=2, dtype=dtype)
+            assert sh(torch.randn(10, 3, dtype=dtype)).dtype == dtype
+        with pytest.raises(ValueError, match="dtype"):
+            SphericalHarmonics(l_max=2, dtype=torch.float64)(
+                torch.randn(10, 3, dtype=torch.float32)
+            )
 
     def test_different_l_max_values(self):
         """Test various l_max values."""
         vectors = torch.randn(10, 3)
 
-        for l_max in [0, 1, 2, 3, 4]:
+        for l_max in [0, 1, 2, 3]:
             sh = SphericalHarmonics(l_max=l_max, dtype=DTYPE)
             output = sh(vectors)
             expected_dim = (l_max + 1) ** 2

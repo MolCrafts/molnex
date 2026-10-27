@@ -2538,6 +2538,170 @@ and job scripts:
 `/nobackup/proj/disk/teoroo/personal/jicli594/work/lab/projects/molnex-cwtp-csr/20261023/`
 (`records/v1..v7`, `summarize.py`, `jobs/v1.sbatch` with SNAP/OUT/BUILD).
 
+<!-- mol:note:topic:native-equivariance-default -->
+## Native equivariance is the only path; cuEquivariance kernels replaced (2026-10-26)
+
+Operator ask: "we are still replacing cueq — replace and optimise the remaining
+kernels." Done on the working tree (uncommitted, with the peers' `molrep.eq`
+port): `molrep.equivariance.{ChannelWiseTensorProduct, SymmetricContraction,
+SphericalHarmonics, Contracter, WeightedChannels, Linear}` are the only
+implementations molnex constructs. Each reads its term table off the `molrep.eq`
+descriptor at construction and dispatches on the input device — CUDA tensors
+run `torch.ops.molnex_equivariance.*` (`libmolnex_equivariance.<arch>.so`,
+built with `-DMOLNEX_OP_ENABLE_CUDA=ON`, found on `MOLNEX_OP_LIBRARY_PATH`),
+CPU tensors run `molrep.equivariance.reference` (the same table in plain
+PyTorch, autograd by torch; tests and correctness only). No `method=` switch,
+no `use_fallback`, no cuEquivariance kernel on any path; `molrep.cueq` is gone
+(`Linear` moved to `molrep.equivariance`), Allegro's `tp_method` is gone, the
+MACE encoder always builds the CSR edge schedule, `SphericalHarmonics`
+(`l_max ≤ 3`) normalises in the embedding. Deploy: `_NATIVE_OPS` maps
+`molnex_equivariance` to the library (`molnex_op_library_requirement()` =
+`molnex_equivariance==1`); the `cuequivariance` entry and the `csrc/cueq`
+CMake option are removed (the git-ignored directory itself is untouched —
+operator's call). Supersedes `cue-kernels-only` (2026-10-15/20).
+
+**Tests.** `tests/test_molrep/test_equivariance/*` run every operator on CPU
+and, with the library, on CUDA against the same independent per-term replay
+(`device` fixture); GH200 jobs 4473187 / 4474193: 131 fast + 15 slow passed,
+molzoo on GPU 234 passed. Pre-existing x86-env failures untouched: Rondo /
+classical tests on a molrs without `Element.by_number` /
+`Potentials.evaluate`, `test_md/test_neighbors` without the molix op library.
+
+**Baseline before optimisation (GH200, job 4473729, native v1 vs cuEq
+`uniform_1d`, same-job pairs, ms; cuEq/native in brackets).** Channelwise and
+harmonics were already ahead: MatPES channelwise wat1544 fp32 fwd 0.155 vs
+0.479 (3.1×), fwd+bwd 0.69 vs 0.93 (1.34×), +second 1.67 vs 1.70 (1.02×);
+peo4425 fp32 0.38 / 1.74 / 4.28 vs 1.33 / 2.76 / 4.98; harmonics (Allegro
+wat1544, 295 575 vectors) 0.088 vs 0.181 fwd, 0.15 vs 0.36 bwd. The four
+kernels written without a benchmark lost badly: symmetric contraction fwd
+1.94 vs 0.024 (**0.012×**) at wat1544, 5.18 vs 0.048 at peo4425; Allegro
+contracter (OAM-L layer, 23 paths, u = 64) fwd 8.98 vs 0.88 (0.10×), bwd
+144.6 vs 4.30 (0.03×), second 278.8 vs 9.34; weighted channels 1.33 vs 0.61
+(0.46×), bwd 3.03 vs 1.20. OMol could not run at all: its first layer's
+channelwise product is 1024 wide and the kernels had widths 32/64/128 only.
+
+**Rewrites (v3 = contraction + tiles + weighted channels, v4 = + contracter).**
+- Symmetric contraction: the descriptor's paths that differ only by a slot
+  permutation are one merged term (sorted slots, summed coefficients) —
+  5520 → 1203 (OMol shape), 2039 → 480 (MatPES), 370 → 94, exact; one CTA per
+  node and 128-channel tile with the node row, the element's weight row and
+  the packed table (`w<<21|i<<14|j<<7|k` + coefficient) in shared memory,
+  terms sorted by output segment, `(i, j)` runs reuse the product, a sentinel
+  segment (value 1, cotangent 0) stands in for missing slots; weight adjoint
+  as one CTA per (chunk, element) over nodes sorted by element.
+- Channelwise: widths 8 / 16 (tiny test models) and any multiple of 128 by
+  channel tiles inside the CTA; `(L1, L2) = (0, 1), (1, 1)` instantiated for
+  `l_max = 1` models.
+- Weighted channels: straight component loops (the old kernels indexed
+  register arrays with a runtime offset — local memory).
+- Contracter: per-path Clebsch–Gordan classes. `cg.hpp` enumerates every
+  coupling with `l ≤ 3` (34 classes) by the real-basis selection rule
+  extended to odd `l1+l2+l3` (types swap, zonal pass-through negated;
+  verified against cue: 611 non-zeros inside 652 candidates, 0 violations);
+  values travel as a kernel parameter (`float[]` op argument, 652 entries),
+  paths as `(class, off1, off2, off3)`; the class contraction is a switch into
+  unrolled register code on blocks of ≤ 7; rows staged per edge, one CTA per
+  edge chunk, weight partials per CTA, atom adjoint summed by a CSR
+  `segment_sum`. The flattened term table stays the reference/oracle.
+
+**Two kernel lessons from v7 (compiled contraction, job 4476549 / profile
+4476689).** (1) A coefficient table passed by value and reached through a
+reference inside the unrolled term lambda makes nvcc copy the whole
+parameter into local memory — 2.4–11 KB stack frames per thread with "0
+bytes spill" in ptxas, the forward of the 480-term MatPES table at 255
+registers; the widest channelwise configs (L1 ≥ 2, L2 = 3) had the same 4–5
+KB frames unnoticed. `const __grid_constant__` on the parameter (CUDA ≥ 11.7)
+lets the address be taken without the copy; every by-value coefficient
+parameter now carries it. (2) A segmented sum whose grid is (segments ×
+chunks) collapses when few segments hold all rows: the (element, chunk)
+weight sum ran 25–50 CTAs on a one-element OMol product or a two-element
+water box and took 2.65 of the 3.38 ms backward. The sum now chunks the
+sorted node list globally with column-parallel CTAs and flushes a partial row
+on each element change (a chunk's elements are a contiguous id range), then
+reduces per element over the chunks that cover it.
+
+**v10 (compiled tables + `__grid_constant__` + column-parallel element sum,
+job 4476754 / bench 4476902).** First build at cuEq parity on the MACE step:
+peo4425 fp32 22.6 vs 23.3 ms (1.03×), fp64 36.3 vs 35.2 (0.97×); wat1544
+8.87 vs 8.72 (0.98×) / 13.6 vs 12.7 (0.94×); wat193 0.83× / 0.79×; OMol
+wat1544 85.1 vs 68.6 (0.81×). Contraction forward 0.62–1.03× cuEq, OMol
+backward 0.274 vs 0.196 (0.71×, from 0.26×). Two problems it also exposed:
+(a) the new element sum assumed a chunk's elements form a contiguous id range
+— wrong for MatPES's 89-element table (slots indexed by `z - z_first` read
+other elements' rows or uninitialised memory): the harness's correctness
+column caught it (normalised RMS 1e-2…4e-1 against the eager reference on
+every MatPES backward cell; OMol, one element, was unaffected); fixed by
+recording the element of each partial row and reducing per element over the
+chunks its CSR range spans; the tests now use six elements with gaps over 40
+nodes (several chunks). (b) ptxas still at 255 registers with spills on the
+compiled kernels after `__grid_constant__`: the unrolled body repeats
+products such as `x[i]·x[j]` (contraction) and `x1[i]·x2[j]` (contracter)
+across terms of different weight segments, nvcc common-subexpression-
+eliminates them and keeps hundreds live. Fixed by run-structured
+accumulation: tables sorted by the operand indices, the run's product and
+per-slot sums computed once at the run's start and applied at its end
+(`starts_run` / `ends_run` constexpr checks), two to six FMAs per term with
+nothing to hoist (`contraction_compiled.cuh`, `contracter_compiled.cuh`,
+`ContracterTerms` sorted by (i, j, w, o)). Allegro contracter at v10: forward
+1.69 vs 0.88 (0.52×), backward 6.2 vs 4.3 (0.69×), second order 83.8 vs 9.3
+(register copy of the parameter); full step 317 vs 295 (0.93×). The forward
+is within 2.4× of its memory roofline (1.2 GB of pair rows in, 1.2 GB out,
+x2 gathers from L2), so parity on that op is a bandwidth question, not a
+term-loop one.
+
+**v11 (run-structured compiled kernels, element sum fixed; job 4477085, bench
+4481220, profile 4481221) — the standing at the end of the session, native vs
+cuEq, ms.** Correctness restored on every cell (normalised RMS ≤ 2e-7 fp32,
+≤ 2e-15 fp64 against the eager reference and cuEq). MACE full energy+forces
+step, Inductor fullgraph + CUDA graph: peo4425 fp32 23.3 vs 23.4 (**1.01×**),
+fp64 37.4 vs 35.7 (0.95×); wat1544 8.9 vs 8.6 (0.97×) / 14.1 vs 13.1
+(0.92×); wat193 1.87 vs 1.53 (0.82×) / 2.43 vs 1.89 (0.78×); OMol wat1544
+84.8 vs 67.9 (0.80×), wat193 0.76×. Per operator: channelwise forward
+2.2–4.1× faster, fwd+bwd 1.1–1.5×, second ≈ 1× (unchanged); harmonics
+1.8–2.6× faster (0.8× at 193 atoms); symmetric contraction forward 0.59–1.0×
+(OMol 0.92–1.0×), backward 0.06–0.15× on MatPES (1.14 vs 0.081 at wat1544)
+and 0.61× on OMol, second order 0.06–0.16×; Allegro-OAM-L contracter forward
+1.36 vs 0.89 (0.66×), backward 7.4 vs 4.3 (0.58×), second order 30.8 vs 9.4
+(0.31×; v12 = job 4483117 / bench 4483557 routes it to the class-blocked
+kernel, the compiled one took 137), weighted channels 0.64× / 0.47× / 0.38×,
+Allegro step 324 vs 300 (0.92×). v12 is the final build of the session; its
+`build-v12` / `snapshot-v12` are the reference artefacts. **Why the adjoints stay behind (profile 4481221 + ptxas):** the
+compiled forward kernels keep every row in registers (255 regs, no stack),
+but the adjoint bodies — more arrays live: x, W, g, gx, G — make nvcc demote
+the accumulator arrays to local memory (sc first_kernel (3,1,3): 110 regs +
+480 B stack, 0 spills; ct second_rows: 128 regs + 848 B stack), and the
+first-order contraction kernel then runs 40× its forward (1.04 ms vs 26 µs on
+wat1544). The run structure did not change that. The path that removes the
+compiler's choice is explicit scalar code generation per table (named
+registers, straight-line statements, what cuEq's JIT emits) — the next step,
+not taken here. The contracter forward is otherwise within 1.5× of its memory
+roofline (pair rows in, output rows out).
+
+**Standing after the shared-memory rewrites (v3 / v4 / v6, jobs 4475577 /
+4475788 / 4476102; native vs cuEq, ms).** Symmetric contraction: forward
+17× faster than v1 but still 0.17–0.38× cuEq (peo4425 fp32 0.284 vs 0.048;
+wat1544 0.112 vs 0.024), backward 0.03–0.13× (the (chunk, element) weight
+pass collapses to ~50 CTAs on a two-element box), so the full MACE step sits at
+0.67–0.93× cuEq (peo4425 fp32 25.3 vs 23.1; OMol wat1544 87.7 vs 68.4).
+Contracter (classes): forward 3.63 vs 0.89 (0.24×), backward 11.7 vs 4.3
+(0.37×), second 34.7 vs 9.4 (0.27×); Allegro-OAM-L full step 337 vs 297 ms
+(0.88×, from 0.39×). Weighted channels 0.64× / 0.47× / 0.38×. Both the
+contraction and the contracter are bound by shared-memory reads per term (3–4
+per term; the FMA pipe idles), which is why the next step compiles the term
+tables (v7 / v8 below): positions at compile time, values as a kernel
+parameter, every operand in registers — the design the channelwise product
+already uses — for the shapes the models actually build (MACE: natural
+parity, `l_out ≤ l_in ≤ 3`, degree 2/3, 18 tables; Allegro: the 21 layer
+triples of `l_max ≤ 3`, both parities, ≤ 5 layers), with the shared-memory
+kernels kept as the generic path and the module selecting by comparing its
+own table with the compiled ones (`contraction_table` / `contracter_table`
+ops). The weight adjoints become per-node / per-CTA partials summed in a
+fixed order (`sum_by_element`, `reduce_parts`), which also fixes the
+occupancy collapse. Lab:
+`/nobackup/proj/disk/teoroo/personal/jicli594/work/lab/projects/molnex-native-eq/20261026/`
+(`jobs/snapshot.sh`, `jobs/build_test.sbatch`, `jobs/bench.sbatch`,
+`measure.py`, `summarize.py`, `records/v*`, `logs/`).
+
 <!-- mol:note:topic:native-channelwise-hopper -->
 ## Superseded: the grouped-atomics channelwise backend (2026-10-23 morning)
 

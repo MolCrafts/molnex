@@ -29,15 +29,16 @@ dependencies = [
   "torch>=2.14",
   # TypedTensorDict backs molix.TensorFrame.
   "tensordict>=0.14",
-  # 0.12 fixes a fused-tensor-product warp reduction that could silently
-  # return wrong results (segmented polynomials, tensor products, indexed linear).
-  "cuequivariance>=0.12",
-  "cuequivariance-torch>=0.12",
   # Needs UnitSystem k_B + openmm preset (current 0.13 line).
   "molcrafts-molpy>=0.13.0",
   "python-multipart",
   "molcrafts-mollog>=1.3.0",
   "numpy",
+  # Equivariance frontend (molrep.eq), ported from cuEquivariance 0.13.0.
+  "scipy",
+  "sympy",
+  "networkx",
+  "opt_einsum",
   "opt_einsum_fx",
   "pydantic",
   "tqdm",
@@ -48,9 +49,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# cuEquivariance fused kernels. Without one of these, cuEq silently degrades
-# to its pure-torch path (~30x slower on MACE-class models) with only a
-# UserWarning — install the extra matching the local CUDA major version.
+# cuEquivariance's kernel wheel. molnex's models never call it — every
+# contraction runs molrep.equivariance — but the ported frontend's own torch
+# primitives (molrep.eq.torch) reach for it when present, and the out-of-tree
+# comparison harness needs it. Install the extra matching the local CUDA
+# major version.
 cueq-cu12 = ["cuequivariance-ops-torch-cu12>=0.12"]
 cueq-cu13 = ["cuequivariance-ops-torch-cu13>=0.12"]
 dev = [
@@ -108,6 +111,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]  # re-exports don't need to be "used"
+# Ported cuEquivariance frontend. ruff format wraps code; the remaining long
+# lines are upstream docstrings and golden strings whose text is the contract.
+# Import order is load-bearing (the package init cycle); isort must not reorder it.
+"src/molrep/eq/**" = ["E501", "I001"]
+"tests/test_molrep/test_eq/**" = ["E501", "I001"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 # Rule (CLAUDE.md, third-party surface): no lammps / openmm Python imports under
@@ -115,6 +123,8 @@ ignore = [
 # export is text-only. Enforced here (ci-lint on every commit), not by a test.
 "lammps".msg = "LAMMPS-driven Python lives only under interface/ (CLAUDE.md third-party surface rule)"
 "openmm".msg = "OpenMM export is text-only; no openmm import under src/, tests/, scripts/ (CLAUDE.md)"
+"cuequivariance".msg = "The equivariance frontend is molrep.eq. Do not import the cuequivariance package."
+"cuequivariance_torch".msg = "The torch equivariance frontend is molrep.eq.torch; the kernels are molrep.equivariance."
 
 [tool.ty]
 [tool.ty.rules]

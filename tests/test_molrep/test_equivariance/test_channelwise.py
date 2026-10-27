@@ -1,8 +1,15 @@
-import cuequivariance as cue
-import cuequivariance_torch as cuet
+"""The indexed channelwise product against an explicit per-term sum and the cue frontend.
+
+Runs on the CPU (the reference path) and on CUDA (the kernels) alike; what
+only the kernels own — bitwise reproducibility, CUDA-graph replay with index
+changes in place, the fused adjoints — runs on CUDA.
+"""
+
 import pytest
 import torch
 
+import molrep.eq as meq
+import molrep.eq.torch as cuet
 from molrep.equivariance import ChannelWiseTensorProduct
 from molrep.equivariance.descriptor import natural_irreps
 
@@ -10,13 +17,13 @@ from .conftest import torch_contraction
 
 
 class TestChannelWiseTensorProduct:
-    def test_schedule_is_the_stable_csr(self, native):
+    def test_schedule_is_the_stable_csr(self, product, device):
         torch.manual_seed(3)
         rows_a, rows_d, n_edges = 11, 7, 500
-        source = torch.randint(rows_a, (n_edges,), device="cuda")
-        target = torch.randint(rows_d, (n_edges,), device="cuda")
+        source = torch.randint(rows_a, (n_edges,), device=device)
+        target = torch.randint(rows_d, (n_edges,), device=device)
         target[target == 4] = 5  # one row without edges
-        schedule = native.schedule(source, target, rows_a, rows_d)
+        schedule = product.schedule(source, target, rows_a, rows_d)
         for order, rowptr, index, rows in [
             (schedule.order_t, schedule.rowptr_t, target, rows_d),
             (schedule.order_s, schedule.rowptr_s, source, rows_a),
@@ -28,17 +35,17 @@ class TestChannelWiseTensorProduct:
             expected_ptr = torch.cat([counts.new_zeros(1), counts.cumsum(0)]).to(torch.int32)
             torch.testing.assert_close(rowptr, expected_ptr)
 
-    def test_precomputed_schedule_is_the_default(self, native):
+    def test_precomputed_schedule_is_the_default(self, product, device):
         torch.manual_seed(5)
         args = tuple(
-            torch.randn(shape, device="cuda", dtype=torch.float64)
-            for shape in [(6, 128), (40, 9), (40, native.weight_numel)]
+            torch.randn(shape, device=device, dtype=torch.float64)
+            for shape in [(6, 128), (40, 9), (40, product.weight_numel)]
         )
-        source = torch.randint(6, (40,), device="cuda")
-        target = torch.randint(6, (40,), device="cuda")
-        schedule = native.schedule(source, target, 6, 6)
-        default = native(*args, indices_1=source, indices_out=target, size_out=6)
-        explicit = native(
+        source = torch.randint(6, (40,), device=device)
+        target = torch.randint(6, (40,), device=device)
+        schedule = product.schedule(source, target, 6, 6)
+        default = product(*args, indices_1=source, indices_out=target, size_out=6)
+        explicit = product(
             *args, indices_1=source, indices_out=target, size_out=6, schedule=schedule
         )
         assert torch.equal(default, explicit)
@@ -47,53 +54,46 @@ class TestChannelWiseTensorProduct:
         "channels,l1,l2",
         [(c, l1, 3) for c in (32, 64, 128) for l1 in (0, 1, 2, 3)] + [(64, 1, 2), (32, 3, 2)],
     )
-    def test_angular_orders_channels_and_streams(self, native, channels, l1, l2):
+    def test_angular_orders_channels_and_streams(self, device, channels, l1, l2):
         # MACE has scalar first-layer features and l<=3 edge harmonics; the
         # second interaction adds vector features. Cover every compiled (l1, l2).
         irreps = (natural_irreps(channels, l1), natural_irreps(1, l2), natural_irreps(channels, l2))
-        native = ChannelWiseTensorProduct(
-            *irreps, layout=cue.ir_mul, shared_weights=False, device="cuda", dtype=torch.float64
-        )
+        native = ChannelWiseTensorProduct(*irreps, dtype=torch.float64, device=device)
         reference = cuet.ChannelWiseTensorProduct(
             *irreps,
-            layout=cue.ir_mul,
+            layout=meq.ir_mul,
             shared_weights=False,
             internal_weights=False,
-            device="cuda",
+            device=device,
             dtype=torch.float64,
-            method="uniform_1d",
+            method="uniform_1d" if device.type == "cuda" else "naive",
         )
         # Several edges per node, nodes of unequal degree, an incomplete last
         # CTA stride in the edge kernel, every channel width.
         n_edges = 259
         args = tuple(
-            torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
+            torch.randn(shape, device=device, dtype=torch.float64, requires_grad=True)
             for shape in [
                 (7, irreps[0].dim),
                 (n_edges, irreps[1].dim),
                 (n_edges, native.weight_numel),
             ]
         )
-        s = torch.arange(n_edges, device="cuda") % 7
+        s = torch.arange(n_edges, device=device) % 7
         t = (s * s + 1) % 7
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            actual = native(*args, indices_1=s, indices_out=t, size_out=7)
-            first = torch.autograd.grad(actual.square().sum(), args, create_graph=True)
-            second = torch.autograd.grad(sum(g.square().sum() for g in first), args)
-            expected = reference(*args, indices_1=s, indices_out=t, size_out=7)
-            rf = torch.autograd.grad(expected.square().sum(), args, create_graph=True)
-            rs = torch.autograd.grad(sum(g.square().sum() for g in rf), args)
-        torch.cuda.current_stream().wait_stream(stream)
+        actual = native(*args, indices_1=s, indices_out=t, size_out=7)
+        first = torch.autograd.grad(actual.square().sum(), args, create_graph=True)
+        second = torch.autograd.grad(sum(g.square().sum() for g in first), args)
+        expected = reference(*args, indices_1=s, indices_out=t, size_out=7)
+        rf = torch.autograd.grad(expected.square().sum(), args, create_graph=True)
+        rs = torch.autograd.grad(sum(g.square().sum() for g in rf), args)
         for a, b in zip((actual, *first, *second), (expected, *rf, *rs), strict=True):
             error = (a - b).square().mean().sqrt() / b.square().mean().sqrt().clamp_min(1)
             assert error < 1e-10
-        native.load_state_dict(reference.state_dict(), strict=True)
         # Relabel nodes and reorder edges: output equivariance must survive.
-        permutation = torch.tensor([3, 0, 6, 1, 4, 2, 5], device="cuda")
+        permutation = torch.tensor([3, 0, 6, 1, 4, 2, 5], device=device)
         inverse = torch.argsort(permutation)
-        edges = torch.randperm(n_edges, device="cuda")
+        edges = torch.randperm(n_edges, device=device)
         permuted = native(
             args[0][permutation],
             args[1][edges],
@@ -105,66 +105,51 @@ class TestChannelWiseTensorProduct:
         torch.testing.assert_close(permuted, actual[permutation], atol=1e-10, rtol=1e-10)
 
     def test_unsupported_options_fail_before_loading(self, irreps):
-        with pytest.raises(ValueError, match="unshared"):
-            ChannelWiseTensorProduct(*irreps, layout=cue.ir_mul)
         with pytest.raises(ValueError, match="layout"):
-            ChannelWiseTensorProduct(*irreps, shared_weights=False, layout=cue.mul_ir)
+            ChannelWiseTensorProduct(*irreps, layout=meq.mul_ir, dtype=torch.float64)
+        with pytest.raises(ValueError, match="float32 or float64"):
+            ChannelWiseTensorProduct(*irreps, dtype=torch.float16)
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-    def test_outputs_and_two_derivatives(self, native, irreps, dtype):
-        native = native.to(dtype)
+    def test_outputs_and_two_derivatives(self, irreps, device, dtype):
+        native = ChannelWiseTensorProduct(*irreps, dtype=dtype, device=device)
         torch.manual_seed(17)
-        ref = cuet.ChannelWiseTensorProduct(
-            *irreps,
-            layout=cue.ir_mul,
-            shared_weights=False,
-            internal_weights=False,
-            dtype=dtype,
-            math_dtype=dtype,
-            device="cuda",
-            method="uniform_1d",
-        )
         args = [
-            torch.randn(shape, dtype=dtype, device="cuda", requires_grad=True)
+            torch.randn(shape, dtype=dtype, device=device, requires_grad=True)
             for shape in [(5, 128), (9, 9), (9, native.weight_numel)]
         ]
         # Duplicate destinations, one isolated node (5) and one source without edges (4 as target).
         edges = torch.tensor(
-            [[0, 1], [1, 1], [2, 1], [3, 2], [0, 2], [4, 0], [1, 0], [2, 2], [3, 1]], device="cuda"
+            [[0, 1], [1, 1], [2, 1], [3, 2], [0, 2], [4, 0], [1, 0], [2, 2], [3, 1]], device=device
         )
         s, t = edges[:, 0], edges[:, 1]
-        outputs = [
-            native(*args, indices_1=s, indices_out=t, size_out=6),
-            ref(*args, indices_1=s, indices_out=t, size_out=6),
-            torch_contraction(native, *args, s, t, 6),
-        ]
+        actual = native(*args, indices_1=s, indices_out=t, size_out=6)
+        expected = torch_contraction(native, *args, s, t, 6)
         atol, rtol = (1e-10, 1e-9) if dtype == torch.float64 else (1e-5, 1e-4)
-        cotangent = torch.randn_like(outputs[0])
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+        cotangent = torch.randn_like(actual)
         direction = [torch.randn_like(x) for x in args]
         derivatives = []
-        for out in outputs:
+        for out in (actual, expected):
             first = torch.autograd.grad(out, args, cotangent, create_graph=True)
             second = torch.autograd.grad(sum((g * v).sum() for g, v in zip(first, direction)), args)
             derivatives.append((first, second))
-        for out in outputs[1:]:
-            torch.testing.assert_close(outputs[0], out, atol=atol, rtol=rtol)
-        for first, second in derivatives[1:]:
-            for actual, expected in zip(derivatives[0][0], first):
-                torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
-            for actual, expected in zip(derivatives[0][1], second):
-                torch.testing.assert_close(actual, expected, atol=atol * 10, rtol=rtol * 10)
-        assert torch.count_nonzero(outputs[0][5]) == 0
+        for a, b in zip(derivatives[0][0], derivatives[1][0], strict=True):
+            torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+        for a, b in zip(derivatives[0][1], derivatives[1][1], strict=True):
+            torch.testing.assert_close(a, b, atol=atol * 10, rtol=rtol * 10)
+        assert torch.count_nonzero(actual[5]) == 0
 
-    def test_bitwise_reproducible(self, native):
+    def test_bitwise_reproducible(self, irreps, cuda):
         torch.manual_seed(11)
+        native = ChannelWiseTensorProduct(*irreps, dtype=torch.float32, device=cuda)
         n_edges, rows = 3000, 13
         args = tuple(
-            torch.randn(shape, device="cuda", dtype=torch.float32, requires_grad=True)
+            torch.randn(shape, device=cuda, dtype=torch.float32, requires_grad=True)
             for shape in [(rows, 128), (n_edges, 9), (n_edges, native.weight_numel)]
         )
-        native = native.to(torch.float32)
-        s = torch.randint(rows, (n_edges,), device="cuda")
-        t = torch.randint(rows, (n_edges,), device="cuda")
+        s = torch.randint(rows, (n_edges,), device=cuda)
+        t = torch.randint(rows, (n_edges,), device=cuda)
         runs = []
         previous = torch.are_deterministic_algorithms_enabled()
         torch.use_deterministic_algorithms(True)
@@ -177,51 +162,52 @@ class TestChannelWiseTensorProduct:
         for x, y in zip(*runs, strict=True):
             assert torch.equal(x, y)
 
-    def test_empty_edges_and_same_storage_index_changes(self, native):
-        a = torch.randn(4, 128, device="cuda", dtype=torch.float64, requires_grad=True)
-        b = torch.empty(0, 9, device="cuda", dtype=torch.float64, requires_grad=True)
+    def test_empty_edges_and_same_storage_index_changes(self, product, device):
+        a = torch.randn(4, 128, device=device, dtype=torch.float64, requires_grad=True)
+        b = torch.empty(0, 9, device=device, dtype=torch.float64, requires_grad=True)
         w = torch.empty(
-            0, native.weight_numel, device="cuda", dtype=torch.float64, requires_grad=True
+            0, product.weight_numel, device=device, dtype=torch.float64, requires_grad=True
         )
-        index = torch.empty(0, device="cuda", dtype=torch.long)
-        out = native(a, b, w, indices_1=index, indices_out=index, size_out=4)
+        index = torch.empty(0, device=device, dtype=torch.long)
+        out = product(a, b, w, indices_1=index, indices_out=index, size_out=4)
         assert torch.count_nonzero(out) == 0
         grads = torch.autograd.grad(out.sum(), (a, b, w))
         assert all(torch.count_nonzero(x) == 0 for x in grads)
-        b = torch.randn(3, 9, device="cuda", dtype=torch.float64)
-        w = torch.randn(3, native.weight_numel, device="cuda", dtype=torch.float64)
-        s = torch.tensor([0, 1, 2], device="cuda")
-        t = torch.tensor([1, 1, 1], device="cuda")
-        native(a, b, w, indices_1=s, indices_out=t, size_out=4)
+        b = torch.randn(3, 9, device=device, dtype=torch.float64)
+        w = torch.randn(3, product.weight_numel, device=device, dtype=torch.float64)
+        s = torch.tensor([0, 1, 2], device=device)
+        t = torch.tensor([1, 1, 1], device=device)
+        product(a, b, w, indices_1=s, indices_out=t, size_out=4)
         t.fill_(3)
-        expected = torch_contraction(native, a, b, w, s, t, 4)
-        actual = native(a, b, w, indices_1=s, indices_out=t, size_out=4)
+        expected = torch_contraction(product, a, b, w, s, t, 4)
+        actual = product(a, b, w, indices_1=s, indices_out=t, size_out=4)
         torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-9)
 
     @pytest.mark.slow
-    def test_gradcheck(self, native):
+    def test_gradcheck(self, product, device):
         args = tuple(
-            torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
-            for shape in [(2, 128), (2, 9), (2, native.weight_numel)]
+            torch.randn(shape, device=device, dtype=torch.float64, requires_grad=True)
+            for shape in [(2, 128), (2, 9), (2, product.weight_numel)]
         )
-        s = torch.tensor([0, 1], device="cuda")
-        t = torch.tensor([1, 1], device="cuda")
+        s = torch.tensor([0, 1], device=device)
+        t = torch.tensor([1, 1], device=device)
 
         def fn(*xs):
-            return native(*xs, indices_1=s, indices_out=t, size_out=2)
+            return product(*xs, indices_1=s, indices_out=t, size_out=2)
 
         assert torch.autograd.gradcheck(fn, args, fast_mode=True)
         assert torch.autograd.gradgradcheck(fn, args, fast_mode=True)
 
     @pytest.mark.slow
-    def test_compile_and_cuda_graph(self, native):
+    def test_compile_and_cuda_graph(self, irreps, cuda):
         from molix.compile import Compiler
 
+        native = ChannelWiseTensorProduct(*irreps, dtype=torch.float64, device=cuda)
         args = tuple(
-            torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
+            torch.randn(shape, device=cuda, dtype=torch.float64, requires_grad=True)
             for shape in [(4, 128), (8, 9), (8, native.weight_numel)]
         )
-        s = torch.arange(8, device="cuda") % 4
+        s = torch.arange(8, device=cuda) % 4
         t = (s + 1) % 4
 
         def fn(*xs):

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from pydantic import BaseModel, Field, model_validator
 
-from molrep import cueq
+import molrep.eq as meq
+from molrep.equivariance import Linear
 
 
 class DiscreteEmbeddingSpec(BaseModel):
@@ -153,10 +153,10 @@ class JointEmbedding(nn.Module):
             raise ValueError("No feature embeddings configured.")
 
         self.project = nn.Sequential(
-            cueq.Linear(
-                cue.Irreps("O3", f"{total_dim}x0e"),
-                cue.Irreps("O3", f"{out_dim}x0e"),
-                layout=cue.ir_mul,
+            Linear(
+                meq.Irreps("O3", f"{total_dim}x0e"),
+                meq.Irreps("O3", f"{out_dim}x0e"),
+                layout=meq.ir_mul,
                 dtype=dtype,
             ),
         )

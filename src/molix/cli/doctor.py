@@ -6,7 +6,7 @@ needs and reports a per-item verdict:
 * Python and PyTorch versions against the project minimums.
 * CUDA runtime availability, device count, and compute capability.
 * The native C++ ops library (``torch.ops.molix.*``) — loaded and registered.
-* ``cuequivariance`` (required for equivariant models).
+* ``molrep.eq`` (the in-tree equivariance frontend).
 * GPU telemetry via ``nvidia-ml-py`` (``pynvml``).
 * Core runtime dependencies (tensordict, molpy, mollog, …).
 
@@ -226,17 +226,16 @@ class Doctor:
         )
 
     def _check_cuequivariance(self) -> CheckResult:
-        required = ("cuequivariance", "cuequivariance_torch")
-        missing = [m for m in required if _util.find_spec(m) is None]
-        if missing:
+        try:
+            import molrep.eq as meq
+        except ImportError as exc:
             return CheckResult(
                 "cuEquivariance",
                 Status.FAIL,
-                f"missing: {', '.join(missing)}",
-                hint="pip install cuequivariance cuequivariance-torch",
+                "missing: molrep.eq",
+                hint=str(exc).splitlines()[0] if str(exc) else "Reinstall molnex.",
             )
-        version = _module_version("cuequivariance")
-        return CheckResult("cuEquivariance", Status.OK, version or "installed")
+        return CheckResult("cuEquivariance", Status.OK, meq.__version__)
 
     def _check_gpu_telemetry(self) -> CheckResult:
         if _util.find_spec("pynvml") is None:

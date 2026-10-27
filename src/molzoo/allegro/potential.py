@@ -113,7 +113,6 @@ class AllegroPotential(Potential, AllegroEncoder):
         path: str | Path,
         *,
         wrt: Sequence[str | Sequence[str]] = (),
-        tp_method: str | None = None,
         dtype: torch.dtype,
     ) -> AllegroPotential:
         """Build the model an official ``.nequip.zip`` describes and load its weights.
@@ -126,9 +125,6 @@ class AllegroPotential(Potential, AllegroEncoder):
         Args:
             path: The ``.nequip.zip`` file.
             wrt: As for the constructor.
-            tp_method: Tensor-product kernel (``"uniform_1d"`` / ``"fused_tp"``)
-                in place of the spec default — the one field that may differ
-                from the package without changing the weights.
             dtype: As for the constructor.
 
         Returns:
@@ -139,8 +135,6 @@ class AllegroPotential(Potential, AllegroEncoder):
                 mismatch.
         """
         state, spec = NequipPackage().read(path)
-        if tp_method is not None:
-            spec = spec.model_copy(update={"tp_method": tp_method})
         model = cls(spec, wrt=wrt, dtype=dtype)
         CheckpointRemap(allegro_keys).load(model, state)
         return model

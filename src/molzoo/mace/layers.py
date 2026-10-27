@@ -6,7 +6,7 @@ they are built from — irreps-string helpers, radial bases, the moment-normalis
 MLP — stay in :mod:`molrep`. Sub-layer names mirror upstream MACE throughout so
 the official weights transfer by direct copy.
 
-**Channel-wise convolution.** :class:`_CueqChannelwiseBlockMixin` owns the
+**Channel-wise convolution.** :class:`_ChannelwiseBlockMixin` owns the
 radial heads and the fused indexed convolution of the density and residual
 interactions. The path is the official cuEquivariance indexed convolution:
 ``indices_1`` gathers source nodes and ``indices_out`` scatters directly into
@@ -33,7 +33,7 @@ numbers: the element row of each atom, the stable order that groups atoms by
 element and the fixed-size per-element counts. Nothing downstream recovers the
 element from a one-hot (``argmax``) or re-sorts per layer.
 
-**One-hot linear.** :class:`OneHotLinear` is ``cuet.Linear(Cx0e → Fx0e)`` fed a
+**One-hot linear.** :class:`OneHotLinear` is ``Linear(Cx0e → Fx0e)`` fed a
 one-hot: against a one-hot, the linear is the row lookup
 ``y_n = c · W[e_n, :]`` with ``c`` the descriptor's path coefficient
 (``1/√C``). The weight is held as the ``(C, F)`` table that lookup reads;
@@ -109,7 +109,7 @@ contraction that raises the body order of the node features, followed by an
 equivariant linear and an optional residual skip add. Sub-layer names
 (``symmetric_contractions``, ``linear``) mirror MACE.
 
-All blocks are built from ``cuequivariance`` primitives in the ``cue.ir_mul``
+All blocks are built from ``cuequivariance`` primitives in the ``meq.ir_mul``
 layout.
 
 Reference:
@@ -127,25 +127,23 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
-import cuequivariance as cue
-import cuequivariance_torch as cuet
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import molrep.eq as meq
 from molix.F.scatter import scatter_sum_compile_safe as _scatter_sum
-from molrep import cueq
 from molrep.embedding.mlp import MomentNormalizedMLP, normalize2mom
-from molrep.equivariance import EdgeSchedule
+from molrep.equivariance import ChannelWiseTensorProduct, EdgeSchedule, Linear, SymmetricContraction
 from molzoo.checkpoint import ConvertedWeight
 from molzoo.mace.checkpoint import element_linear_weight, one_hot_weight
 
 
-class _CueqChannelwiseBlockMixin:
-    """Radial heads and the fused cuEq convolution shared by the density and residual blocks."""
+class _ChannelwiseBlockMixin:
+    """Radial heads and the indexed channelwise convolution of the density and residual blocks."""
 
-    conv_tp: cuet.ChannelWiseTensorProduct
+    conv_tp: ChannelWiseTensorProduct
     conv_tp_weights: nn.Module
     #: The learned edge density head, or ``None`` for a block normalised by a
     #: constant (``avg_num_neighbors``); frozen at construction.
@@ -216,7 +214,7 @@ class _CueqChannelwiseBlockMixin:
             empty if b_dens is None else b_dens,
         )
 
-    def _cueq_channelwise_conv(
+    def _channelwise_conv(
         self,
         node_features: torch.Tensor,
         edge_angular: torch.Tensor,
@@ -228,15 +226,15 @@ class _CueqChannelwiseBlockMixin:
         target_features: torch.Tensor | None = None,
         schedule: EdgeSchedule | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Evaluate the official indexed cuEq convolution and its scalar density.
+        """Evaluate the indexed channelwise convolution and its scalar density.
 
         The density is ``None`` for a block without a density head. ``schedule``
-        is the batch's CSR edge schedule for a native
-        :class:`molrep.equivariance.ChannelWiseTensorProduct`, built once per
-        forward by the encoder and shared by every layer; cuEq ignores it.
+        is the batch's CSR edge schedule
+        (:class:`molrep.equivariance.ChannelWiseTensorProduct`), built once
+        per forward by the encoder and shared by every layer.
 
-        cuEq is the sole owner of CG, contraction, scatter and autograd: the
-        radial weights are handed to the indexed tensor product together with
+        The tensor product is the sole owner of CG, contraction, scatter and
+        autograd: the radial weights are handed to it together with
         ``indices_1`` / ``indices_out``, so nothing of edge width is built
         outside the kernel.
         """
@@ -253,7 +251,11 @@ class _CueqChannelwiseBlockMixin:
 
         weights, edge_density = self._radial_heads(edge_features, source, target, projected)
         if cutoff is not None:
-            weights = weights * cutoff
+            # The product is linear in each operand, so the envelope goes on
+            # the ``(E, (l_max+1)²)`` harmonics rather than the
+            # ``(E, weight_numel)`` weights: the same message, one pass over
+            # a tensor a hundred times smaller.
+            edge_angular = edge_angular * cutoff
             if edge_density is not None:
                 edge_density = edge_density * cutoff
         message = self.conv_tp(
@@ -263,7 +265,7 @@ class _CueqChannelwiseBlockMixin:
             indices_1=source,
             indices_out=target,
             size_out=num_nodes,
-            **({"schedule": schedule} if schedule is not None else {}),
+            schedule=schedule,
         )
         if edge_density is None:
             return message, None
@@ -360,8 +362,8 @@ class RadialMLP(nn.Module):
         return hidden
 
 
-def _irreps(spec) -> cue.Irreps:
-    return spec if isinstance(spec, cue.Irreps) else cue.Irreps("O3", spec)
+def _irreps(spec) -> meq.Irreps:
+    return spec if isinstance(spec, meq.Irreps) else meq.Irreps("O3", spec)
 
 
 class GatedNonlinearity(torch.nn.Module):
@@ -391,7 +393,7 @@ class GatedNonlinearity(torch.nn.Module):
         irreps_gates = _irreps(irreps_gates)
         irreps_gated = _irreps(irreps_gated)
 
-        def _lmax(irr: cue.Irreps) -> int:
+        def _lmax(irr: meq.Irreps) -> int:
             return max((mi.ir.l for mi in irr), default=0)
 
         if _lmax(irreps_gates) > 0:
@@ -413,7 +415,7 @@ class GatedNonlinearity(torch.nn.Module):
         unsorted = scalars + gates + gated
 
         # sort the concatenated irreps (stable), as MACE does
-        sort = cue.Irreps("O3", [mi for mi in unsorted]).sort()
+        sort = meq.Irreps("O3", [mi for mi in unsorted]).sort()
         sorted_mis = list(sort.irreps)
         perm = list(sort.perm)  # sorted[i] == unsorted[perm[i]]
         self._irreps_in = sort.irreps.simplify()
@@ -477,7 +479,7 @@ class GatedNonlinearity(torch.nn.Module):
         self._gate_cst = normalize2mom(self._act_gate) if self._act_gate is not None else 1.0
 
     @property
-    def irreps_in(self) -> cue.Irreps:
+    def irreps_in(self) -> meq.Irreps:
         """Sorted+simplified input irreps the block expects."""
         return self._irreps_in
 
@@ -554,14 +556,14 @@ class OneHotLinear(ConvertedWeight):
     upstream_weight = one_hot_weight
 
     def __init__(
-        self, irreps_in: cue.Irreps, irreps_out: cue.Irreps, *, dtype: torch.dtype
+        self, irreps_in: meq.Irreps, irreps_out: meq.Irreps, *, dtype: torch.dtype
     ) -> None:
         super().__init__()
         if str(irreps_in) != f"{irreps_in.dim}x0e":
             raise ValueError(f"OneHotLinear input must be one-hot scalars Cx0e, got {irreps_in}")
         if str(irreps_out) != f"{irreps_out.dim}x0e":
             raise ValueError(f"OneHotLinear output must be scalars Fx0e, got {irreps_out}")
-        polynomial = cue.descriptors.linear(irreps_in, irreps_out).polynomial
+        polynomial = meq.descriptors.linear(irreps_in, irreps_out).polynomial
         ((_, product),) = polynomial.operations
         (path,) = product.paths
         self.num_elements = irreps_in.dim
@@ -633,9 +635,9 @@ class ElementLinear(ConvertedWeight):
 
     def __init__(
         self,
-        irreps_in: cue.Irreps,
-        attrs_irreps: cue.Irreps,
-        irreps_out: cue.Irreps,
+        irreps_in: meq.Irreps,
+        attrs_irreps: meq.Irreps,
+        irreps_out: meq.Irreps,
         *,
         dtype: torch.dtype,
     ) -> None:
@@ -643,7 +645,7 @@ class ElementLinear(ConvertedWeight):
         if str(attrs_irreps) != f"{attrs_irreps.dim}x0e":
             raise ValueError(f"skip_tp attributes must be one-hot scalars Cx0e, got {attrs_irreps}")
         num_elements = attrs_irreps.dim
-        polynomial = cue.descriptors.fully_connected_tensor_product(
+        polynomial = meq.descriptors.fully_connected_tensor_product(
             irreps_in, attrs_irreps, irreps_out
         ).polynomial
         ((_, product),) = polynomial.operations
@@ -713,7 +715,7 @@ class ElementLinear(ConvertedWeight):
         return torch.cat(parts, dim=1)
 
 
-class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
+class _ChannelwiseInteractionBase(_ChannelwiseBlockMixin, nn.Module):
     """Shared wiring of the four interaction blocks.
 
     Subclasses choose the normalisation (:meth:`_normalize`, plus the density
@@ -747,26 +749,18 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
         #: The build dtype, read by the skip mixins and the density head.
         self.dtype = dtype
 
-        node_feats = cue.Irreps("O3", node_feats_irreps)
-        edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
-        edge_feats = cue.Irreps("O3", edge_feats_irreps)
-        edge_ir = cue.Irreps("O3", edge_irreps)
-        target = cue.Irreps("O3", target_irreps)
-        self.node_attrs_irreps = cue.Irreps("O3", node_attrs_irreps)
+        node_feats = meq.Irreps("O3", node_feats_irreps)
+        edge_attrs = meq.Irreps("O3", edge_attrs_irreps)
+        edge_feats = meq.Irreps("O3", edge_feats_irreps)
+        edge_ir = meq.Irreps("O3", edge_irreps)
+        target = meq.Irreps("O3", target_irreps)
+        self.node_attrs_irreps = meq.Irreps("O3", node_attrs_irreps)
         self.irreps_out = target
         self._skip_tp_in = node_feats
 
-        self.linear_up = cueq.Linear(node_feats, edge_ir, layout=cue.ir_mul, dtype=dtype)
+        self.linear_up = Linear(node_feats, edge_ir, layout=meq.ir_mul, dtype=dtype)
 
-        self.conv_tp = cueq.ChannelWiseTensorProduct(
-            edge_ir,
-            edge_attrs,
-            target,
-            layout=cue.ir_mul,
-            shared_weights=False,
-            internal_weights=False,
-            dtype=dtype,
-        )
+        self.conv_tp = ChannelWiseTensorProduct(edge_ir, edge_attrs, target, dtype=dtype)
 
         self._num_radial = edge_feats.dim
         self.conv_tp_weights = MomentNormalizedMLP(
@@ -776,7 +770,7 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
         # seeded initialisation reproduces.
         self.density_fn = self._build_density_head()
 
-        self.linear = cueq.Linear(self.conv_tp.irreps_out, target, layout=cue.ir_mul, dtype=dtype)
+        self.linear = Linear(self.conv_tp.irreps_out, target, layout=meq.ir_mul, dtype=dtype)
 
     def _build_density_head(self) -> nn.Module | None:
         """The learned edge-density MLP, or ``None`` for a constant normalisation."""
@@ -797,7 +791,7 @@ class _ChannelwiseInteractionBase(_CueqChannelwiseBlockMixin, nn.Module):
     ) -> torch.Tensor:
         """Normalised aggregated message ``(N, target.dim)``."""
         node_up = self.linear_up(node_feats)
-        message, density = self._cueq_channelwise_conv(
+        message, density = self._channelwise_conv(
             node_up,
             edge_attrs,
             edge_feats,
@@ -839,8 +833,8 @@ class _AverageNormalised(_ChannelwiseInteractionBase):
 class _FirstLayerSkip:
     """``skip_tp`` on the outgoing message; no residual to pass on."""
 
-    irreps_out: cue.Irreps
-    node_attrs_irreps: cue.Irreps
+    irreps_out: meq.Irreps
+    node_attrs_irreps: meq.Irreps
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -870,7 +864,7 @@ class _FirstLayerSkip:
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
             schedule: The batch's edge schedule for a native tensor product
-                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
+                (see :meth:`_channelwise_conv`).
 
         Returns:
             ``(message (N, target_irreps.dim), None)``.
@@ -886,8 +880,8 @@ class _ResidualSkip:
         hidden_irreps: ``skip_tp`` output irreps (consumed by the product block).
     """
 
-    node_attrs_irreps: cue.Irreps
-    _skip_tp_in: cue.Irreps
+    node_attrs_irreps: meq.Irreps
+    _skip_tp_in: meq.Irreps
 
     def __init__(self, *, hidden_irreps: str, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -895,7 +889,7 @@ class _ResidualSkip:
         self.skip_tp = ElementLinear(
             self._skip_tp_in,
             self.node_attrs_irreps,
-            cue.Irreps("O3", hidden_irreps),
+            meq.Irreps("O3", hidden_irreps),
             dtype=self.dtype,
         )
 
@@ -920,7 +914,7 @@ class _ResidualSkip:
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
             schedule: The batch's edge schedule for a native tensor product
-                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
+                (see :meth:`_channelwise_conv`).
 
         Returns:
             ``(message (N, target_irreps.dim), skip (N, hidden_irreps.dim))``.
@@ -966,20 +960,20 @@ class AgnosticResidualInteraction(_ResidualSkip, _AverageNormalised):
     """
 
 
-def _partition_gate(irreps_out: cue.Irreps) -> tuple[cue.Irreps, cue.Irreps, cue.Irreps]:
+def _partition_gate(irreps_out: meq.Irreps) -> tuple[meq.Irreps, meq.Irreps, meq.Irreps]:
     """Split output irreps into (scalars, gates, gated) for the gated nonlinearity."""
     scalars, gated = [], []
     for mi in irreps_out:
         (scalars if mi.ir.l == 0 else gated).append(mi)
     gates = [(mi.mul, "0e") for mi in gated]
     return (
-        cue.Irreps("O3", scalars),
-        cue.Irreps("O3", " + ".join(f"{m}x{ir}" for m, ir in gates) if gates else ""),
-        cue.Irreps("O3", gated),
+        meq.Irreps("O3", scalars),
+        meq.Irreps("O3", " + ".join(f"{m}x{ir}" for m, ir in gates) if gates else ""),
+        meq.Irreps("O3", gated),
     )
 
 
-class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
+class ResidualInteraction(_ChannelwiseBlockMixin, nn.Module):
     """MACE residual non-linear interaction layer (cuEquivariance).
 
     Args:
@@ -1009,33 +1003,25 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
     ) -> None:
         super().__init__()
 
-        node_feats = cue.Irreps("O3", node_feats_irreps)
-        edge_attrs = cue.Irreps("O3", edge_attrs_irreps)
-        edge_feats = cue.Irreps("O3", edge_feats_irreps)
-        edge_ir = cue.Irreps("O3", edge_irreps)
-        target = cue.Irreps("O3", target_irreps)
-        hidden = cue.Irreps("O3", hidden_irreps)
-        node_attrs = cue.Irreps("O3", node_attrs_irreps)
+        node_feats = meq.Irreps("O3", node_feats_irreps)
+        edge_attrs = meq.Irreps("O3", edge_attrs_irreps)
+        edge_feats = meq.Irreps("O3", edge_feats_irreps)
+        edge_ir = meq.Irreps("O3", edge_irreps)
+        target = meq.Irreps("O3", target_irreps)
+        hidden = meq.Irreps("O3", hidden_irreps)
+        node_attrs = meq.Irreps("O3", node_attrs_irreps)
 
         n_scalar = sum(mi.mul for mi in node_feats if mi.ir.l == 0)
-        node_scalar = cue.Irreps("O3", f"{n_scalar}x0e")
+        node_scalar = meq.Irreps("O3", f"{n_scalar}x0e")
 
         def lin(i_in, i_out):
-            return cueq.Linear(i_in, i_out, layout=cue.ir_mul, dtype=dtype)
+            return Linear(i_in, i_out, layout=meq.ir_mul, dtype=dtype)
 
         self.source_embedding = OneHotLinear(node_attrs, node_scalar, dtype=dtype)
         self.target_embedding = OneHotLinear(node_attrs, node_scalar, dtype=dtype)
         self.linear_up = lin(node_feats, edge_ir)
 
-        self.conv_tp = cueq.ChannelWiseTensorProduct(
-            edge_ir,
-            edge_attrs,
-            target,
-            layout=cue.ir_mul,
-            shared_weights=False,
-            internal_weights=False,
-            dtype=dtype,
-        )
+        self.conv_tp = ChannelWiseTensorProduct(edge_ir, edge_attrs, target, dtype=dtype)
         irreps_mid = self.conv_tp.irreps_out
 
         input_dim = edge_feats.dim + 2 * node_scalar.dim
@@ -1085,7 +1071,7 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
                 (the repo-wide edge convention).
             cutoff: Optional per-edge cutoff envelope ``(E, 1)``.
             schedule: The batch's edge schedule for a native tensor product
-                (see :meth:`_cueq_channelwise_conv`); ``None`` with cuEq.
+                (see :meth:`_channelwise_conv`).
 
         Returns:
             ``(message (N, target_irreps.dim), skip (N, hidden_dim))``.
@@ -1096,7 +1082,7 @@ class ResidualInteraction(_CueqChannelwiseBlockMixin, nn.Module):
 
         source_emb = self.source_embedding(elements.index)
         target_emb = self.target_embedding(elements.index)
-        message, density = self._cueq_channelwise_conv(
+        message, density = self._channelwise_conv(
             node_up,
             edge_attrs,
             edge_feats,
@@ -1125,7 +1111,7 @@ class EquivariantProductBasis(nn.Module):
             (OMOL), in which case all atoms share one weight set.
         use_sc: Whether to add the skip connection ``sc`` from the interaction.
         group: The O(3) group class whose Clebsch-Gordan phases define the
-            contraction basis — ``cue.O3``, or a checkpoint's own convention
+            contraction basis — ``meq.O3``, or a checkpoint's own convention
             (``molzoo.mace.coupling.MaceO3``). Weights are only meaningful in
             the convention they were trained in.
         dtype: Floating dtype every parameter is built at (the owning module's).
@@ -1139,7 +1125,7 @@ class EquivariantProductBasis(nn.Module):
         correlation: int,
         num_elements: int = 1,
         use_sc: bool = True,
-        group: type = cue.O3,
+        group: type = meq.O3,
         dtype: torch.dtype,
     ) -> None:
         super().__init__()
@@ -1148,25 +1134,17 @@ class EquivariantProductBasis(nn.Module):
         #: Element-agnostic product: every atom reads weight row 0.
         self.shared = self.num_elements == 1
 
-        irreps_in = cue.Irreps(group, node_feats_irreps)
-        irreps_out = cue.Irreps(group, target_irreps)
+        irreps_in = meq.Irreps(group, node_feats_irreps)
+        irreps_out = meq.Irreps(group, target_irreps)
 
-        self.symmetric_contractions = cueq.SymmetricContraction(
-            irreps_in,
-            irreps_out,
-            contraction_degree=correlation,
-            num_elements=self.num_elements,
-            layout_in=cue.ir_mul,
-            layout_out=cue.ir_mul,
-            original_mace=True,
-            dtype=dtype,
-            math_dtype=dtype,
+        self.symmetric_contractions = SymmetricContraction(
+            irreps_in, irreps_out, correlation, self.num_elements, dtype=dtype
         )
         # A linear map acts per irrep; it has no coupling to take a phase from.
-        self.linear = cueq.Linear(
-            cue.Irreps("O3", target_irreps),
-            cue.Irreps("O3", target_irreps),
-            layout=cue.ir_mul,
+        self.linear = Linear(
+            meq.Irreps("O3", target_irreps),
+            meq.Irreps("O3", target_irreps),
+            layout=meq.ir_mul,
             dtype=dtype,
         )
 
@@ -1180,7 +1158,7 @@ class EquivariantProductBasis(nn.Module):
 
         Args:
             node_feats: ``(N, node_feats_irreps.dim)`` interaction message
-                (``cue.ir_mul``).
+                (``meq.ir_mul``).
             sc: Skip connection ``(N, target_irreps.dim)`` or ``None``.
             elements: The atoms' elements (:class:`ElementIndex`); only read
                 by the per-element product.

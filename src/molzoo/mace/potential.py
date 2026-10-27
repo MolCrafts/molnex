@@ -71,11 +71,11 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Self
 
-import cuequivariance as cue
 import torch
 import torch.nn as nn
 from tensordict import TensorDictBase
 
+import molrep.eq as meq
 from molix.autograd import Derivative, Potential
 from molix.F.scatter import scatter_sum_compile_safe
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
@@ -83,8 +83,8 @@ from molpot.heads.energy import AtomicReferenceEnergy
 from molpot.heads.rescale import GlobalRescale
 from molpot.potentials.elec.les import LatentEwaldEnergy
 from molpot.potentials.repulsion import ZBLRepulsion
-from molrep import cueq
 from molrep.embedding.geometry import edge_lengths, edge_vectors
+from molrep.equivariance import Linear
 from molzoo.checkpoint import CheckpointRemap
 from molzoo.mace.checkpoint import MACE_SKIP, les_keys, matpes_keys, off_keys, omol_keys
 from molzoo.mace.encoder import MACEEncoder
@@ -166,10 +166,10 @@ class MacePotential(Potential, MACEEncoder):
             else None
         )
         self.embedding_readout = (
-            cueq.Linear(
-                cue.Irreps("O3", self.scalar_irreps),
-                cue.Irreps("O3", "1x0e"),
-                layout=cue.ir_mul,
+            Linear(
+                meq.Irreps("O3", self.scalar_irreps),
+                meq.Irreps("O3", "1x0e"),
+                layout=meq.ir_mul,
                 dtype=self.dtype,
             )
             if self.joint_embedding is not None

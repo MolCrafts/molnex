@@ -1,33 +1,50 @@
-"""Small indexed channelwise fixtures and an independent torch contraction."""
+"""Devices, small channelwise fixtures and an independent torch contraction.
 
-import cuequivariance as cue
+Every operator test runs on the CPU (the :mod:`molrep.equivariance.reference`
+path) and, when a CUDA device and the built library are present, on CUDA (the
+kernels), against the same independent per-term replay.
+"""
+
 import pytest
 import torch
 
+import molrep.eq as meq
 from molrep.equivariance import ChannelWiseTensorProduct
+from molrep.equivariance.backend import NativeBackend
+
+
+@pytest.fixture(params=["cpu", "cuda"])
+def device(request):
+    if request.param == "cuda":
+        if not torch.cuda.is_available():
+            pytest.skip("no CUDA device")
+        if NativeBackend.library_path() is None:
+            pytest.skip("native equivariance library not built")
+    return torch.device(request.param)
+
+
+@pytest.fixture
+def cuda():
+    """A CUDA device with the library, for what only the kernels have (fused adjoints)."""
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    if NativeBackend.library_path() is None:
+        pytest.skip("native equivariance library not built")
+    return torch.device("cuda")
 
 
 @pytest.fixture
 def irreps():
     return (
-        cue.Irreps("O3", "32x0e+32x1o"),
-        cue.Irreps("O3", "0e+1o+2e"),
-        cue.Irreps("O3", "32x0e+32x1o+32x2e"),
+        meq.Irreps("O3", "32x0e+32x1o"),
+        meq.Irreps("O3", "0e+1o+2e"),
+        meq.Irreps("O3", "32x0e+32x1o+32x2e"),
     )
 
 
 @pytest.fixture
-def native(irreps):
-    if not torch.cuda.is_available():
-        pytest.skip("native test requires a CUDA device")
-    return ChannelWiseTensorProduct(
-        *irreps,
-        layout=cue.ir_mul,
-        shared_weights=False,
-        internal_weights=False,
-        dtype=torch.float64,
-        device="cuda",
-    )
+def product(irreps, device):
+    return ChannelWiseTensorProduct(*irreps, dtype=torch.float64, device=device)
 
 
 def torch_contraction(module, x1, x2, weight, source, target, size_out):

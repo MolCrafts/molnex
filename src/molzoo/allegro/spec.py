@@ -101,8 +101,6 @@ class AllegroSpec(BaseModel):
     zbl_polynomial_cutoff_p: int = Field(6, gt=0)
     #: MolNex-only: keep the last layer's tensor irreps and write them (spec §4).
     expose_tensor_track: bool = False
-    #: ``cuet.SegmentedPolynomial`` method of the tensor products.
-    tp_method: Literal["uniform_1d", "fused_tp"] = "uniform_1d"
 
     @model_validator(mode="before")
     @classmethod
@@ -149,7 +147,7 @@ class AllegroSpec(BaseModel):
             cfg: What :meth:`~molzoo.allegro.utils.NequipPackage.read` recovered.
 
         Returns:
-            A validated spec with the default ``tp_method``.
+            A validated spec.
         """
         fields: dict[str, Any] = {
             "atomic_numbers": cfg.atomic_numbers,

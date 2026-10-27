@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import math
 
-import cuequivariance as cue
 import pytest
 import torch
 
+import molrep.eq as meq
 from molix.compile import Compiler
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY
 from molzoo.checkpoint import CheckpointRemap
@@ -346,9 +346,9 @@ class TestSparseUvuTensorProduct:
         load-bearing, not a convenience.
         """
         tp = SparseUvuTensorProduct(
-            cue.Irreps("O3", "2x0e+2x1o"),
-            cue.Irreps("O3", "2x0e+2x1o"),
-            cue.Irreps("O3", "2x0e+2x1o"),
+            meq.Irreps("O3", "2x0e+2x1o"),
+            meq.Irreps("O3", "2x0e+2x1o"),
+            meq.Irreps("O3", "2x0e+2x1o"),
             dtype=DTYPE,
         )
         x1 = torch.randn(3, tp.irreps_in1.dim, dtype=torch.float32)
@@ -475,7 +475,7 @@ class TestMultiLayerFeatureMixer:
         """``(2, N, dim)`` mixes to ``(N, dim)`` as ``W0 h0 + W1 h1``."""
         torch.manual_seed(0)
         irreps = "4x0e+4x1o"
-        dim = cue.Irreps("O3", irreps).dim
+        dim = meq.Irreps("O3", irreps).dim
         mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2, dtype=DTYPE)
         stacked = torch.randn(2, 3, dim, dtype=torch.float64)
         out = mixer(stacked)
@@ -487,7 +487,7 @@ class TestMultiLayerFeatureMixer:
         """A silent truncate would mix the wrong Polar layers."""
         irreps = "4x0e"
         mixer = MultiLayerFeatureMixer(irreps=irreps, num_layers=2, dtype=DTYPE)
-        stacked = torch.zeros(3, 1, cue.Irreps("O3", irreps).dim, dtype=torch.float64)
+        stacked = torch.zeros(3, 1, meq.Irreps("O3", irreps).dim, dtype=torch.float64)
         with pytest.raises(ValueError, match="3 layers.*num_layers=2"):
             mixer(stacked)
 
@@ -505,7 +505,7 @@ class TestEnvironmentDependentSpinSourceBlock:
         torch.manual_seed(0)
         block = EnvironmentDependentSpinSourceBlock(irreps_in="4x0e+4x1o", l_max=1, dtype=DTYPE)
         n = 3
-        x = torch.randn(n, cue.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
+        x = torch.randn(n, meq.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
         out = block(x)
         assert out.shape == (n, 2, 4)
         flat = block.linear(x)
@@ -522,7 +522,7 @@ class TestEnvironmentDependentSpinSourceBlock:
             zero_charges=True,
             dtype=DTYPE,
         )
-        x = torch.randn(2, cue.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
+        x = torch.randn(2, meq.Irreps("O3", "4x0e+4x1o").dim, dtype=torch.float64)
         out = block(x)
         assert out.shape == (2, 2, 4)
         assert torch.equal(out[..., 0], torch.zeros(2, 2, dtype=out.dtype))
@@ -531,7 +531,7 @@ class TestEnvironmentDependentSpinSourceBlock:
         """``dim Y_l = (l+1)^2``; two copies → ``2*(l+1)^2`` flat width."""
         for l_max, y_dim, flat in ((0, 1, 2), (1, 4, 8), (2, 9, 18)):
             block = EnvironmentDependentSpinSourceBlock(irreps_in="2x0e", l_max=l_max, dtype=DTYPE)
-            x = torch.zeros(1, cue.Irreps("O3", "2x0e").dim, dtype=torch.float64)
+            x = torch.zeros(1, meq.Irreps("O3", "2x0e").dim, dtype=torch.float64)
             out = block(x)
             assert out.shape[-1] == y_dim
             assert block.linear(x).shape[-1] == flat

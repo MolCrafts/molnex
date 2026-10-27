@@ -131,7 +131,7 @@ Encoder `forward` writes `pairs.edge_features` `(E, F·(L+1))` and, with
 `readout_mlp_hidden_layers_{depth,width}`, `readout_mlp_nonlinearity`,
 `avg_num_neighbors`, `per_type_energy_scales`, `per_type_energy_shifts`,
 `per_type_energy_{scales,shifts}_trainable`, `zbl`; MolNex-only:
-`expose_tensor_track`, `tp_method`. Defaults are upstream's
+`expose_tensor_track`. Defaults are upstream's
 (`l_max` 2 aside, which upstream requires).
 
 ## 7. Validation Contract
