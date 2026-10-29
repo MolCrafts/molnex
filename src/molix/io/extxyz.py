@@ -15,6 +15,10 @@ This parser is intentionally narrow:
 * promotes ``forces:R:3`` to :attr:`ExtxyzFrame.forces` when present;
 * stores every other real-valued ``Properties`` column under
   :attr:`ExtxyzFrame.arrays` (e.g. ``initial_charges``, ``dipoles``);
+* reads open-boundary frames: ``Lattice`` is optional, and without it the
+  frame has no cell and ``pbc`` defaults to ``F F F`` (the extxyz rule);
+* keeps every other comment-line token as a string in
+  :attr:`ExtxyzFrame.info` (``row=``, ``temperature=``, …);
 * returns a flat list of :class:`ExtxyzFrame` dataclasses; callers
   (dataset adapters, MolHub-owned) bridge to :class:`torch.Tensor` and the
   flat-sample dict contract.
@@ -36,6 +40,9 @@ __all__ = ["ExtxyzFrame", "parse_extxyz_frames", "write_extxyz_frames"]
 
 _log = logging.getLogger(__name__)
 
+#: Comment-line keys the parser turns into fields; every other key goes to ``info``.
+_STRUCTURAL_TOKENS = frozenset({"Lattice", "Properties", "pbc", "energy"})
+
 
 @dataclass
 class ExtxyzFrame:
@@ -43,12 +50,13 @@ class ExtxyzFrame:
 
     Attributes:
         n_atoms: Number of atoms in this frame.
-        cell: ``(3, 3)`` row-major periodic cell in Å. Built from the
-            comment line's ``Lattice="r00 r01 r02 r10 r11 r12 r20 r21 r22"``
-            tag and reshaped to ``(3, 3)``.
+        cell: ``(3, 3)`` row-major periodic cell in Å, from the comment
+            line's ``Lattice="r00 r01 r02 r10 r11 r12 r20 r21 r22"`` tag, or
+            ``None`` for an open-boundary frame (no ``Lattice``).
         pbc: Tuple of three booleans for the x / y / z periodic
-            directions. Defaults to ``(True, True, True)`` when absent from
-            the comment line (with a debug-level log emitted).
+            directions. When the ``pbc`` tag is absent it is
+            ``(True, True, True)`` with a ``Lattice`` and
+            ``(False, False, False)`` without one.
         energy: Per-frame total energy in eV, read from the comment line's
             ``energy=...`` token. Missing tag raises ``ValueError``.
         species: Atomic symbols, length ``n_atoms``.
@@ -60,16 +68,19 @@ class ExtxyzFrame:
             ``Properties=``, keyed by name (e.g. ``"initial_charges"``
             ``(n_atoms,)`` or ``"dipoles"`` ``(n_atoms, 3)``). Empty when
             only species/pos/forces are present.
+        info: Every other ``key=value`` token of the comment line, values
+            as written (unquoted strings), e.g. ``{"row": "17"}``.
     """
 
     n_atoms: int
-    cell: np.ndarray
+    cell: np.ndarray | None
     pbc: tuple[bool, bool, bool]
     energy: float
     species: list[str]
     pos: np.ndarray
     forces: np.ndarray | None
     arrays: dict[str, np.ndarray] = field(default_factory=dict)
+    info: dict[str, str] = field(default_factory=dict)
 
 
 def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
@@ -84,9 +95,9 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
         One :class:`ExtxyzFrame` per frame, in file order.
 
     Raises:
-        ValueError: A frame's comment line lacks an ``energy=`` token, or
-            an atom row has fewer columns than the ``Properties=`` layout
-            declares.
+        ValueError: A frame's comment line lacks an ``energy=`` token,
+            declares a periodic direction without a ``Lattice``, or an atom
+            row has fewer columns than the ``Properties=`` layout declares.
         FileNotFoundError: ``path`` does not exist.
     """
     p = Path(path)
@@ -111,7 +122,7 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
 
         tokens = _tokenize_comment(comment)
         cell = _parse_lattice(tokens, source=p)
-        pbc = _parse_pbc(tokens)
+        pbc = _parse_pbc(tokens, periodic=cell is not None, source=p)
         energy = _parse_energy(tokens, source=p, frame_idx=len(frames))
         layout = _parse_properties(tokens, source=p)
 
@@ -154,6 +165,7 @@ def parse_extxyz_frames(path: str | Path) -> list[ExtxyzFrame]:
                 pos=pos,
                 forces=forces,
                 arrays=extra,
+                info={k: v for k, v in tokens.items() if k not in _STRUCTURAL_TOKENS},
             )
         )
         i += 2 + n_atoms
@@ -213,27 +225,34 @@ def _tokenize_comment(comment: str) -> dict[str, str]:
     return tokens
 
 
-def _parse_lattice(tokens: dict[str, str], *, source: Path) -> np.ndarray:
-    """Parse ``Lattice="r00 r01 ..."`` into a ``(3, 3)`` row-major matrix."""
+def _parse_lattice(tokens: dict[str, str], *, source: Path) -> np.ndarray | None:
+    """Parse ``Lattice="r00 r01 ..."`` into a ``(3, 3)`` row-major matrix; ``None`` if absent."""
     raw = tokens.get("Lattice")
     if raw is None:
-        raise ValueError(f'{source}: comment line missing Lattice="..." tag')
+        return None
     vals = [float(x) for x in raw.split()]
     if len(vals) != 9:
         raise ValueError(f"{source}: Lattice tag has {len(vals)} numbers; need exactly 9")
     return np.array(vals, dtype=np.float64).reshape(3, 3)
 
 
-def _parse_pbc(tokens: dict[str, str]) -> tuple[bool, bool, bool]:
-    """Parse ``pbc="T T T"``; default ``(True, True, True)`` when absent."""
+def _parse_pbc(tokens: dict[str, str], *, periodic: bool, source: Path) -> tuple[bool, bool, bool]:
+    """Parse ``pbc="T T T"``; absent, all *periodic* (whether a ``Lattice`` was given)."""
     raw = tokens.get("pbc")
     if raw is None:
-        _log.debug("extxyz comment missing pbc tag; defaulting to (T, T, T)")
-        return (True, True, True)
+        _log.debug(
+            "extxyz comment missing pbc tag; defaulting to %s", "T T T" if periodic else "F F F"
+        )
+        return (periodic, periodic, periodic)
     parts = raw.split()
     if len(parts) != 3:
         raise ValueError(f"pbc tag has {len(parts)} entries; need 3")
-    return tuple(p.upper() == "T" for p in parts)
+    pbc = tuple(p.upper() == "T" for p in parts)
+    if any(pbc) and not periodic:
+        raise ValueError(
+            f"{source}: pbc={raw!r} names a periodic direction but there is no Lattice"
+        )
+    return pbc
 
 
 def _parse_energy(tokens: dict[str, str], *, source: Path, frame_idx: int) -> float:
@@ -301,21 +320,22 @@ def write_extxyz_frames(
     *,
     species: list[str],
     positions: np.ndarray,
-    energies: np.ndarray | None = None,
+    energies: np.ndarray,
     tags: list[str] | None = None,
 ) -> None:
     """Write frames in extended-XYZ — the write half of :func:`parse_extxyz_frames`.
 
     Emits ``Properties=species:S:1:pos:R:3`` plus an ``energy=`` token per
-    frame, so the output is readable by this module's own parser (open
-    systems: no ``Lattice`` tag is written).
+    frame and no ``Lattice`` (open systems), which this module's parser reads
+    back with ``cell=None``, ``pbc=(False, False, False)`` and the tags in
+    :attr:`ExtxyzFrame.info`.
 
     Args:
         path: Output ``.xyz`` file (parent directories must exist).
         species: Atomic symbols, length ``N`` (constant across frames).
         positions: Positions ``(T, N, 3)`` in Å.
-        energies: Optional per-frame total energy ``(T,)``; written as the
-            ``energy=`` comment token when given.
+        energies: Per-frame total energy ``(T,)``, written as the
+            ``energy=`` comment token (the parser requires it).
         tags: Optional per-frame extra comment tokens (length ``T``), appended
             verbatim — e.g. ``"temperature=297.1"``.
     """
@@ -325,9 +345,7 @@ def write_extxyz_frames(
         raise ValueError(f"{len(species)} species for {n_atoms} atoms")
     with Path(path).open("w") as fh:
         for t in range(n_frames):
-            comment = "Properties=species:S:1:pos:R:3"
-            if energies is not None:
-                comment += f" energy={float(energies[t]):.10f}"
+            comment = f"Properties=species:S:1:pos:R:3 energy={float(energies[t]):.10f}"
             if tags is not None:
                 comment += f" {tags[t]}"
             fh.write(f"{n_atoms}\n{comment}\n")

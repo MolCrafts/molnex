@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from molix.io.extxyz import ExtxyzFrame, parse_extxyz_frames
+from molix.io.extxyz import ExtxyzFrame, parse_extxyz_frames, write_extxyz_frames
 
 
 class TestParseFixture:
@@ -109,3 +109,42 @@ class TestParseFixture:
         )
         frames = parse_extxyz_frames(f)
         assert frames[0].pbc == (True, True, True)
+
+
+class TestOpenBoundary:
+    def test_a_frame_without_lattice_is_open(self, tmp_path: Path) -> None:
+        """No ``Lattice``: no cell, and ``pbc`` defaults to ``F F F`` (extxyz rule)."""
+        f = tmp_path / "open.xyz"
+        f.write_text("1\nProperties=species:S:1:pos:R:3 energy=345.15 row=7\nC 0.0 0.0 0.0\n")
+        (frame,) = parse_extxyz_frames(f)
+        assert frame.cell is None
+        assert frame.pbc == (False, False, False)
+        assert frame.energy == pytest.approx(345.15)
+
+    def test_a_periodic_direction_without_lattice_raises(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad.xyz"
+        f.write_text('1\nProperties=species:S:1:pos:R:3 energy=0.0 pbc="T F F"\nC 0 0 0\n')
+        with pytest.raises(ValueError, match="Lattice"):
+            parse_extxyz_frames(f)
+
+    def test_other_comment_tokens_land_in_info(self, tmp_path: Path) -> None:
+        f = tmp_path / "info.xyz"
+        f.write_text('1\nProperties=species:S:1:pos:R:3 energy=1.0 row=17 pbc="F F F"\nH 0 0 0\n')
+        (frame,) = parse_extxyz_frames(f)
+        assert frame.info == {"row": "17"}
+
+    def test_the_writer_output_reads_back(self, tmp_path: Path) -> None:
+        f = tmp_path / "traj.xyz"
+        pos = np.arange(12, dtype=np.float64).reshape(2, 2, 3) * 0.1
+        write_extxyz_frames(
+            f,
+            species=["O", "H"],
+            positions=pos,
+            energies=np.array([-1.5, -1.25]),
+            tags=["temperature=300.00", "temperature=301.50"],
+        )
+        frames = parse_extxyz_frames(f)
+        assert [fr.energy for fr in frames] == [-1.5, -1.25]
+        assert [fr.info["temperature"] for fr in frames] == ["300.00", "301.50"]
+        assert all(fr.cell is None and fr.species == ["O", "H"] for fr in frames)
+        np.testing.assert_allclose(np.stack([fr.pos for fr in frames]), pos)
