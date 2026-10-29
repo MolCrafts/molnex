@@ -56,12 +56,6 @@ class TestPiNetPotential:
                     ).sum() / (2 * h)
         torch.testing.assert_close(forces[list(atoms)], fd, atol=1e-7, rtol=1e-6)
 
-    def test_atomic_energies_add_the_per_element_dress(self, cluster):
-        dress = [-0.5, -37.8, -54.6, -75.1]
-        bare = _model(wrt=())(cluster.clone())["graphs", "energy"]
-        dressed = _model(wrt=(), atomic_energies=dress)(cluster.clone())["graphs", "energy"]
-        torch.testing.assert_close(dressed - bare, torch.tensor([sum(dress)], dtype=torch.float64))
-
     def test_scale_multiplies_the_network_energy(self, cluster):
         one = _model(wrt=())(cluster.clone())["graphs", "energy"]
         three = _model(wrt=(), scale=3.0)(cluster.clone())["graphs", "energy"]

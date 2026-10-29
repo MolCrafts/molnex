@@ -11,7 +11,7 @@ This spec covers the MolNex PyTorch port of Teoroo-CMC/PiNN `PiNet2`
 |---|---|
 | `molzoo.pinet.PiNetSpec` | torch-free validated configuration |
 | `molzoo.pinet.PiNetEncoder(spec, dtype=)` | feature body: element table, basis, `GCBlock` stack, residual updates; primitives + the encoder `forward(td)` |
-| `molzoo.pinet.PiNetPotential(spec, wrt=(), dtype=)` | `PiNetEncoder` + per-block `OutLayer` energy readout, atomic dress, scale; `energy` / `forward = Derivative(energy, wrt)` |
+| `molzoo.pinet.PiNetPotential(spec, wrt=(), dtype=)` | `PiNetEncoder` + per-block `OutLayer` energy readout times `scale` (the residual energy; no atomic dress); `energy` / `forward = Derivative(energy, wrt)` |
 | `molzoo.pinet.PiNetDipole(spec, ...)` / `PiNetPolarizability(spec, ...)` | `PiNetEncoder` + a `molpot.heads` dipole / charge-response head |
 
 The PiNN layers are model-specific and live in `molzoo.pinet.layers`; only the
@@ -41,7 +41,7 @@ all enabled tracks.
 | `CutoffFunc` `f1` / `f2` / `hip` | `CosineCutoff` / `TanhCutoff` / `HalfCosineCutoff` |
 | `PolynomialBasis`, `GaussianBasis` | `molrep.embedding.radial.PolynomialBasis`, `GaussianBasis` |
 | `AtomicOnehot(atom_types)` | `PiNetEncoder.node_attrs` over the sorted element table |
-| `pot_model`: `pred / e_scale + e_dress` | `PiNetPotential`: `scale · Σ out + Σ atomic_energies[Z]` |
+| `pot_model`: `pred / e_scale + e_dress` | `PiNetPotential`: `scale · Σ out`, the residual. `e_dress` is `molix.data.AtomicDress` (buffer `e0`): `EnergyResidual` subtracts it from the label, `molix.deploy.DressedPotential` adds it onto `atoms.energy` for export and absolute energies |
 
 ## 3. Reference Alignment
 
@@ -68,9 +68,26 @@ all enabled tracks.
   number outside the table is rejected once, eagerly (`validate_elements`),
   instead of reaching `one_hot` as `-1`.
 - **Energy units.** PiNN divides the network output by `e_scale`; MolNex
-  multiplies by `scale = 1 / e_scale`. `atomic_energies` is PiNN's `e_dress` in
-  table order (default all zero). `e_unit` is not modelled (MolNex energies are
-  eV in and out).
+  multiplies by `scale = 1 / e_scale`, on the network sum only. `e_unit` is not
+  modelled (MolNex energies are eV in and out).
+- **Atomic dress.** As in PiNN, the dress `c[Z]` is outside the trained
+  network: the loader subtracts a `molix.data.AtomicDress` from the label
+  (`EnergyResidual`) and the loss targets `graphs.energy_residual`. The fit is
+  its own type (`LeastSquaresDress`: PiNN's `get_atomic_dress`, train split
+  only; `SuppliedDress`: a given table, never refitted, unlike `init_params`).
+  For export, `DressedPotential` adds the same buffer onto `atoms.energy`, so
+  the `.pt2` carries `c[Z]` and reports absolute energy; `DeployMetadata` JSON
+  does not. A real atom whose `Z` the dress does not support raises on the
+  loader instead of contributing PiNN's 0; in the packaged graph such a `Z` is
+  undefined. With `e_scale ≠ 1` the residual loss is PiNN's divided by
+  `e_scale²`, a global factor shared by energy and force terms.
+- **Weight initialisation.** MolNex keeps torch's `nn.Linear` default
+  (`kaiming_uniform(a=√5)`, bound `1/√fan_in`; a bias, where a layer has one,
+  drawn from the same range). PiNN builds Keras `Dense` layers: `glorot_uniform`
+  (bound `√(6/(fan_in+fan_out))`) and zero bias — 0.217 against 0.125 for a
+  64×64 layer. The function family is the same; trajectories from equal seeds
+  are not, and a training comparison with PiNN carries this difference
+  (operator ruling 2026-10-29: kept, not ported).
 - **Unused PiNN layer.** PiNN's `EquivarLayer` builds an `ii_layer` its `call`
   never uses; MolNex does not build it.
 - **Out-layer activation.** `out_activation` defaults to `None`, PiNN's
@@ -106,8 +123,13 @@ Block `t` (`t = 1..depth`), with `P1⁰ = onehot(Z)`, `P3⁰ = 0 (N,3,1)`,
 5. `P1ᵗ = Res(P1ᵗ⁻¹) + p1_t`, likewise for `P3`, `P5`.
 
 Energy: `o_0 = 0`, `o_t = W_t FF_t(p1_t) + o_{t-1}`;
-`E_g = scale · Σ_{i∈g} m_i o_depth,i + Σ_{i∈g} m_i e0(Z_i)` with `m_i` the
-real-atom mask. Forces and virial come from `molix.autograd.Derivative`.
+`E_g = scale · Σ_{i∈g} m_i o_depth,i` with `m_i` the real-atom mask: the
+residual the network writes, trained against `graphs.energy_residual`. The
+absolute atom energy is that residual plus `c[Z_i]`, added by
+`DressedPotential` onto `atoms.energy` before `AtomEnergyAdapter` forms
+`(atom_energy · local_mask).sum()`. Forces and virial come from
+`molix.autograd.Derivative` and equal those of the absolute energy, because
+`c[Z]` is constant.
 
 Encoder `forward` writes `atoms.node_features` `(N, depth, C)` (the residual
 `P1ᵗ`), `atoms.p1_block_outputs` `(N, depth, C)` (`p1_t`) and, with
@@ -120,11 +142,10 @@ Encoder `forward` writes `atoms.node_features` `(N, depth, C)` (the residual
 `PiNetSpec` fields (PiNN name in brackets): `atomic_numbers` [`atom_types`],
 `r_max` [`rc`], `cutoff_type`, `basis_type`, `n_basis`, `gamma`, `center`,
 `pp_nodes`, `pi_nodes`, `ii_nodes`, `depth`, `activation` [`act`], `weighted`,
-`rank`, `out_nodes`, `out_activation`, `atomic_energies` [`e_dress`], `scale`
-[`1 / e_scale`], plus the MolNex-only `emit_property_features` (§4).
+`rank`, `out_nodes`, `out_activation`, `scale` [`1 / e_scale`], plus the
+MolNex-only `emit_property_features` (§4). `e_dress` is not a spec field (§4).
 Validated at construction: ascending unique `atomic_numbers`,
-`pp_nodes[-1] == ii_nodes[-1]`, `len(atomic_energies) == len(atomic_numbers)`,
-non-empty `out_nodes`.
+`pp_nodes[-1] == ii_nodes[-1]`, non-empty `out_nodes`.
 
 ## 7. Benchmark Contract
 
@@ -143,8 +164,14 @@ against finite differences, padded-batch masking, and a `slow` compile test
 `molzoo.pinet` owns the spec, the PiNN layers, encoder, potential and the two
 property products; `molrep` supplies only generic pieces (`FFLayer`, cutoffs,
 radial bases, edge geometry). `molpot.heads` owns `DipoleHead`,
-`ChargeResponseHead`, `AtomicReferenceEnergy`, `GlobalRescale`. `molix` owns
-`Derivative`, the geometry helpers' consumers and the losses.
+`ChargeResponseHead`, `GlobalRescale` (its `AtomicReferenceEnergy` is MACE's
+E0, not on the PiNet path). `molix` owns `Derivative`, the geometry helpers'
+consumers and the losses; `molix.data` owns the dress (`AtomicDress`,
+`EnergyResidual`, `LeastSquaresDress`, `SuppliedDress`) and `molix.deploy`
+the export composition `DressedPotential`. `DeployMetadata` has no `e0` field.
+
+`docs/molzoo/specs/pinet2.md` is a byte-identical mirror of
+`src/molzoo/specs/pinet2.md`.
 
 ## 9. Version Pinning
 

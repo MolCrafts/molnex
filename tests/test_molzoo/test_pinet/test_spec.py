@@ -16,10 +16,8 @@ class TestPiNetSpec:
     def test_rejects_an_unknown_field(self):
         with pytest.raises(ValidationError):
             PiNetSpec(atom_types=[1, 6])
-
-    def test_rejects_atomic_energies_of_the_wrong_length(self):
-        with pytest.raises(ValidationError, match="one entry per atomic number"):
-            PiNetSpec(atomic_numbers=[1, 6], atomic_energies=[0.0])
+        with pytest.raises(ValidationError):
+            PiNetSpec(atomic_energies=[0.0])
 
     def test_spec_module_imports_no_torch(self):
         """The spec is a validator only; it imports pydantic and the torch-free encoder spec."""
