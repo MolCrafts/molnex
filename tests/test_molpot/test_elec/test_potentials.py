@@ -537,9 +537,6 @@ def test_combined_potential_learnable_weights():
     "potential_class", [CoulombPotential, InversePowerLawPotential, SplinePotential]
 )
 def test_potential_device_dtype(potential_class, device, dtype):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA is not available")
-
     smearing = 1.0
     exponent = 2
 

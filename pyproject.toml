@@ -84,12 +84,14 @@ python_files = ["test_*", "bm_*"]
 python_classes = ["Test*", "BM*"]
 markers = [
   "slow: compiles / dynamo-traces / AOT-exports a model, spawns DataLoader workers or rolls out MD — excluded from the default run; run on demand with '-m slow' (CI runs it as its own step)",
+  "gpu: needs a CUDA device — excluded from the default run, which hides every device (tests/conftest.py); run on a GPU node with '-m gpu'",
 ]
-# Test tiers: the default `pytest` run is the fast unit tier (a couple of
-# minutes on 12 workers); `-m slow` is the on-demand tier;
+# Test tiers: the default `pytest` run is the fast CPU-only unit tier (a couple
+# of minutes on 12 workers; no device is visible to it); `-m slow` is the
+# on-demand tier; `-m gpu` runs the CUDA tests, on a GPU node only;
 # `scripts/affected_tests.py` runs only the tests mirrored by a git diff.
 # A CLI -m overrides this (`pytest -m slow` for the slow tier, `pytest -m ""` for everything).
-addopts = ["-m", "not slow", "--durations=10"]
+addopts = ["-m", "not slow and not gpu", "--durations=10"]
 
 [tool.scikit-build]
 wheel.packages = ["src/molix", "src/molrep", "src/molpot", "src/molzoo"]

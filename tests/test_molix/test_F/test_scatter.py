@@ -67,7 +67,7 @@ class TestScatterSum:
         assert isinstance(dim_size.real_type, torch.SymIntType)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")
+@pytest.mark.gpu
 class TestScatterSumCuda:
     """Native ``molix::scatter_sum`` on GPU."""
 

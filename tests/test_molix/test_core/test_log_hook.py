@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import torch
 
 from molix.core.hook import ScalarHook
 from molix.core.state import TrainState
@@ -305,18 +304,27 @@ def test_log_announce_forces_header_reprint_on_next_row(capsys):
 
 
 def test_gpu_memory_hook_noop_on_cpu():
+    """The default tier hides every device (tests/conftest.py): the hook reports zeros."""
     hook = GPUMemoryHook()
     state = TrainState()
 
     hook.on_train_start(trainer=None, state=state)
     hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
 
-    if torch.cuda.is_available():
-        assert state["gpu"]["alloc_gib"] >= 0.0
-    else:
-        assert state["gpu"]["alloc_gib"] == 0.0
-        assert state["gpu"]["resv_gib"] == 0.0
-        assert state["gpu"]["peak_gib"] == 0.0
+    assert state["gpu"]["alloc_gib"] == 0.0
+    assert state["gpu"]["resv_gib"] == 0.0
+    assert state["gpu"]["peak_gib"] == 0.0
+
+
+@pytest.mark.gpu
+def test_gpu_memory_hook_reads_the_device():
+    hook = GPUMemoryHook()
+    state = TrainState()
+
+    hook.on_train_start(trainer=None, state=state)
+    hook.on_train_batch_end(trainer=None, state=state, batch=None, outputs=None)
+
+    assert state["gpu"]["alloc_gib"] >= 0.0
 
 
 def test_gpu_memory_hook_selects_metrics():

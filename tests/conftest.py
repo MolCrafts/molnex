@@ -42,14 +42,25 @@ This module provides three things:
 The transforms are intentionally small — concrete tests live next to
 the module they exercise (encoders in ``test_molzoo``, heads in
 ``test_molpot``).
+
+It also owns the **GPU tier**. A test that needs a CUDA device is marked
+``gpu`` — explicitly, or here, at collection, when it takes the ``cuda``
+fixture or a ``"cuda"`` / ``torch.device("cuda")`` parameter — and runs only
+on a GPU node with ``-m gpu``. A run whose mark expression excludes ``gpu``
+(the default ``-m "not slow and not gpu"``) hides every device before any
+test runs, so nothing in it reaches a GPU by accident either: pinned loader
+memory, an optimizer's CUDA-graph health check and ``torch.cuda.is_available()``
+skips all see a CPU-only machine. The login node's GPU is never touched.
 """
 
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pytest
 import torch
 from molpy import Box, Frame
 from tensordict import TensorDict
@@ -61,6 +72,46 @@ from molix.neighbor import NeighborList
 
 if TYPE_CHECKING:
     from molpot.forcefield import ForceField
+
+
+def on_gpu(value: object = "cuda") -> object:
+    """A ``parametrize`` value that is a CUDA device, in the ``gpu`` tier."""
+    return pytest.param(value, marks=pytest.mark.gpu, id="cuda")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Hide every CUDA device from a run that excludes the ``gpu`` tier.
+
+    Imports do not initialise CUDA, so the variable is still read when the
+    first test asks for a device.
+    """
+    if "not gpu" in " ".join(config.getoption("markexpr").split()):
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark ``gpu`` every test that takes the ``cuda`` fixture or a CUDA parameter.
+
+    ``tryfirst``: the mark has to be on the item before ``-m`` deselects. A
+    ``gpu`` test is skipped where no device is visible; the check runs here,
+    after :func:`pytest_configure`, never at import, where an early
+    ``torch.cuda.is_available()`` would cache the device count before it is
+    hidden.
+    """
+    no_device = pytest.mark.skip(reason="needs a CUDA device")
+    visible = torch.cuda.is_available()
+    for item in items:
+        # pytest's own item: ``callspec`` exists only on a parametrized one.
+        params = getattr(item, "callspec", None)
+        values = params.params.values() if params is not None else ()
+        cuda_param = any(
+            v == "cuda" or (isinstance(v, torch.device) and v.type == "cuda") for v in values
+        )
+        if "cuda" in getattr(item, "fixturenames", ()) or cuda_param:
+            item.add_marker(pytest.mark.gpu)
+        if not visible and item.get_closest_marker("gpu") is not None:
+            item.add_marker(no_device)
 
 
 def frame(

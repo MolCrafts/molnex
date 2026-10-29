@@ -22,7 +22,7 @@ class TestMAE:
         assert out.ndim == 0
         assert float(out) == pytest.approx(0.5)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.gpu
     def test_compute_stays_on_device(self):
         """compute() keeps the result on the inputs' device (no implicit copy)."""
         metric = MAE()
@@ -85,7 +85,7 @@ class TestMetricCollection:
         results = metrics.compute()
         assert set(results.keys()) == {"MAE", "RMSE"}
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.gpu
     def test_collection_gpu_inputs(self):
         metrics = MetricCollection([MAE()])
         preds = torch.tensor([1.0, 2.0], device="cuda")

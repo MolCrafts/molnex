@@ -77,5 +77,5 @@ def periodic_neighbor_list(
     return torch.stack([i_sel, j_sel], dim=1), s_sel, d_sel
 
 
-DEVICES = ["cpu", torch.device("cpu")] + torch.cuda.is_available() * ["cuda"]
+DEVICES = ["cpu", torch.device("cpu"), "cuda"]  # "cuda": the gpu tier (tests/conftest.py)
 DTYPES = [torch.float32, torch.float64]

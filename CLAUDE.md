@@ -370,11 +370,16 @@ GH200 / `.aarch64`: on every env/torch change rebuild **all** native libs togeth
   runs on demand; LAMMPS-driven parity lives under `interface/`, never here. The `regressions/` tier that used to hold public-API
   scenarios with hard-coded goldens was deleted on 2026-09-07.
 - **Two tiers, orthogonal tests (hard rule).** The default `pytest` run is
-  the fast unit tier (`addopts = -m "not slow"`) and must finish in a couple
+  the fast unit tier (`addopts = -m "not slow and not gpu"`) and must finish in a couple
   of minutes on 12 workers. Anything that compiles,
   dynamo-traces (`Compiler.explain`), AOT-exports, spawns DataLoader workers,
   overfits an ML fixture or rolls out MD is marked `slow` and runs on demand
-  (`-m slow`). Before a push, run the mirrored
+  (`-m slow`). A test that needs a CUDA device is `gpu` (explicitly, or by
+  taking the `cuda` fixture / a `"cuda"` parameter — `tests/conftest.py` marks
+  those at collection) and runs **only on a GPU node** (`-m gpu`); a run that
+  excludes `gpu` hides every device, so the default tier is CPU-only by
+  construction and never touches the login node's GPU (user rule 2026-10-29).
+  Before a push, run the mirrored
   tests of the diff first: `python scripts/affected_tests.py --run`. Every
   behaviour is asserted **once**, at the lowest layer that owns it: one
   dynamo trace per compile seam, one static (grep / AST) check per invariant,
