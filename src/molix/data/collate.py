@@ -92,15 +92,15 @@ _VECTORS: dict[str, tuple[str, str, str]] = {
 #: Frame columns that hold atomic numbers. molrs 0.15 writes ``number``;
 #: older frames still say ``atomic_number``. Either becomes ``atoms.Z``, and
 #: neither is also copied through as a scalar leaf.
-_ATOMIC_NUMBER_COLUMNS = ("number", "atomic_number")
+ATOMIC_NUMBER_COLUMNS = ("number", "atomic_number")
 #: Frame ``atoms`` columns that become structure, not a per-atom scalar leaf.
 _ATOM_STRUCTURAL = frozenset(
-    {*_ATOMIC_NUMBER_COLUMNS, *(c for cols in _VECTORS.values() for c in cols)}
+    {*ATOMIC_NUMBER_COLUMNS, *(c for cols in _VECTORS.values() for c in cols)}
 )
 #: Frame meta keys (molrec conventions) whose ``graphs`` leaf has a molnex name.
 #: ``pe`` is the state's potential energy; molnex's batch calls it ``energy``.
 #: Every other numeric meta key becomes ``graphs.<key>`` unchanged.
-_GRAPH_LEAF = {"pe": "energy"}
+GRAPH_LEAF = {"pe": "energy"}
 
 _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
 
@@ -327,11 +327,11 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
         if "atoms" not in frame:
             raise KeyError("every frame needs an atoms block")
         atoms = frame["atoms"]
-        number_column = next((name for name in _ATOMIC_NUMBER_COLUMNS if name in atoms), None)
+        number_column = next((name for name in ATOMIC_NUMBER_COLUMNS if name in atoms), None)
         if number_column is None:
             raise KeyError(
                 "frame atoms have no atomic-number column "
-                f"({', '.join(_ATOMIC_NUMBER_COLUMNS)}); "
+                f"({', '.join(ATOMIC_NUMBER_COLUMNS)}); "
                 f"available: {', '.join(atoms.keys())}"
             )
         z = torch.as_tensor(
@@ -371,7 +371,7 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
             cells.append(_column(matrix, dtype).reshape(3, 3))
 
         for key, raw in (getattr(frame, "meta", None) or {}).items():
-            name = _GRAPH_LEAF.get(key, key)
+            name = GRAPH_LEAF.get(key, key)
             # molrs >= 0.14 wraps meta entries in MetaValue; .value unwraps.
             value = getattr(raw, "value", raw)
             if isinstance(value, str):

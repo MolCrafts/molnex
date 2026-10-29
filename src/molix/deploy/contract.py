@@ -127,6 +127,9 @@ class AtomEnergyAdapter(nn.Module):
 
         Returns:
             A nested ``TensorDict`` with ``atoms`` / ``pairs`` / ``graphs``;
+            ``atoms.mask`` all true (every row is a real atom — ghosts of a
+            domain decomposition are real atoms the caller does not own,
+            which is ``local_mask``'s business, not this column's);
             ``pair_diff = pos[target] - pos[source] + shifts`` and ``pair_dist``
             clamped at :data:`molix.schema.PAIR_DIST_CLAMP_MIN`. A ``pair_diff``
             built from leaves is live, so the models read it as is
@@ -140,6 +143,7 @@ class AtomEnergyAdapter(nn.Module):
                 Z=Z,
                 pos=pos,
                 batch=torch.zeros(n, dtype=torch.long, device=pos.device),
+                mask=torch.ones(n, dtype=torch.bool, device=pos.device),
                 batch_size=[n],
             ),
             pairs=TensorDict(

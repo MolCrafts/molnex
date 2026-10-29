@@ -22,13 +22,20 @@ Surfaces, in the order a sample travels:
 * **Collate** — :func:`collate_molecules` turns samples into the nested batch,
   :class:`MoleculePadder` gives it a static shape, :class:`BatchTask` is a
   post-collate transform, and :class:`FrameCollator` composes the three.
+* **Dress** — :class:`AtomicDress` is the frozen elemental energy table
+  :class:`EnergyResidual` subtracts from the label on the loader and
+  :class:`molix.deploy.DressedPotential` adds back in an exported model. Each
+  way of obtaining it is its own type: :class:`LeastSquaresDress` fits the
+  training split, :class:`InterceptLeastSquaresDress` adds a per-graph
+  intercept, :class:`SuppliedDress` takes published numbers.
 * **Loader** — :class:`DataModule` wraps it all in a ``torch.utils.data.DataLoader``;
   :class:`JointDataModule` runs several of them in lockstep, one batch of each per step.
 
 Acquiring the data — download, parse, preprocess, cache — is MolHub's, not this
-package's. The batch container itself is :class:`molix.frame.TensorFrame`, and
-the cutoff graph is :class:`molix.neighbor.NeighborList`: one is what the model
-reads and the other is geometry, so neither is loading machinery.
+package's; fitting a dress on the training split is this package's. The batch
+container itself is :class:`molix.frame.TensorFrame`, and the cutoff graph is
+:class:`molix.neighbor.NeighborList`: one is what the model reads and the other
+is geometry, so neither is loading machinery.
 """
 
 from __future__ import annotations
@@ -39,6 +46,9 @@ from molix.data.collate import MoleculeCollator, collate_molecules
 from molix.data.collator import FrameCollator
 from molix.data.datamodule import DataModule, DataModuleProtocol
 from molix.data.dataset import BaseDataset, SubsetDataset
+from molix.data.dress import AtomicDress
+from molix.data.dress_least_squares import InterceptLeastSquaresDress, LeastSquaresDress
+from molix.data.dress_supplied import SuppliedDress
 from molix.data.frame_dataset import FrameDataset
 from molix.data.group_split import group_split_indices
 from molix.data.inlier import ForceInlierWeight
@@ -67,6 +77,7 @@ from molix.data.valence_columns import (
 )
 
 __all__ = [
+    "AtomicDress",
     "BaseDataset",
     "BatchPlanShard",
     "BatchSamplerSource",
@@ -76,9 +87,11 @@ __all__ = [
     "DataModuleProtocol",
     "EnergyResidual",
     "ForceInlierWeight",
+    "InterceptLeastSquaresDress",
     "FrameCollator",
     "FrameDataset",
     "JointDataModule",
+    "LeastSquaresDress",
     "MoleculeCollator",
     "MoleculePadder",
     "PreparedMmap",
@@ -86,6 +99,7 @@ __all__ = [
     "PreparedRows",
     "ResidentValidation",
     "SubsetDataset",
+    "SuppliedDress",
     "TaskMixtureBatchSampler",
     "TokenBudgetBatchSampler",
     "TokenBudgetPacker",

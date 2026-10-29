@@ -549,7 +549,7 @@ shapes could differ on unsampled records.
 
 If the dataset has a `stats()` method, its fitted `DatasetTask` state is
 collected into `task_states` and the names are listed in the report — that is
-how you see at a glance that this cache was baked with, say, `AtomicDress`.
+how you see at a glance which fitted tasks baked this cache.
 
 ### Diagnostics and errors
 

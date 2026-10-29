@@ -68,6 +68,7 @@ class TestAtomEnergyAdapter:
             batch["pairs", "pair_dist"], expected.norm(dim=-1).clamp(min=PAIR_DIST_CLAMP_MIN)
         )
         assert (batch["atoms", "batch"] == 0).all()
+        assert batch["atoms", "mask"].dtype == torch.bool and batch["atoms", "mask"].all()
         assert batch["graphs", "num_atoms"].item() == 3
 
     def test_coincident_atoms_clamp_to_the_shared_constant(self):

@@ -1,4 +1,4 @@
-"""In-flight residual energy labels from a frozen elemental reference table.
+"""In-flight residual energy labels from a frozen elemental dress table.
 
 ``graphs.energy_residual`` is the collated total minus the per-graph sum of a
 Z-indexed coefficient table over **real** atoms. The raw total at
@@ -8,11 +8,10 @@ are excluded by ``atoms.mask``, not by inspecting ``Z``.
 
 from __future__ import annotations
 
-import hashlib
-
 import torch
 from tensordict import TensorDict, TensorDictBase
 
+from molix.data.dress import AtomicDress
 from molix.data.task import BatchTask
 from molix.F import batch_add
 from molix.frame import as_tensor_frame
@@ -25,7 +24,10 @@ class EnergyResidual(BatchTask):
     Elemental atomic-reference dressing of a collated batch. For each graph
     ``g``, with structural mask ``m_i`` (``atoms.mask``, else all-True):
 
-    ``e0(g) = sum_{i in g, m_i} c[Z_i]``
+    ``e0(g) = sum_{i in g, m_i} c[Z_i] + b``
+
+    with ``b`` the dress's per-graph intercept, added to every graph with at
+    least one real atom and never to a dead padding slot.
 
     ``E_res(g) = E_total(g) - e0(g)``
 
@@ -36,12 +38,17 @@ class EnergyResidual(BatchTask):
     raise, even when their placeholder ``Z`` is a real element (default
     hydrogen, ``pad_atom_type=1``).
 
+    The table is the :class:`~molix.data.AtomicDress` handed in, read as is
+    (not cloned) on every batch; train and val loaders share one instance, so
+    fit it on the training split only. Keep this instance on CPU: a deployed
+    model takes a deep copy (:class:`~molix.deploy.DressedPotential`).
+
     Args:
-        coefficients: 1-D Z-indexed reference table, energy unit of
-            ``graphs.energy`` (eV). Cloned and stored as float64.
-        support: 1-D boolean mask of the same length. ``True`` means that
-            atomic number is defined. A zero coefficient with
-            ``support[Z] == False`` is not support.
+        dress: The frozen table ``c[Z]`` and its support, in the energy unit
+            of ``graphs.energy`` (eV).
+
+    Raises:
+        TypeError: If *dress* is not an :class:`~molix.data.AtomicDress`.
 
     Reference:
         Levine et al. "The Open Molecules 2025 (OMol25) Dataset, Evaluations,
@@ -52,43 +59,19 @@ class EnergyResidual(BatchTask):
         https://doi.org/10.1021/acscatal.2c05426
     """
 
-    def __init__(self, *, coefficients: torch.Tensor, support: torch.Tensor) -> None:
-        if coefficients.ndim != 1:
-            raise ValueError(
-                "EnergyResidual coefficients must be 1-D "
-                f"(got ndim={coefficients.ndim}, shape={tuple(coefficients.shape)})"
-            )
-        if support.ndim != 1:
-            raise ValueError(
-                "EnergyResidual support must be 1-D "
-                f"(got ndim={support.ndim}, shape={tuple(support.shape)})"
-            )
-        if coefficients.shape[0] != support.shape[0]:
-            raise ValueError(
-                "EnergyResidual coefficients and support must have the same length "
-                f"(got {coefficients.shape[0]} and {support.shape[0]})"
-            )
-        if support.dtype != torch.bool:
-            raise ValueError(
-                "EnergyResidual support.dtype must be torch.bool "
-                f"(got {support.dtype}; uint8 is not bool)"
-            )
-        self.coefficients = coefficients.detach().clone().to(dtype=torch.float64)
-        self.support = support.detach().clone().to(dtype=torch.bool)
-        coeff_bytes = (
-            self.coefficients.cpu().contiguous().numpy().astype("<f8", copy=False).tobytes()
-        )
-        support_bytes = self.support.cpu().contiguous().to(dtype=torch.uint8).numpy().tobytes()
-        digest = hashlib.sha256(coeff_bytes + support_bytes).hexdigest()[:16]
-        self._task_id = f"energy_residual:{digest}"
+    def __init__(self, dress: AtomicDress) -> None:
+        if not isinstance(dress, AtomicDress):
+            raise TypeError(f"EnergyResidual takes an AtomicDress, got {type(dress).__name__}")
+        self.dress = dress
+        self._task_id = f"energy_residual:{dress.digest}"
 
     @property
     def task_id(self) -> str:
         """Cache-key identity ``energy_residual:<digest>`` of the frozen table.
 
-        The digest is a hex prefix of SHA-256 over little-endian float64
-        coefficient bytes then uint8 support bytes, so two tables never share
-        a collate identity.
+        :attr:`AtomicDress.digest <molix.data.AtomicDress.digest>`, read once
+        at construction: two tables never share a collate identity, and two
+        algorithms that produce the same numbers do.
         """
         return self._task_id
 
@@ -117,7 +100,7 @@ class EnergyResidual(BatchTask):
             TypeError: *data* is not a ``TensorDict`` / ``TensorFrame``.
             KeyError: Missing ``atoms.Z``, ``atoms.batch``, or
                 ``graphs.energy``.
-            ValueError: A real atom has ``Z < 0``, ``Z >= len(coefficients)``,
+            ValueError: A real atom has ``Z < 0``, ``Z >= len(dress.e0)``,
                 or ``support[Z] == False``. The message lists the unique
                 offending ``Z`` values.
         """
@@ -136,15 +119,15 @@ class EnergyResidual(BatchTask):
         atom_batch = atoms["batch"]
         energy = frame[ENERGY_KEY]
         pos = atoms["pos"]
-        if "mask" in atoms:
-            real = atoms["mask"].to(dtype=torch.bool)
-        else:
-            real = torch.ones_like(atomic_numbers, dtype=torch.bool)
+        # Before the padder (the loader's order) there is no mask: every row is real.
+        real = atoms.get("mask", torch.ones_like(atomic_numbers, dtype=torch.bool)).to(
+            dtype=torch.bool
+        )
 
-        n_table = int(self.coefficients.shape[0])
+        n_table = int(self.dress.e0.shape[0])
         device = atomic_numbers.device
-        table = self.coefficients.to(device=device)
-        support = self.support.to(device=device)
+        table = self.dress.e0.to(device=device)
+        support = self.dress.support.to(device=device)
         z_long = atomic_numbers.long()
         index = z_long.clamp(0, n_table - 1)
         in_range = (z_long >= 0) & (z_long < n_table)
@@ -160,6 +143,12 @@ class EnergyResidual(BatchTask):
         gathered = table[index]
         per_atom = torch.where(real, gathered, torch.zeros_like(gathered))
         e0 = batch_add(per_atom, atom_batch, dim_size=graphs.batch_size[0])
+        # A graph with no real atom is a dead padding slot: it gets no intercept.
+        live = (
+            batch_add(real.to(dtype=torch.float64), atom_batch, dim_size=graphs.batch_size[0]) > 0
+        )
+        intercept = self.dress.intercept.to(device=device)
+        e0 = e0 + torch.where(live, intercept, torch.zeros_like(intercept))
         frame[E0_KEY] = e0
         frame[ENERGY_RESIDUAL_KEY] = (energy.to(dtype=torch.float64) - e0).to(dtype=pos.dtype)
         return data

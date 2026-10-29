@@ -5,6 +5,9 @@
   molnex potential on it (:class:`AtomEnergyAdapter`) and its checks.
 * :mod:`molix.deploy.metadata` — :class:`DeployMetadata`, the ``{name}.json``
   an engine reads beside the package.
+* :mod:`molix.deploy.dressed` — :class:`DressedPotential`, a residual potential
+  with its :class:`~molix.data.AtomicDress` added back onto the atom energies,
+  so the package reports absolute energy.
 
 A deployment composes three primitives; the format comes from
 :mod:`molix.export`::
@@ -27,12 +30,14 @@ A deployment composes three primitives; the format comes from
 from __future__ import annotations
 
 from molix.deploy.contract import AtomEnergyAdapter, AtomEnergyModel, example_inputs, verify
+from molix.deploy.dressed import DressedPotential
 from molix.deploy.metadata import DeployMetadata
 
 __all__ = [
     "DeployMetadata",
     "AtomEnergyAdapter",
     "AtomEnergyModel",
+    "DressedPotential",
     "example_inputs",
     "verify",
 ]

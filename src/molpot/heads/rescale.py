@@ -30,8 +30,9 @@ class GlobalRescale(nn.Module):
         scale: Scalar multiplier. For Allegro QM9 this is typically the dataset
             ``total_energy_std`` (or per-atom energy std if the head emits
             per-atom energies).
-        shift: Scalar additive term. Typically ``0.0`` when AtomicDress has
-            already removed the per-species baseline from the target.
+        shift: Scalar additive term. Typically ``0.0`` when
+            :class:`molix.data.EnergyResidual` has already removed the
+            per-species baseline from the target.
     """
 
     def __init__(self, *, scale: float = 1.0, shift: float = 0.0, dtype: torch.dtype):
@@ -59,8 +60,9 @@ class PerSpeciesScaleShift(nn.Module):
             for Allegro QM9.  Dead rows (species never present) may be
             ``1.0``.
         shifts: Tensor / sequence of length ``num_species`` giving the
-            per-species additive. Use ``0.0`` when AtomicDress has already
-            been applied to the target; otherwise use the ridge-regression
+            per-species additive. Use ``0.0`` when
+            :class:`molix.data.EnergyResidual` has already been applied to the
+            target; otherwise use the ridge-regression
             atomic energies.
         scales_trainable: Make ``scales`` a learnable ``nn.Parameter``
             (otherwise a buffer).

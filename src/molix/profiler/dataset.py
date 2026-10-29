@@ -211,7 +211,7 @@ class Result:
         fields: Per-key packed layout.
         targets: Per-label value statistics.
         task_states: ``{task_name: state}`` restored from the cache, i.e.
-            which fitted pipeline tasks (e.g. ``AtomicDress``) baked it.
+            which fitted dataset tasks baked it.
         warnings: Diagnostic lines rendered as ``[WARN]`` by
             :meth:`print_report`.
         data_description: Human-readable description of the input.

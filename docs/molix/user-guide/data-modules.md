@@ -6,9 +6,9 @@ Everything upstream — downloading, per-sample transforms, caching, splitting �
 happens before it.
 
 Dataset **acquisition** — downloading, parsing, per-sample preprocessing and
-writing the `molix.block/1` stores — is not part of molnex; it lives in
-[MolHub](https://github.com/molcrafts/molhub). molnex starts from the cache
-file MolHub wrote, read through `molix.data`.
+caching — is not part of molnex; it lives in
+[MolHub](https://github.com/molcrafts/molhub). molnex reads the frames MolHub
+produces through `molix.data`; it defines no file format.
 
 The minimal protocol requires:
 
@@ -20,16 +20,17 @@ The minimal protocol requires:
 calls when the module defines it (e.g. to reseed a sampler).
 
 Each item yielded by those loaders is a nested `TensorDict` with `atoms` /
-`edges` / `graphs` namespaces, see
+`pairs` / `graphs` namespaces, see
 [Batch Schema](../explanation/batch-schema.md).
 
 ## Using the Built-in DataModule
 
-The molnex-side wiring is store → dataset → split → `DataModule`. The
-cache was produced upstream by MolHub, which owns the source, the per-sample
-transforms (neighbor list, atomic dress) and the fit of any dataset-level
-statistic — including the rule that such a fit sees training indices only, or
-the val split leaks into the baseline:
+The molnex-side wiring is dataset → split → `DataModule`. The dataset was
+produced upstream by MolHub, which owns the source and its per-sample
+preprocessing. A dataset-level fit the loader applies — the atomic dress of
+`EnergyResidual` — is molnex's, run by the caller on the training split before
+the `DataModule` is built, never inside it, or the val split leaks into the
+baseline (see [Atomic dress](data-loading.md#atomic-dress)):
 
 ```python
 from molix.data import MoleculeCollator, MoleculePadder, TotalCharge
@@ -69,14 +70,15 @@ scalar becomes a `graphs` leaf. `batch_tasks` carries `molix.data.BatchTask`
 instances, applied in order after collation — post-collate work is configured on the DataModule, not
 upstream, because it cannot be cached with the rest.
 
-Three tasks ship with molix, and which of them a run needs is decided by the
-model it feeds:
+Three tasks ship with molix, beside the padder (which is not a task), and
+which of them a run needs is decided by the model it feeds:
 
 | Piece | Writes | Needed by |
 |---|---|---|
 | `FrameCollator(..., padder=MoleculePadder(max_atoms=, max_pairs=, max_bonds=, …, max_graphs=, cutoff=))` | DataLoader `collate_fn`: concat then ghosts + `atoms.mask` + dead `(ghost, ghost)` edges + padded valence (`bonds`/`angles`/`propers`/`impropers` dummy rows on four offset ghosts, `*.mask`) + dead graph slots (`graphs.mask`; ghosts sit in the last, sink slot) | `torch.compile` / CUDA-graph paths |
-| `NeighborList(cutoff=, pbc=, …)` | the `edges` namespace — the cutoff graph (a **batch task**, after collate, before pad) | every model that reads pairs |
+| `NeighborList(cutoff=, pbc=, …)` | the `pairs` namespace — the cutoff graph (a **batch task**, after collate, before pad) | every model that reads pairs |
 | `TotalCharge(charge=0.0)` | `graphs.total_charge` (B,) in e | charge models |
+| `EnergyResidual(dress)` | `graphs.e0` (B,) float64 and `graphs.energy_residual` (B,): the label minus the `AtomicDress` sum over real atoms; `graphs.energy` untouched (a **batch task**, before pad) | models trained on a residual energy |
 
 ### One static shape for a whole dataset: capacity-first packing
 
