@@ -1,6 +1,7 @@
 """Validated configurations for the MACE foundation-model variants.
 
-:class:`MACESpec` is the shared body configuration; every shipped product has
+:class:`MACESpec` is the shared product configuration — the encoder's
+(:class:`~molrep.encoders.mace.spec.MACEEncoderSpec`) plus the readout; every shipped product has
 a subclass that pins its defaults (:class:`MACEMatpesSpec`,
 :class:`MACEOMolSpec`, :class:`MACEOffSpec`, :class:`MACELesSpec`,
 :class:`MACEPolarSpec`). A spec is the only argument a product constructor
@@ -16,9 +17,10 @@ loaded onto a model whose frozen constants it was never fitted with.
 Units follow the rest of the repo: positions and ``r_max`` in Å, energies
 (``atomic_energies``, ``shift``) in eV, ``atomic_energies`` per atom.
 
-This module deliberately imports **nothing** but ``re``, ``typing`` and
-``pydantic``. A configuration must stay readable — from a CLI, a checkpoint
-manifest, or a test — without paying for torch and the cuEquivariance stack.
+This module deliberately imports **nothing** but ``re``, ``typing``,
+``pydantic`` and the torch-free encoder spec (:mod:`molrep.encoders.mace.spec`).
+A configuration must stay readable — from a CLI, a checkpoint manifest, or a
+test — without paying for torch and the cuEquivariance stack.
 The reference table becomes the ``atomic_energies`` buffer in
 :class:`molzoo.mace.potential.MacePotential`, not here.
 
@@ -43,9 +45,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any, Literal, NamedTuple, Self
+from typing import Any, Literal, Self
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from molrep.encoders.mace.spec import BodySchedule, MACEEncoderSpec
 
 #: One term of an official irreps string, e.g. ``"128x1o"`` — multiplicity,
 #: angular order ``l``, parity. Parity is fixed by ``l`` in every MACE
@@ -268,107 +272,36 @@ class MaceOfficialConfig(BaseModel):
         return num_features, max_hidden_l, mlp_dim
 
 
-class BodySchedule(NamedTuple):
-    """Irreps schedule of one feature body, independent of any energy head.
+class MACESpec(MACEEncoderSpec):
+    """Shared configuration of the MACE foundation-model products: the body and the readout.
+
+    The body's fields and rules are
+    :class:`~molrep.encoders.mace.spec.MACEEncoderSpec`; this adds the energy
+    readout. A bare ``MACESpec`` describes no shipped model — the subclasses
+    pin the switches and state the body schedule.
 
     Attributes:
-        hidden_l: Highest ``l`` kept in the node state between layers.
-        edge_channels: Per-``l`` multiplicity of the mid-layer edge irreps on
-            a residual stack. A density stack builds those irreps from
-            ``num_features`` and ignores this count.
-        radial_mlp: Hidden widths of the radial weight MLP.
-        keep_last_layer_irreps: Last product keeps ``hidden`` irreps. When
-            false, the last layer is scalar.
-        shared_product: One symmetric-contraction weight set for every
-            element. When false, the product carries one set per element.
-        residual_first: The first layer is a residual block too, so its
-            product carries a skip connection (MACE-OFF23, MACE-LES-OFF).
-    """
-
-    hidden_l: int
-    edge_channels: int
-    radial_mlp: tuple[int, ...]
-    keep_last_layer_irreps: bool
-    shared_product: bool
-    residual_first: bool
-
-
-class MACESpec(BaseModel):
-    """Shared configuration of the MACE foundation-model backbone.
-
-    The five ``Literal`` switches at the bottom select which stack
-    :class:`~molzoo.mace.encoder.MACEEncoder` builds. They have no default on
-    this base class — a bare ``MACESpec`` describes no shipped model, so the
-    caller must say which one it means (the subclasses do exactly that).
-
-    Attributes:
-        atomic_numbers: Element table (z-table), strictly ascending. The
-            encoder looks ``Z`` up with ``torch.searchsorted``, which silently
-            snaps to a neighbouring row on an unordered table.
         atomic_energies: Per-element reference energies ``E0`` in eV/atom, in
             ``atomic_numbers`` order. Any iterable of numbers — a tensor
             included — is read into a plain ``list``.
-        r_max: Radial cutoff in Å.
-        num_bessel: Number of Bessel radial basis functions.
-        num_polynomial_cutoff: Polynomial cutoff exponent ``p`` (also the ZBL
-            envelope exponent, matching MACE).
-        l_max: Maximum spherical-harmonics order.
-        num_features: Scalar channel multiplicity (``hidden_irreps`` 0e count).
-        num_interactions: Number of interaction/product layers.
-        correlation: Body-order correlation of the symmetric contraction.
         mlp_dim: Hidden width of the final non-linear readout.
         scale: ``atomic_inter_scale`` — multiplies the interaction energy (eV).
         shift: ``atomic_inter_shift`` — per-atom energy offset in eV.
-        avg_num_neighbors: Message normalisation of the ``"agnostic"``
-            interactions; required by them, ignored by the others.
         last_readout_bias: The last per-layer readout carries a bias
             (Polar's dump does).
-        charge_classes: Embedding rows of the total-charge conditioning.
-        charge_offset: Index offset applied to the total charge.
-        spin_classes: Embedding rows of the total-spin conditioning.
-        spin_offset: Index offset applied to the total spin.
-        interaction: ``"density"`` (MatPES density-normalised interactions),
-            ``"agnostic"`` (MACE-OFF / MACE-MP-0 interactions normalised by
-            ``avg_num_neighbors``) or ``"residual"`` (OMOL non-linear residual
-            ones).
         readout: ``"per_layer"`` (one readout per layer, summed) or
             ``"final"`` (a single readout on the last layer).
-        distance_transform: ``"agnesi"`` applies the Agnesi radial transform
-            before the Bessel basis; ``"none"`` feeds raw distances.
         pair_repulsion: ``"zbl"`` adds the ZBL short-range pair term.
-        conditioning: ``"charge_spin"`` adds the total-charge / total-spin
-            joint embedding to the initial node features; the four
-            ``*_classes`` / ``*_offset`` fields are then required, and are
-            rejected without it.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
-    atomic_numbers: list[int] = Field(..., min_length=1)
     atomic_energies: list[float] = Field(..., min_length=1)
-
-    r_max: float = Field(6.0, gt=0.0)
-    num_bessel: int = Field(8, gt=0)
-    num_polynomial_cutoff: int = Field(5, gt=0)
-    l_max: int = Field(3, ge=0)
-    num_features: int = Field(128, gt=0)
-    num_interactions: int = Field(2, gt=0)
-    correlation: int = Field(2, ge=1)
     mlp_dim: int = Field(16, gt=0)
     scale: float = 1.0
     shift: float = 0.0
-    avg_num_neighbors: float | None = Field(None, gt=0.0)
     last_readout_bias: bool = False
-    charge_classes: int | None = Field(None, gt=0)
-    charge_offset: int | None = Field(None, ge=0)
-    spin_classes: int | None = Field(None, gt=0)
-    spin_offset: int | None = Field(None, ge=0)
 
-    interaction: Literal["density", "residual", "agnostic"]
     readout: Literal["per_layer", "final"]
-    distance_transform: Literal["none", "agnesi"]
     pair_repulsion: Literal["none", "zbl"]
-    conditioning: Literal["none", "charge_spin"]
 
     @field_validator("atomic_energies", mode="before")
     @classmethod
@@ -379,59 +312,19 @@ class MACESpec(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _check_element_table(self) -> Self:
-        """Reject element tables that would mis-index ``E0`` or the one-hot.
+    def _check_energy_table(self) -> Self:
+        """One ``E0`` per element.
 
         Raises:
             ValueError: If ``atomic_energies`` has a different length than
-                ``atomic_numbers``, or ``atomic_numbers`` is not strictly
-                ascending (unordered or duplicated), or an ``"agnostic"``
-                stack has no ``avg_num_neighbors``.
+                ``atomic_numbers``.
         """
         if len(self.atomic_energies) != len(self.atomic_numbers):
             raise ValueError(
                 f"atomic_energies has {len(self.atomic_energies)} entries but "
                 f"atomic_numbers has {len(self.atomic_numbers)} — one E0 per element"
             )
-        pairs = zip(self.atomic_numbers, self.atomic_numbers[1:])
-        if any(previous >= following for previous, following in pairs):
-            raise ValueError(
-                f"atomic_numbers must be strictly ascending (searchsorted lookup), "
-                f"got {self.atomic_numbers}"
-            )
-        if self.interaction == "agnostic" and self.avg_num_neighbors is None:
-            raise ValueError('interaction="agnostic" requires avg_num_neighbors')
         return self
-
-    @model_validator(mode="after")
-    def _check_conditioning_fields(self) -> Self:
-        """The four conditioning sizes exist iff the stack is charge/spin conditioned.
-
-        Raises:
-            ValueError: If ``conditioning="charge_spin"`` leaves any of them
-                ``None``, or ``conditioning="none"`` sets any of them.
-        """
-        sizes = (self.charge_classes, self.charge_offset, self.spin_classes, self.spin_offset)
-        if self.conditioning == "charge_spin" and any(size is None for size in sizes):
-            raise ValueError(
-                'conditioning="charge_spin" needs charge_classes, charge_offset, '
-                "spin_classes and spin_offset"
-            )
-        if self.conditioning == "none" and any(size is not None for size in sizes):
-            raise ValueError(
-                'conditioning="none" takes no charge_classes / charge_offset / '
-                "spin_classes / spin_offset"
-            )
-        return self
-
-    def body_schedule(self) -> BodySchedule:
-        """The irreps schedule of this body — every shipped spec states its own.
-
-        Raises:
-            NotImplementedError: On the bare base class, which describes no
-                shipped model.
-        """
-        raise NotImplementedError(f"{type(self).__name__} states no body schedule")
 
 
 class MACEMatpesSpec(MACESpec):

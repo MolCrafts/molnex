@@ -63,7 +63,7 @@ def preset_energy_to_md(style: str) -> float:
         ValueError: If ``style`` is not a molpy unit preset — the lookup is
             :func:`_preset_energy`.
     """
-    return float((1.0 * _preset_energy(style)).to(MD_ENERGY).magnitude)
+    return float((1.0 * _preset_energy(style)).to(MD_ENERGY).value)
 
 
 def preset_energy_ratio(source_style: str, target_style: str) -> float:
@@ -93,7 +93,7 @@ def preset_energy_ratio(source_style: str, target_style: str) -> float:
         (≈ 0.0433641), ``preset_energy_ratio("metal", "real")`` is its reciprocal
         (≈ 23.06055), and a style measured against itself is exactly ``1.0``.
     """
-    return float((1.0 * _preset_energy(source_style)).to(_preset_energy(target_style)).magnitude)
+    return float((1.0 * _preset_energy(source_style)).to(_preset_energy(target_style)).value)
 
 
 #: Padded ("dead") neighbour edges are displaced to ``factor · r_cut`` so every

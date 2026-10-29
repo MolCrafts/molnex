@@ -37,12 +37,14 @@ def _op_library_dirs() -> list[Path]:
     ]
 
 
-def _op_lib_path() -> Path | None:
-    """The native op library for the running machine, or ``None`` if not built.
+def _op_lib_path(library: str = "molnex_opLib") -> Path | None:
+    """A built molnex native library for the running machine, or ``None``.
 
-    ``csrc/molix/CMakeLists.txt`` tags the file with the target architecture —
-    ``libmolnex_opLib.<machine>.so`` — so builds for several machines can share
-    a directory.
+    ``library`` is the CMake target: ``molnex_opLib`` (``csrc/molix``) or
+    ``molnex_equivariance`` (``csrc/equivariance``). Each is tagged with the
+    target architecture — ``lib<library>.<machine>.so`` — so builds for several
+    machines can share a directory, and is searched on
+    :func:`_op_library_dirs`, the path molnex's C++ runtime reads too.
     """
     if sys.platform == "win32":
         prefix, ext = "", "pyd"
@@ -50,7 +52,7 @@ def _op_lib_path() -> Path | None:
         prefix, ext = "lib", "dylib"
     else:
         prefix, ext = "lib", "so"
-    name = f"{prefix}molnex_opLib.{platform.machine()}.{ext}"
+    name = f"{prefix}{library}.{platform.machine()}.{ext}"
     for directory in _op_library_dirs():
         if (directory / name).is_file():
             return directory / name
@@ -118,7 +120,7 @@ _load_ops_library()
 
 from molix import logger, logging
 from molix.autograd import Derivative
-from molix.compile import Compiler, ExplainSummary, register_inductor_fallbacks
+from molix.compile import Compiler, ExplainSummary
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
 from molix.core.losses import MAELoss, MSELoss, WeightedLoss
 from molix.core.state import Stage, StepResult, TrainState
@@ -143,5 +145,4 @@ __all__ = [
     "WeightedLoss",
     "logger",
     "logging",
-    "register_inductor_fallbacks",
 ]

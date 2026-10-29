@@ -29,7 +29,6 @@ class ProfilerHook(BaseHook):
         record_shapes: Record tensor shapes (default: False)
         export_chrome_trace: Export trace.json (default: True)
         export_tensorboard: Export to TensorBoard format (default: False)
-        register_artifacts: Register outputs as artifacts (default: False)
     """
 
     def __init__(
@@ -47,7 +46,6 @@ class ProfilerHook(BaseHook):
         record_shapes: bool = False,
         export_chrome_trace: bool = True,
         export_tensorboard: bool = False,
-        register_artifacts: bool = False,
         print_summary: bool = True,
         summary_row_limit: int = 15,
     ):
@@ -68,7 +66,6 @@ class ProfilerHook(BaseHook):
         self.record_shapes = record_shapes
         self.export_chrome_trace = export_chrome_trace
         self.export_tensorboard = export_tensorboard
-        self.register_artifacts = register_artifacts
 
         self.profiler = None
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -113,30 +110,10 @@ class ProfilerHook(BaseHook):
             self.profiler.step()
 
     def on_train_end(self, trainer, state):
-        """Stop profiler and register artifacts."""
+        """Stop the profiler."""
         if self.profiler:
             self.profiler.__exit__(None, None, None)
             logger.info("Stopped profiler")
-
-        if self.register_artifacts and hasattr(trainer, "ctx"):
-            ctx = trainer.ctx
-            if ctx:
-                trace_path = self.output_dir / "trace.json"
-                if trace_path.exists():
-                    ctx.save_artifact(
-                        name="profiler_trace.json",
-                        src=trace_path,
-                    )
-                    logger.info(f"Registered profiler trace as artifact: {trace_path}")
-
-                if self.export_tensorboard:
-                    tb_dir = self.output_dir / "tensorboard"
-                    if tb_dir.exists():
-                        ctx.save_artifact(
-                            name="profiler_tensorboard",
-                            src=tb_dir,
-                        )
-                        logger.info(f"Registered profiler TensorBoard logs as artifact: {tb_dir}")
 
     def _print_summary(self, prof):
         """Print an op-level summary to stdout so the bottleneck is visible

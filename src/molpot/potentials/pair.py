@@ -70,7 +70,8 @@ class LJCut(PairPotential):
         Raises:
             ValueError: The style declares no cutoff, an ``n``/``m`` other than
                 12/6 or a ``shift``, or a cross row (NBFIX), none of which this
-                potential prices.
+                potential prices; or the force field declares no
+                ``special_bonds``.
         """
         params = dict(style.params)
         if "cutoff" not in params:
@@ -79,7 +80,7 @@ class LJCut(PairPotential):
             raise ValueError("pair:lj/cut: only n = 12, m = 6 is priced")
         if params.get("shift") not in (None, 0, 0.0, "no", False):
             raise ValueError("pair:lj/cut: a shifted potential is not priced")
-        lj, _coul = forcefield.special_bonds
+        lj, _coul = cls.special_bonds(forcefield)
         return cls(
             cutoff=float(params["cutoff"]),
             special=[float(w) for w in lj],
@@ -99,7 +100,7 @@ class LJCut(PairPotential):
                 raise ValueError(
                     f"pair:lj/cut: cross row {row.name!r} ({itom.name}-{jtom.name}) is not priced"
                 )
-            by_type[itom.name] = (float(row["epsilon"]), float(row["sigma"]))
+            by_type[itom.name] = (float(row.params["epsilon"]), float(row.params["sigma"]))
         atom_types = [t.name for t in forcefield.get_types("atom")]
         missing = [name for name in atom_types if name not in by_type]
         if missing:
@@ -166,13 +167,14 @@ class PairCoulCut(PairPotential):
         """The potential of a molpy ``pair coul/cut`` style.
 
         Raises:
-            ValueError: The style lacks ``coulomb`` or ``dielectric``.
+            ValueError: The style lacks ``coulomb`` or ``dielectric``, or the
+                force field declares no ``special_bonds``.
         """
         params = dict(style.params)
         missing = [name for name in ("coulomb", "dielectric") if name not in params]
         if missing:
             raise ValueError(f"pair:coul/cut: the style declares no {missing}")
-        _lj, coul = forcefield.special_bonds
+        _lj, coul = cls.special_bonds(forcefield)
         return cls(
             cutoff=float(params.get("cutoff", float("inf"))),
             special=[float(w) for w in coul],

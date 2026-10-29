@@ -94,7 +94,7 @@ class BondedPotential(nn.Module):
     def table_from_types(cls, types: Sequence[Any]) -> dict[str, torch.Tensor]:
         """Stack the types' parameters into one ``(n_types,)`` row per name."""
         return {
-            name: torch.tensor([float(t[name]) for t in types], dtype=torch.float64)
+            name: torch.tensor([float(t.params[name]) for t in types], dtype=torch.float64)
             for name in cls.params
         }
 
@@ -185,6 +185,23 @@ class PairPotential(nn.Module):
             torch.tensor([1.0, *(float(w) for w in special)], dtype=torch.float64),
             persistent=False,
         )
+
+    @classmethod
+    def special_bonds(cls, forcefield: Any) -> tuple[Sequence[float], Sequence[float]]:
+        """The force field's ``(lj, coul)`` special-bond triples, each ``(w12, w13, w14)``.
+
+        Raises:
+            ValueError: The force field declares no ``special_bonds``; a pair
+                style cannot be priced without them (molpy leaves them unset
+                rather than assuming a default).
+        """
+        declared = forcefield.special_bonds
+        if declared is None:
+            raise ValueError(
+                f"{cls.style}: the force field declares no special_bonds "
+                "(ForceField.set_special_bonds)"
+            )
+        return declared
 
     def geometry(self, frame: TensorDictBase) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """``(pair_index, r, weight)`` at the live positions.

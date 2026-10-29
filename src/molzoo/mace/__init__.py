@@ -1,4 +1,4 @@
-"""MACE package — configuration, encoder, energy/force potentials, checkpoints.
+"""MACE package — configuration, energy/force potentials, checkpoints.
 
 Public construction is a product over its typed spec::
 
@@ -9,7 +9,8 @@ Public construction is a product over its typed spec::
 
 Every default lives on the spec. Official archives are read and remapped by
 ``MaceXX.load``; weights must already be the official cuEq-converted ones —
-nothing here converts the upstream basis.
+nothing here converts the upstream basis. The encoder and its blocks are
+:mod:`molrep.encoders.mace`.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -17,7 +18,6 @@ Reference:
     https://arxiv.org/abs/2206.07697
 """
 
-from molzoo.mace.encoder import MACEEncoder
 from molzoo.mace.polar import MacePolar
 from molzoo.mace.potential import MaceLes, MaceMatpes, MaceOff, MaceOmol, MacePotential
 from molzoo.mace.spec import (
@@ -31,7 +31,6 @@ from molzoo.mace.spec import (
 )
 
 __all__ = [
-    "MACEEncoder",
     "MACELesSpec",
     "MACEMatpesSpec",
     "MACEOMolSpec",

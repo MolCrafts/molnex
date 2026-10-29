@@ -427,6 +427,10 @@ class MoleculePadder:
                 # padded (dead by construction), else nominally to graph 0;
                 # their energy is masked to 0 either way.
                 pad = pad + sink
+            elif k == "equi_index":
+                # Each ghost is its own equivalence class: a ghost that pointed
+                # at row 0 would be averaged into a real atom's features.
+                pad = torch.arange(n, self.max_atoms, dtype=t.dtype, device=t.device)
             # "pos" and atom targets (e.g. forces) pad to 0.
             new_atoms[k] = torch.cat([t, pad], dim=0)
         mask = torch.zeros(self.max_atoms, dtype=torch.bool, device=dev)

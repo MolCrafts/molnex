@@ -17,7 +17,7 @@ from molpot import Polarization
 from molpot.composition import Sonata, SonataSpec
 from molpot.heads import EdgeEnergyHead, PermMultipoleHeadSpec
 from molpot.potentials import EwaldMultipoleEnergySpec
-from molzoo.allegro import AllegroEncoder
+from molrep.encoders.allegro import AllegroEncoder
 from tests.test_molpot.test_composition.conftest import (
     AVG_NUM_NEIGHBORS,
     allegro_encoder,

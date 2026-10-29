@@ -4,7 +4,7 @@
 - ``sh_irreps_from_l_max``: the spherical-harmonic irreps ``"1x0e+1x1o+…"``.
 
 The tensor products themselves live with their owners:
-:class:`molzoo.mace.layers._CueqChannelwiseBlockMixin` (MACE),
+:class:`molrep.encoders.mace.layers._CueqChannelwiseBlockMixin` (MACE),
 :class:`molzoo.allegro.layers.Contracter` (Allegro).
 """
 

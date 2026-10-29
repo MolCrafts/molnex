@@ -205,7 +205,7 @@ class NequipPackage(OfficialArchive):
         norm_const = float(norm[0])
 
         type_names = str(metadata["type_names"]).split()
-        atomic_numbers = [Element(name).number for name in type_names]
+        atomic_numbers = [Element.by_symbol(name).z for name in type_names]
         scale_shift = modules["per_type_energy_scale_shift"]
 
         def table(values: torch.Tensor, present: bool) -> list[float] | None:

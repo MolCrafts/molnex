@@ -456,3 +456,12 @@ class TestHessianPairsCap:
         )
         assert padder.max_hessian_pairs >= 140
         assert padder.caps()["hessian_pairs"] == padder.max_hessian_pairs
+
+
+def test_execute_makes_every_ghost_its_own_equivalence_class():
+    """A ghost that pointed at row 0 would be averaged into a real atom's features."""
+    b, n, e = _batch()
+    b["atoms", "equi_index"] = torch.tensor([0, 1, 2, 3, 4, 5, 6])
+    out = MoleculePadder(max_atoms=n + 5, max_pairs=e + 4, cutoff=CUTOFF)(b)
+    classes = out["atoms", "equi_index"]
+    assert classes.tolist() == list(range(n + 5))

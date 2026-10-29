@@ -28,7 +28,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from molzoo.mace.layers import ElementLinear, OneHotLinear
+from molrep.encoders.mace.layers import ElementLinear, OneHotLinear
 from molzoo.mace.potential import MaceMatpes, MaceOmol
 from molzoo.mace.spec import (
     MACELesSpec,
@@ -184,9 +184,9 @@ def official_layout(model: torch.nn.Module, state: Mapping[str, Any]) -> dict[st
     :func:`molzoo.mace.checkpoint.one_hot_weight`, which exists only here:
     an official checkpoint is faked out of a model's own ``state_dict``, and
     the loader converts the flat layout back. Every
-    :class:`~molzoo.mace.layers.ElementLinear` weight ``(C, Σ u·w)`` goes to
+    :class:`~molrep.encoders.mace.layers.ElementLinear` weight ``(C, Σ u·w)`` goes to
     the product's one row of ``(u, C, w)`` blocks, every
-    :class:`~molzoo.mace.layers.OneHotLinear` weight ``(C, F)`` to
+    :class:`~molrep.encoders.mace.layers.OneHotLinear` weight ``(C, F)`` to
     ``(1, C·F)``. Keys stay the model's own; nothing else is touched.
 
     Args:

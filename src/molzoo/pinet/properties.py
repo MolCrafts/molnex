@@ -2,10 +2,10 @@
 
 :class:`PiNetDipole` (``molpot.heads.DipoleHead``) and
 :class:`PiNetPolarizability` (``molpot.heads.ChargeResponseHead``) subclass
-:class:`~molzoo.pinet.encoder.PiNetEncoder` exactly as
+:class:`~molrep.encoders.pinet.encoder.PiNetEncoder` exactly as
 :class:`~molzoo.pinet.potential.PiNetPotential` does, so each is one flat
 module. They pool the per-block tracks of
-:meth:`~molzoo.pinet.encoder.PiNetEncoder.layer_features` over the layer axis
+:meth:`~molrep.encoders.pinet.encoder.PiNetEncoder.layer_features` over the layer axis
 (``layer_reduction``) and write every head output as a batch column.
 
 Reference:
@@ -22,7 +22,7 @@ import torch
 from tensordict import TensorDict
 
 from molpot.heads import ChargeResponseHead, DipoleHead
-from molzoo.pinet.encoder import PiNetEncoder
+from molrep.encoders.pinet.encoder import PiNetEncoder
 from molzoo.pinet.spec import PiNetSpec
 
 

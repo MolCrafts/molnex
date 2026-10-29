@@ -22,13 +22,13 @@ this port does not model) — which each product states as the
 
 Two weights change **layout** at this boundary, not only name. cuEquivariance
 keeps every product's weight as one flat row ``(1, numel)``; the per-element
-maps of :mod:`molzoo.mace.layers` store theirs element-major, one row per
+maps of :mod:`molrep.encoders.mace.layers` store theirs element-major, one row per
 element, so a call gathers rows instead of transposing blocks.
 :func:`element_linear_weight` and :func:`one_hot_weight` are those
-conversions — pure functions of the flat tensor and the target module, which
-the module types declare as their ``upstream_weight``
-(:class:`molzoo.checkpoint.ConvertedWeight`) and the loader applies once,
-by type. Nothing downstream ever sees the flat layout.
+conversions — pure functions of the flat tensor and the target module,
+registered by type in :data:`MACE_CONVERSIONS`, which the loader applies once
+(``CheckpointRemap(conversions=...)``). Nothing downstream ever sees the flat
+layout.
 
 Reference:
     Batatia et al. "MACE: Higher Order Equivariant Message Passing Neural
@@ -40,12 +40,12 @@ Reference:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
+from torch import nn
 
-if TYPE_CHECKING:
-    from molzoo.mace.layers import ElementLinear, OneHotLinear
+from molrep.encoders.mace.layers import ElementLinear, OneHotLinear
 
 #: Substrings of checkpoint keys that carry nothing learned and that the
 #: modules rebuild from their irreps: cuEquivariance's symbolic graph
@@ -120,7 +120,7 @@ polar_keys: dict[str, str | None] = {
 
 
 def element_linear_weight(linear: ElementLinear, flat: torch.Tensor) -> torch.Tensor:
-    """``skip_tp``'s weight in :class:`~molzoo.mace.layers.ElementLinear`'s layout.
+    """``skip_tp``'s weight in :class:`~molrep.encoders.mace.layers.ElementLinear`'s layout.
 
     The fully connected product keeps one flat row, path by path, each path's
     block ``(u, C, w)``; the module keeps ``(C, Σ_p u_p·w_p)``, every path's
@@ -156,7 +156,7 @@ def element_linear_weight(linear: ElementLinear, flat: torch.Tensor) -> torch.Te
 
 
 def one_hot_weight(lookup: OneHotLinear, flat: torch.Tensor) -> torch.Tensor:
-    """The linear's weight in :class:`~molzoo.mace.layers.OneHotLinear`'s layout.
+    """The linear's weight in :class:`~molrep.encoders.mace.layers.OneHotLinear`'s layout.
 
     Args:
         lookup: The target module.
@@ -173,3 +173,12 @@ def one_hot_weight(lookup: OneHotLinear, flat: torch.Tensor) -> torch.Tensor:
     if tuple(flat.shape) != shape:
         raise ValueError(f"expected the linear's flat weight {shape}, got {tuple(flat.shape)}")
     return flat.reshape(lookup.num_elements, lookup.out_features)
+
+
+#: The MACE modules whose forward reads its ``weight`` in a layout the official
+#: checkpoint does not ship, with the function that converts upstream's layout
+#: (the ``conversions`` of :class:`molzoo.checkpoint.CheckpointRemap`).
+MACE_CONVERSIONS: dict[type[nn.Module], Callable[..., torch.Tensor]] = {
+    ElementLinear: element_linear_weight,
+    OneHotLinear: one_hot_weight,
+}

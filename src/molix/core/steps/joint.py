@@ -9,40 +9,35 @@ schedule over a nested batch keyed by objective name — what
 :class:`~molix.data.JointDataModule` yields.
 
 **The model is a protocol, not a class.** molix imports nothing from molzoo,
-so the step asks the model for three primitives and one attribute::
+so the step asks the model for two primitives and one attribute::
 
-    tables = model.tables(batch)                 # {namespace: {parameter: tensor}}
-    frame  = model.energy(batch, tables=None)    # writes graphs.energy (B,), returns batch
-    frame  = model.energy(batch, tables, styles=("bond:harmonic",))   # these styles only
-    blocks = model.partial_hessian(batch, tables=None)   # (P, 9) on hessian_pairs
-    model.derivative.wrt                         # the variables, e.g. ("atoms.pos",)
+    frame  = model.energy(batch)                              # graphs.energy (B,)
+    frame  = model.energy(batch, styles=("bond:harmonic",))   # these styles only
+    frame  = model.energy(batch, trainable=("bonds.k",))      # other columns detached
+    frame  = model.tables(batch, trainable=("atoms.charge",)) # the columns, no energy
+    blocks = model.partial_hessian(batch)                     # (P, 9) on hessian_pairs
+    model.derivative.wrt                                      # e.g. ("atoms.pos",)
 
 ``styles=`` is asked for only by an objective that names some
 (:attr:`JointObjective.styles`, :attr:`JointObjective.nonbonded`); a model that
-prices every style on every call need not accept it.
+prices every style on every call need not accept it. ``trainable=`` names the
+predicted columns that keep a gradient.
 
-**One forward per source.** ByteFF draws one batch per dataset and scores
-every loss of that dataset on it (``trainer.py``, ``train_epoch``). Objectives
-that name the same :attr:`JointObjective.source` read the same sub-batch, and
-the model's ``tables`` — the encoder and every head — run **once** for it;
-each objective then keeps its own trainable subset (:meth:`JointTrainStep.keep`,
-detached views, no second forward) and prices its own primitive. Four Hessian
-objectives on one source cost one encoder pass instead of four, and the
-``nonbonded`` force reuses the same tables detached instead of a fifth; the
-small tier's step used to hold five encoder graphs for one batch of data and
-the large tier could not hold one step at all.
+**One batch per source.** ByteFF draws one batch per dataset and scores every
+loss of that dataset on it. Objectives that name the same
+:attr:`JointObjective.source` read that sub-batch. Each objective calls
+``energy`` / ``partial_hessian`` with its own ``styles`` and ``trainable``:
+``trainable`` detaches the predicted columns the loss does not name, inside
+the call. The model does not know an objective exists. A loss sees predictions
+and labels on the same sub-batch. An objective that supervises a predicted
+column itself (the MBIS charges) declares ``output="tables"``: ``model.tables``
+writes the columns and no energy, so the label — or its absence, on a source
+that has none — is untouched and no ``energy_pred`` is published.
 
-**Where "which loss trains which table" lives.** Between the heads and the
-energy: :meth:`JointTrainStep.keep` detaches every predicted table the
-objective does not name, and the objective hands the kept tables to
-``energy`` / ``partial_hessian`` (``Derivative`` passes them through to the
-energy as keyword arguments). It cannot sit in the loss — by then the tables
-have become an energy — and the model does not know an objective exists. A
-loss sees predictions and labels on the same sub-batch, which is how
-:class:`~molix.core.losses.BoltzmannProfileLoss` and friends already read
-``pred_key`` columns. An objective that supervises a predicted table itself
-(the MBIS charges) declares ``output="tables"``: the kept tables are written
-onto the batch and no energy is priced.
+**The compiled body is straight-line code.** Which primitive an objective runs
+is chosen once, when the step is built (:meth:`_JointBodies._scorer`): every
+objective gets its own scorer, and a source's body calls its scorers in order —
+no ``if``, no ``try`` on the path every step takes.
 
 **Two uses of a partial energy**, both ByteFF's. An objective with
 :attr:`~JointObjective.styles` prices only those — ``Bond_Energy`` /
@@ -104,7 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = ["NONBONDED_FORCES_KEY", "JointEvalStep", "JointObjective", "JointTrainStep"]
 
-#: Namespace → parameter name → tensor, as ``model.tables`` returns it.
+#: Namespace → parameter name → tensor. ``JointTrainStep.keep`` detaches columns.
 Tables = dict[str, dict[str, torch.Tensor]]
 Output = Literal["forward", "energy", "partial_hessian", "tables"]
 #: A source's traced region: ``(losses in objective order, sub_batch)``.
@@ -165,8 +160,9 @@ class JointObjective:
         output: Which model primitive the body runs — ``"forward"`` (energy and
             its derivatives through :class:`~molix.autograd.Derivative`),
             ``"energy"`` (the energy alone), ``"partial_hessian"``, or
-            ``"tables"`` (no energy: the kept tables are written onto the
-            batch for a loss that reads a predicted table itself).
+            ``"tables"`` (``model.tables``: the kept tables are written onto
+            the batch, no energy, for a loss that reads a predicted table
+            itself).
         styles: The styles the energy sums, as the model's force field names
             them (``("bond:harmonic", "angle:harmonic")``); ``None`` prices
             every style. For ``"forward"`` and ``"energy"`` — the partial
@@ -300,6 +296,22 @@ class _JointBodies:
         self.traced_bodies: dict[str, Body] = {
             source: self._source_body(source, group) for source, group in self.sources.items()
         }
+        # The eager prologue's work per source, fixed here: the "forward"
+        # objectives whose ops it builds, those that also write a nonbonded
+        # force aside, and whether the position leaf is marked (``(None,)`` once,
+        # ``()`` never) — loops over constants, so the prologue branches nowhere.
+        self._forward_objectives = {
+            source: tuple(o for o in group if o.output == "forward")
+            for source, group in self.sources.items()
+        }
+        self._aside_objectives = {
+            source: tuple(o for o in group if o.output == "forward" and o.nonbonded is not None)
+            for source, group in self.sources.items()
+        }
+        self._marks = {
+            source: (None,) if any(o.output in _DIFFERENTIATING for o in group) else ()
+            for source, group in self.sources.items()
+        }
         # One Derivative op per "forward" objective, built in the eager prologue
         # the first time it is needed and reused; keyed by name, holding the
         # model it closes over so a swapped model can never be served a stale op.
@@ -319,7 +331,7 @@ class _JointBodies:
         keys, so it traces inside a body.
 
         Args:
-            tables: Namespace → parameter → tensor, as ``model.tables`` returns.
+            tables: Namespace → parameter → tensor.
             trainable: ``"<ns>.<name>"`` / ``"<ns>"`` entries, or ``None``.
 
         Returns:
@@ -361,22 +373,20 @@ class _JointBodies:
     def _derivative(self, objective: JointObjective, model: Any) -> Derivative:
         """The energy-and-derivatives op of a ``"forward"`` objective over *model*.
 
-        ``Derivative`` over ``model.energy(frame, tables=tables)`` with the
-        model's own variables — the tables arrive as the op's keyword argument,
-        predicted once per source by the body and kept per objective. Built
-        once per objective and reused — a parameterless module, so building it
-        lazily costs nothing. Called in the eager prologue (construction) and
-        in the body (a cache hit).
+        ``Derivative`` over ``model.energy(frame)``. ``styles`` and
+        ``trainable`` are this objective's, closed over. Built once per
+        objective and reused — a parameterless module, so building it lazily
+        costs nothing. Called in the eager prologue; the body reads the op the
+        prologue cached.
         """
         cached = self._derivatives.get(objective.name)
         if cached is not None and cached[0] is model:
             return cached[1]
         styles = objective.styles
+        trainable = objective.trainable
 
-        def energy(frame: Any, *, tables: Tables) -> Any:
-            if styles is None:
-                return model.energy(frame, tables=tables)
-            return model.energy(frame, tables=tables, styles=styles)
+        def energy(frame: Any) -> Any:
+            return model.energy(frame, styles=styles, trainable=trainable)
 
         # The step puts the force beside its label, whatever the model's own op does.
         wrt = model.derivative.wrt
@@ -388,98 +398,135 @@ class _JointBodies:
     def _nonbonded_derivative(self, objective: JointObjective, model: Any) -> Derivative:
         """The force of ``objective.nonbonded`` alone, written to :data:`NONBONDED_FORCES_KEY`.
 
-        The body hands it the source's tables with every one detached
-        (``keep(..., ())``): the geometry is the only variable, and the op runs
-        under ``no_grad`` so the force comes out detached and the energy graph
-        is not kept. Positions only — a clash is a question about
-        ``atoms.pos``, whatever else the model's own op differentiates against.
+        The op runs under ``no_grad`` so the force comes out detached and the
+        energy graph is not kept. Positions only — a clash is a question about
+        ``atoms.pos``, whatever else the model's own op differentiates against —
+        and on every predicted table detached (``trainable=()``): the force of
+        those styles at fixed parameters, not through the parameters' own
+        dependence on the geometry.
         """
         cached = self._nonbonded.get(objective.name)
         if cached is not None and cached[0] is model:
             return cached[1]
         styles = objective.nonbonded
 
-        def energy(frame: Any, *, tables: Tables) -> Any:
-            return model.energy(frame, tables=tables, styles=styles)
+        def energy(frame: Any) -> Any:
+            return model.energy(frame, styles=styles, trainable=())
 
         op = Derivative(energy, wrt=(POS_KEY,), outputs=(NONBONDED_FORCES_KEY,))
         self._nonbonded[objective.name] = (model, op)
         return op
 
     def _source_body(self, source: str, objectives: tuple[JointObjective, ...]) -> Body:
-        """The traced region of one source: ``tables`` once, then each objective.
+        """The traced region of one source: each objective, in declaration order.
 
         Resolves the model from ``trainer`` at call time (the step is built
-        before the trainer), predicts the tables once for the sub-batch, and
-        scores every objective of the source on them in declaration order —
-        a static Python loop over a tuple fixed at construction. Returns
-        ``(losses, sub_batch)`` with the predictions written beside the labels.
+        before the trainer). A static Python loop over a tuple fixed at
+        construction. Returns ``(losses, sub_batch)`` with the predictions
+        written beside the labels.
         """
+
+        scorers = tuple(self._scorer(objective) for objective in objectives)
 
         def source_body(
             trainer: Trainer, state: TrainState, sub: Any
         ) -> tuple[tuple[torch.Tensor, ...], Any]:
             del state
             model = self._model(trainer)
-            tables = model.tables(sub)
-            losses: list[torch.Tensor] = []
-            for objective in objectives:
-                losses.append(self._score(objective, model, sub, tables))
-            return tuple(losses), sub
+            return tuple(score(model, sub) for score in scorers), sub
 
         return _own_code(source_body, source)
 
-    def _score(self, objective: JointObjective, model: Any, sub: Any, tables: Tables) -> Any:
-        """One objective on its source's tables: keep, primitive, predictions, loss.
+    def _scorer(self, objective: JointObjective) -> Callable[[Any, Any], torch.Tensor]:
+        """The objective's primitive, then its loss — chosen once, at construction.
 
-        Straight-line code on constants of the objective (its output kind, its
-        styles), so it inlines into the source's region. Every write lands on
-        *sub* beside the labels, which stay the labels.
+        Each scorer is straight-line code on constants of the objective (its
+        styles, its trainable tables) and takes ``(model, sub)``; it inlines into
+        the source's compiled region. Every write lands on *sub* beside the
+        labels, which stay the labels. The ``"forward"`` ops are the eager
+        prologue's, built before the body runs (:meth:`source_losses`).
         """
-        kept = self.keep(tables, objective.trainable)
-        if objective.output == "forward":
-            op = self._derivative(objective, model)
-            aside = (
-                None
-                if objective.nonbonded is None
-                else self._nonbonded_derivative(objective, model)
-            )
+        kind = (
+            "forward_aside"
+            if objective.output == "forward" and objective.nonbonded is not None
+            else objective.output
+        )
+        build = {
+            "forward": self._score_forward,
+            "forward_aside": self._score_forward_aside,
+            "energy": self._score_energy,
+            "tables": self._score_tables,
+            "partial_hessian": self._score_partial_hessian,
+        }[kind]
+        return build(objective)
 
-            def priced() -> Any:
-                if aside is not None:
-                    # Grad off at entry: the op's one ``autograd.grad`` consumes
-                    # the graph and the force lands detached; the full forward
-                    # below overwrites the energy it wrote. The tables are the
-                    # source's, every one detached.
-                    with torch.no_grad():
-                        aside(sub, tables=self.keep(tables, ()))
-                return op(sub, tables=kept)
+    def _score_forward(self, objective: JointObjective) -> Callable[[Any, Any], torch.Tensor]:
+        name = objective.name
 
+        def score(model: Any, sub: Any) -> torch.Tensor:
+            op = self._derivatives[name][1]
             # The force lands beside its label (the op's output key); the
-            # energy is moved beside its own once both forwards have run.
-            beside_labels(sub, {ENERGY_KEY: ENERGY_PRED_KEY}, priced)
+            # energy is moved beside its own.
+            beside_labels(sub, {ENERGY_KEY: ENERGY_PRED_KEY}, lambda: op(sub))
             return objective.loss(sub, sub)
-        if objective.output == "energy":
-            styles = objective.styles
+
+        return score
+
+    def _score_forward_aside(self, objective: JointObjective) -> Callable[[Any, Any], torch.Tensor]:
+        name = objective.name
+
+        def score(model: Any, sub: Any) -> torch.Tensor:
+            op = self._derivatives[name][1]
+            aside = self._nonbonded[name][1]
 
             def priced() -> Any:
-                if styles is None:
-                    return model.energy(sub, tables=kept)
-                return model.energy(sub, tables=kept, styles=styles)
+                # Grad off at entry: the op's one ``autograd.grad`` consumes the
+                # graph and the force lands detached; the full forward below
+                # overwrites the energy it wrote.
+                with torch.no_grad():
+                    aside(sub)
+                return op(sub)
 
             beside_labels(sub, {ENERGY_KEY: ENERGY_PRED_KEY}, priced)
             return objective.loss(sub, sub)
-        if objective.output == "tables":
-            # No energy: the kept tables become columns of the namespaces the
-            # batch carries, as ``energy`` would have written them, and the
-            # loss reads the one it supervises.
-            for namespace, table in kept.items():
-                if namespace in sub.keys():
-                    for name, value in table.items():
-                        sub[namespace, name] = value
+
+        return score
+
+    def _score_energy(self, objective: JointObjective) -> Callable[[Any, Any], torch.Tensor]:
+        styles, trainable = objective.styles, objective.trainable
+
+        def score(model: Any, sub: Any) -> torch.Tensor:
+            beside_labels(
+                sub,
+                {ENERGY_KEY: ENERGY_PRED_KEY},
+                lambda: model.energy(sub, styles=styles, trainable=trainable),
+            )
             return objective.loss(sub, sub)
-        sub[HESSIAN_KEY] = model.partial_hessian(sub, tables=kept)
-        return objective.loss(sub, sub)
+
+        return score
+
+    def _score_tables(self, objective: JointObjective) -> Callable[[Any, Any], torch.Tensor]:
+        trainable = objective.trainable
+
+        def score(model: Any, sub: Any) -> torch.Tensor:
+            # The parameter columns only: no energy is written, so the label
+            # (or its absence) is untouched and the batch leaves with the
+            # columns it came with plus the tables.
+            model.tables(sub, trainable=trainable)
+            return objective.loss(sub, sub)
+
+        return score
+
+    def _score_partial_hessian(
+        self, objective: JointObjective
+    ) -> Callable[[Any, Any], torch.Tensor]:
+        trainable = objective.trainable
+
+        def score(model: Any, sub: Any) -> torch.Tensor:
+            sub[HESSIAN_KEY] = model.partial_hessian(sub, trainable=trainable)
+            return objective.loss(sub, sub)
+
+        return score
 
     # ------------------------------------------------------------------
     # the schedule
@@ -543,15 +590,11 @@ class _JointBodies:
             The unweighted loss of every objective of *source*.
         """
         model = self._model(trainer)
-        objectives = self.sources[source]
-        differentiates = False
-        for objective in objectives:
-            if objective.output == "forward":
-                self._derivative(objective, model)
-                if objective.nonbonded is not None:
-                    self._nonbonded_derivative(objective, model)
-            differentiates = differentiates or objective.output in _DIFFERENTIATING
-        if differentiates:
+        for objective in self._forward_objectives[source]:
+            self._derivative(objective, model)
+        for objective in self._aside_objectives[source]:
+            self._nonbonded_derivative(objective, model)
+        for _ in self._marks[source]:
             model.derivative.mark_leaves(sub)
         losses, _ = self.traced_bodies[source](trainer, state, sub)
         return losses

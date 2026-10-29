@@ -12,7 +12,7 @@ from .angular import SphericalHarmonics
 from .covalent import covalent_radii
 from .cutoff import CosineCutoff, HalfCosineCutoff, PolynomialCutoff, TanhCutoff
 from .geometry import edge_lengths, edge_vectors
-from .mlp import FFLayer, MomentNormalizedMLP, ScalarMLPFunction, normalize2mom
+from .mlp import DenseMLP, FFLayer, MomentNormalizedMLP, ScalarMLPFunction, normalize2mom
 from .node import JointEmbedding
 from .radial import (
     AgnesiTransform,
@@ -30,6 +30,7 @@ __all__ = [
     "covalent_radii",
     "edge_lengths",
     "edge_vectors",
+    "DenseMLP",
     "FFLayer",
     "MomentNormalizedMLP",
     "normalize2mom",

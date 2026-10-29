@@ -27,7 +27,7 @@ from tensordict import TensorDict
 from molpot.composition import Sonata, SonataSpec
 from molpot.heads import PermMultipoleHeadSpec
 from molpot.potentials import EwaldMultipoleEnergySpec
-from molzoo.allegro import AllegroEncoder, AllegroSpec
+from molrep.encoders.allegro import AllegroEncoder, AllegroEncoderSpec
 
 #: Edge length (Å) of the cubic cell of every periodic sample in this suite.
 CELL_LENGTH = 10.0
@@ -42,7 +42,7 @@ def allegro_encoder(
     """A small Allegro body, seeded, exposing its tensor track by default."""
     torch.manual_seed(0)
     return AllegroEncoder(
-        AllegroSpec(
+        AllegroEncoderSpec(
             atomic_numbers=[1, 6, 7, 8],
             num_scalar_features=16,
             num_tensor_features=4,

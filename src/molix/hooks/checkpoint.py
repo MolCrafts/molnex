@@ -43,8 +43,6 @@ class CheckpointHook(BaseHook):
         best_metric_name: Path into ``state`` to track for ``save_best``.
             Default ``("eval", "loss")``.
         best_metric_mode: ``"min"`` (smaller = better) or ``"max"``.
-        register_artifacts: Register each written checkpoint via
-            ``trainer.ctx.save_artifact`` (if present).
     """
 
     _MINUS_INF = float("-inf")
@@ -58,7 +56,6 @@ class CheckpointHook(BaseHook):
         save_best: bool = False,
         best_metric_name: Path = ("eval", "loss"),
         best_metric_mode: str = "min",
-        register_artifacts: bool = False,
     ):
         import os
 
@@ -76,7 +73,6 @@ class CheckpointHook(BaseHook):
         self.save_best = save_best
         self.best_metric_name = best_metric_name
         self.best_metric_mode = best_metric_mode
-        self.register_artifacts = register_artifacts
 
         self._best_value: float | None = None
         self._last_announced: tuple[str, int] | None = None
@@ -91,11 +87,19 @@ class CheckpointHook(BaseHook):
         possibly-worse model.
         """
         self.os.makedirs(self.checkpoint_dir, exist_ok=True)
-        ckpt = getattr(trainer, "_checkpoint", None)
-        if ckpt is not None:
-            ckpt.best_metric_name = self.best_metric_name
-            if self._best_value is None and ckpt.best_metric is not None:
-                self._best_value = float(ckpt.best_metric)
+        trainer._checkpoint.best_metric_name = self.best_metric_name
+        self._seed_best(trainer)
+
+    def _seed_best(self, trainer) -> None:
+        """Take the restored checkpoint's ``best_metric`` as the best so far, once.
+
+        Also called before the first best-selection, because an evaluation can
+        run ahead of the train loop (a resumed run's baseline eval) — without it
+        that eval is always an "improvement" and overwrites ``best.pt``.
+        """
+        best = trainer._checkpoint.best_metric
+        if self._best_value is None and best is not None:
+            self._best_value = float(best)
 
     def on_train_batch_end(self, trainer, state, batch, outputs):
         """Write step-indexed periodic snapshot.
@@ -148,32 +152,21 @@ class CheckpointHook(BaseHook):
         if raw is None:
             return
         value = float(raw)
+        self._seed_best(trainer)
         if not self._is_improvement(value):
             return
         self._best_value = value
-        ckpt = getattr(trainer, "_checkpoint", None)
-        if ckpt is not None:
-            ckpt.best_metric = value
+        trainer._checkpoint.best_metric = value
         self._save_checkpoint(trainer, state, "best.pt")
 
     def _build_state_dict(self, trainer, state) -> dict:
         """Produce the complete resume-ready state dict."""
-        ckpt = getattr(trainer, "_checkpoint", None)
-        if ckpt is not None:
-            ckpt.epoch = int(state.epoch)
-            ckpt.global_step = int(state.global_step)
-            if self.save_best and self._best_value is not None:
-                ckpt.best_metric = self._best_value
-            return ckpt.state_dict()
-        sd: dict = {
-            "epoch": int(state.epoch),
-            "global_step": int(state.global_step),
-        }
-        if trainer.model is not None:
-            sd["model_state_dict"] = trainer.model.state_dict()
-        if trainer.optimizer is not None:
-            sd["optimizer_state_dict"] = trainer.optimizer.state_dict()
-        return sd
+        ckpt = trainer._checkpoint
+        ckpt.epoch = int(state.epoch)
+        ckpt.global_step = int(state.global_step)
+        if self.save_best and self._best_value is not None:
+            ckpt.best_metric = self._best_value
+        return ckpt.state_dict()
 
     def _rewrite_checkpoint(self, trainer, state, filename):
         """Overwrite ``filename`` with the current state — no announce, no dedupe.
@@ -225,16 +218,3 @@ class CheckpointHook(BaseHook):
             prefix = f"─── {message} "
             pad = max(3, width - len(prefix))
             print(prefix + "─" * pad, flush=True)
-
-        if self.register_artifacts and hasattr(trainer, "ctx"):
-            ctx = trainer.ctx
-            if ctx:
-                from pathlib import Path as _PathLib
-
-                checkpoint_path = _PathLib(filepath)
-                if checkpoint_path.exists():
-                    ctx.save_artifact(
-                        name=f"checkpoint_{filename}",
-                        src=checkpoint_path,
-                    )
-                    logger.info(f"Registered checkpoint as artifact: {checkpoint_path}")

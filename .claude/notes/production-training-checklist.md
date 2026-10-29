@@ -40,6 +40,28 @@ hardware calibration, and a bounded smoke. Those must be re-established
 whenever the code, data, batching, precision or hardware changes — that rule is
 about *staleness of measurement*, not about version control.
 
+## 2026-10-29 — rondo-enc phase 2 (D1 / D2 / D1+D2+FT, member-01): GO
+
+Spec `rondo-enc-03-heads` §5. Evidence root (one timestamped dir):
+`workspaces/lab-new/runs/rondo-enc-phase2-20261029T1342Z/` — `calibration/`, `smoke/`,
+`signoff.json`, `runs/<RUN>/`. Scope (operator 2026-10-29): quick comparison, member-01
+only, 2 h per run; not a converged or ensembled fit.
+
+1. Data — THEMol mbis / torsion-scan / hessian-relax / hessian HDF5 shard-000 through
+   MolHub on molpy 0.20; column parity 2998/3000 vs the ByteFF oracle (phase 1); split by
+   molecule (95/5); units from the manifests; censuses exclude bond-stretch and
+   GAFF2-untyped rows (logged per source).
+2. Reference vs packed — gate 2 passes every run, CPU fp64 and GH200 (4607781).
+3. Frozen is frozen — encoder + bonded fingerprints bit-identical in every run so far.
+4. Overfit — gate 4 passes (D1, D2, D1+D2+FT with r0/θ0 open).
+5. Calibration — warm-cache sweep 4610664 (16k–262k atoms/source); capacity 32 768;
+   per-run cells 4614016 (D1 0.20 s, D2 0.23 s, D1+D2+FT 0.28 s per step, ≤ 6.7 GiB).
+6. Smoke — 4614017: 200 steps, fresh-process resume at step 200 to 300, eval reports,
+   scores fall after warmup, frozen unchanged. Found and fixed a resume that silently
+   restarted at step 0 (Trainer / CheckpointHook, spec 03).
+7. `signoff.json` pins per run the configuration and per-source padded caps;
+   `phase2/heads.py` refuses a production run that does not match it.
+
 ## 2026-10-11 — Rondo joint training (ByteFF realignment): what is verified, what is not
 
 The sequential six-stage curriculum this checklist was last signed against no

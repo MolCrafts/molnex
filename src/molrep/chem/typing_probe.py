@@ -1,4 +1,4 @@
-"""Eval-only GAFF atom-type readout on continuous ChemEncoder embeddings.
+"""Eval-only GAFF atom-type readout on a message-passing encoder's atom features.
 
 Hard isolation rules
 --------------------
@@ -18,17 +18,17 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
-from molrep.chem.encoder import ChemEncoder
+from molrep.encoders.message_passing import MessagePassingEncoder
 from molrep.heads.type import TypeHead
 
 __all__ = ["AtomTypeReadout"]
 
 
 class AtomTypeReadout(nn.Module):
-    """Compose :class:`ChemEncoder` + :class:`TypeHead` for typing recovery.
+    """Compose :class:`MessagePassingEncoder` + :class:`TypeHead` for typing recovery.
 
     Args:
-        encoder: Continuous chemical perception encoder.
+        encoder: The encoder whose atom features are probed.
         num_types: Discrete type vocabulary size.
         dropout: TypeHead dropout.
         dtype: Floating dtype the head is built at (the encoder's).
@@ -36,7 +36,7 @@ class AtomTypeReadout(nn.Module):
 
     def __init__(
         self,
-        encoder: ChemEncoder,
+        encoder: MessagePassingEncoder,
         *,
         num_types: int,
         dropout: float = 0.0,
@@ -45,7 +45,7 @@ class AtomTypeReadout(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.head = TypeHead(
-            hidden_dim=int(encoder.atom_dim),
+            hidden_dim=encoder.spec.atom_dim,
             num_types=num_types,
             dropout=dropout,
             dtype=dtype,
@@ -57,19 +57,14 @@ class AtomTypeReadout(nn.Module):
         return int(self.head.hidden_dim)
 
     def encode(self, batch: TensorDict) -> torch.Tensor:
-        """Run encoder and return atom chem features ``(N, D)``.
+        """Run the encoder and return its atom features ``(N, D)``.
 
         Labels under ``atoms.atom_type`` / ``atom_type_id`` are **ignored**.
         """
-        out = self.encoder(batch)
-        feats = out["atoms", "chem_features"]
-        return feats
+        return self.encoder(batch).atom
 
     def forward(self, batch: TensorDict) -> TensorDict:
         """Write type logits and argmax ids onto ``atoms`` and return ``batch``.
-
-        The encoder has already written ``atoms.chem_features``. This does not
-        copy them.
 
         Args:
             batch: Nested TensorDict with atoms.Z and topology.

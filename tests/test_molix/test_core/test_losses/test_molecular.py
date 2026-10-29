@@ -1480,6 +1480,20 @@ class TestMeanTermEnergyLoss:
         )
         torch.testing.assert_close(MeanTermEnergyLoss()(batch, batch), torch.tensor(3.0 / 4.0))
 
+    def test_an_unpadded_bonds_block_counts_its_bond_index_columns(self) -> None:
+        # Collated without a padder: ``bonds`` carries ``bond_index (2, N)`` and no row axis.
+        batch = TensorDict(
+            {
+                "graphs": TensorDict({"energy_pred": torch.tensor([6.0])}, batch_size=[1]),
+                "bonds": TensorDict(
+                    {"bond_index": torch.tensor([[0, 1], [1, 2]])}, batch_size=[]
+                ),
+                "angles": TensorDict({"k": torch.zeros(1)}, batch_size=[1]),
+            },
+            batch_size=[],
+        )
+        torch.testing.assert_close(MeanTermEnergyLoss()(batch, batch), torch.tensor(2.0))
+
     def test_without_masks_every_row_counts(self) -> None:
         batch = TensorDict(
             {

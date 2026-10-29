@@ -58,7 +58,7 @@ def test_doctor_run_covers_all_checks() -> None:
         "PyTorch",
         "CUDA",
         "Native ops",
-        "cuEquivariance",
+        "Equivariance ops",
         "GPU telemetry",
         "Core deps",
     }
@@ -67,7 +67,7 @@ def test_doctor_run_covers_all_checks() -> None:
 def test_core_invariants_pass_in_this_env() -> None:
     by_name = {r.name: r for r in Doctor().run()}
     # The test venv has Python, torch, native ops and core deps installed.
-    for name in ("Python", "PyTorch", "Native ops", "cuEquivariance", "Core deps"):
+    for name in ("Python", "PyTorch", "Native ops", "Equivariance ops", "Core deps"):
         assert by_name[name].status is Status.OK, by_name[name]
 
 

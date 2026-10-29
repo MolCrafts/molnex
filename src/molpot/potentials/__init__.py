@@ -25,7 +25,7 @@ from molpot.potentials.elec import (
     EwaldMultipoleEnergy,
     EwaldMultipoleEnergySpec,
 )
-from molpot.potentials.improper import ImproperCvff
+from molpot.potentials.improper import ImproperCvff, ImproperPeriodic
 from molpot.potentials.mixing import geometric_arithmetic_mixing
 from molpot.potentials.nonbonded import (
     ChargeTransfer,
@@ -59,6 +59,7 @@ __all__ = [
     "DihedralPeriodic",
     "DihedralOpls",
     "ImproperCvff",
+    "ImproperPeriodic",
     "LJCut",
     "PairCoulCut",
     "EwaldMultipoleEnergy",

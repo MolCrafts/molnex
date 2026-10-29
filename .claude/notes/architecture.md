@@ -21,7 +21,7 @@ Homonyms (qualify in specs): `NeighborList` (`molix.neighbor` vs `molix.md.neigh
 - `src/molix/config.py` — `MolnexConfig` / `config` singleton; `config["ftype"]` is the compute-dtype home; `set_precision` presets `fp32` / `fp64` / `fp16-mixed` / `bf16-mixed`.
 - `src/molix/schema.py` — post-collate keys (`ENERGY_KEY`, `ATOMIC_ENERGY_KEY`, `ATOMIC_ENERGY_FLAT_KEY`, `FORCES_KEY`, `VIRIAL_KEY`, `STRAIN_KEY`, `POS_KEY`, `VEL_KEY`, `MASS_KEY`), `PAIR_DIST_CLAMP_MIN`, `dead_pair_length` / `dead_pair_shift`, `has_energy` / `has_forces` / `has_virial`, `CellBound` protocol (declared here so molpot implementers need not import `molix.md`).
 - `src/molix/units.py` — shared `molpy.UnitSystem` as `units`; `MD_ENERGY`; `DEAD_PAIR_CUTOFF_FACTOR` (10.0); `preset_energy_to_md` / `preset_energy_ratio`.
-- `src/molix/compile.py` — `Compiler`, `ExplainSummary`, `register_inductor_fallbacks` (`aten.index_add` extern).
+- `src/molix/compile.py` — `Compiler`, `ExplainSummary` (`donated_buffer` off by default; the `index_add` fallback was removed 2026-10-29).
 - `src/molix/export/` — one module per package format; `aoti.py`: `package` (`torch.export.export` then `aoti_compile_and_package`, returns the `.pt2` path and the non-ATen op namespaces), `load`, `custom_op_namespaces`. Engine- and model-agnostic.
 - `src/molix/quant.py` — fake-quant infrastructure (`QuantScheme` family, `FakeQuantize`, `Quantizer`, `ForceDelta`, `EffectiveTemperature`); orthogonal to `set_precision`.
 - `src/molix/logger.py` / `src/molix/logging.py` — mollog-backed stdlib façade.
@@ -88,7 +88,7 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 *(verbatim `__all__` where present; `—` = no `__all__`. Extra importable-but-undeclared names noted.)*
 
 **molix**
-- `molix`: `Checkpoint`, `CheckpointBackend`, `Compiler`, `Derivative`, `ExplainSummary`, `Exporter`, `JournalHook`, `MAELoss`, `MSELoss`, `ProfilerHook`, `Stage`, `StepResult`, `TorchSaveBackend`, `TrainState`, `Trainer`, `WeightedLoss`, `config`, `logger`, `logging`, `register_inductor_fallbacks`
+- `molix`: `Checkpoint`, `CheckpointBackend`, `Compiler`, `Derivative`, `ExplainSummary`, `Exporter`, `JournalHook`, `MAELoss`, `MSELoss`, `ProfilerHook`, `Stage`, `StepResult`, `TorchSaveBackend`, `TrainState`, `Trainer`, `WeightedLoss`, `config`, `logger`, `logging`
 - `molix.autograd`: `Derivative`, `Potential`, `leaf`, `symmetrize_strain_grad`
 - `molix.data`: `BaseDataset`, `BatchSamplerSource`, `BatchTask`, `DataMixture`, `DataModule`, `DataModuleProtocol`, `EnergyResidual`, `FrameCollator`, `FrameDataset`, `MoleculeCollator`, `MoleculePadder`, `SubsetDataset`, `TaskMixtureBatchSampler`, `TokenBudgetBatchSampler`, `TokenBudgetPacker`, `TotalCharge`, `bond_index_from_columns`, `collate_molecules`, `group_split_indices`, `stack_angle_index`, `stack_improper_index`, `stack_proper_index`. Module-local extras: `collate.INDEX_KEYS` / `rebase`; `sampler.FrameLabelTable`.
 - `molix.frame`: `TensorFrame`, `as_tensor_frame`. `molix.neighbor`: `NeighborList`.
@@ -105,7 +105,7 @@ Out of `src/` (architecture counterpart, not a Python package in this inventory)
 - `molix.F`: `get_neighbor_pairs`, `pme_direct`, `pme_reciprocal`, `scatter_sum`, `batch_add`. Extra: `F.scatter.scatter_sum_compile_safe` (imported by `molzoo.mace.layers` and `molzoo.mace.potential`).
 - `molix.profiler`: `DataLoaderProfiler`, `DataLoaderResult`, `DatasetProfiler`, `DatasetResult`, `Hotspot`, `Measurement`, `Memory`, `MockBatch`, `MockModel`, `MockSource`, `ProfileSpec`, `ProfileSweep`, `Profiler`, `ProfilerConfig`, `Report`, `ReportSpec`, `TaskProfiler`, `TaskResult`, `Timing`, `TrainerProfiler`, `TrainerResult`, `mock_node_feature_loss`
 - `molix.cli`: `app`, `main`. Extra: `doctor.{Doctor,CheckResult,Status}`
-- `molix.compile`: `Compiler`, `ExplainSummary`, `register_inductor_fallbacks` (no `__all__`)
+- `molix.compile`: `Compiler`, `ExplainSummary` (no `__all__`)
 - `molix.export`: `aoti` (submodule: `package`, `load`, `custom_op_namespaces`, `Package`); nothing on `molix.__all__`
 - `molix.config`: `MolnexConfig`, singleton `config` (no `__all__`)
 - `molix.quant`: `QuantScheme`, `FP16Scheme`, `BF16Scheme`, `IntScheme`, `Int8Scheme`, `Int8PerChannelScheme`, `Int4Scheme`, `Int4PerChannelScheme`, `FakeQuantize`, `Quantizer`, `ForceDelta`, `EffectiveTemperature` (no `__all__`)

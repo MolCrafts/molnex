@@ -93,8 +93,15 @@ class TestLJCut:
         )
         torch.testing.assert_close(lj(batch), passed)
 
+    def test_a_field_without_special_bonds_is_refused(self):
+        ff = mp.ff.forcefield.ForceField(name="t", units="real")
+        style = ff.def_style("pair", "lj/cut", params={"cutoff": 10.0})
+        with pytest.raises(ValueError, match="declares no special_bonds"):
+            LJCut.from_style(style, forcefield=ff)
+
     def test_a_cross_row_is_refused(self):
         ff = mp.ff.forcefield.ForceField(name="t", units="real")
+        ff.set_special_bonds([0.0, 0.0, 0.5], [0.0, 0.0, 0.5])
         atoms = ff.def_style("atom", "full")
         a, b = atoms.def_type("a", mass=12.0), atoms.def_type("b", mass=1.0)
         style = ff.def_style("pair", "lj/cut", params={"cutoff": 10.0})

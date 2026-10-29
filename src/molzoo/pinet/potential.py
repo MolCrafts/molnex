@@ -1,7 +1,7 @@
 """PiNet2 energy model: the feature body plus PiNN's per-block energy readout.
 
 :class:`PiNetPotential` is a :class:`~molix.autograd.Potential` over the
-:class:`~molzoo.pinet.encoder.PiNetEncoder` body and registers its heads at
+:class:`~molrep.encoders.pinet.encoder.PiNetEncoder` body and registers its heads at
 the module root (``out_layers``, ``atomic_energies``), so its ``state_dict``
 is flat. It mirrors PiNN's ``pot_model`` over ``PiNet2``:
 
@@ -37,7 +37,7 @@ from molix.autograd import Derivative, Potential
 from molix.F.scatter import scatter_sum_compile_safe
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
 from molpot.heads.energy import AtomicReferenceEnergy
-from molzoo.pinet.encoder import PiNetEncoder
+from molrep.encoders.pinet.encoder import PiNetEncoder
 from molzoo.pinet.layers import OutLayer
 from molzoo.pinet.spec import PiNetSpec
 

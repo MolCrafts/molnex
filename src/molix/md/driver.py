@@ -63,7 +63,7 @@ from molix.schema import (
 )
 from molix.units import preset_energy_to_md, units
 
-_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
+_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").value
 
 
 class _TensorDictForce:

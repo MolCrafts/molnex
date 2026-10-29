@@ -11,7 +11,7 @@ Embeddings:
 
 Interactions (``molrep.interaction``):
   - irreps_from_l_max / sh_irreps_from_l_max: irreps-string helpers; the
-    message-passing blocks live with their model (``molzoo.mace.layers``)
+    message-passing blocks live with their model (``molrep.encoders.mace.layers``)
 
 Heads (``molrep.heads``):
   - ScalarHead: Pooling + MLP for scalar prediction

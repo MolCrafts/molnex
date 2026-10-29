@@ -132,13 +132,12 @@ class MolpySmartsMatcher:
         """Match ``pattern`` against a molpy molecule graph.
 
         Args:
-            mol: Object accepted by ``SmartsPattern.find_matches`` (typically
-                molpy ``Atomistic``).
+            mol: molpy ``Atomistic``.
             pattern: Symbolic pattern; ``pattern.pattern`` is compiled.
 
         Returns:
             LongTensor ``[arity, n_hits]``. Each column is the first
-            ``arity`` atom indices of a SMARTS embedding.
+            ``arity`` atoms of a SMARTS embedding, as rows of ``mol.atoms``.
 
         Raises:
             ValueError: A hit has fewer than ``arity`` atoms.
@@ -148,26 +147,17 @@ class MolpySmartsMatcher:
         if not raw_hits:
             return torch.empty((pattern.arity, 0), dtype=torch.long)
 
+        # A ``SmartsMatch`` names atom views; the index is the atom's row.
+        row_of = {atom: row for row, atom in enumerate(mol.atoms)}
         columns: list[list[int]] = []
         for hit in raw_hits:
-            atoms = _hit_atom_list(hit)
+            atoms = [row_of[atom] for atom in hit.atoms]
             if len(atoms) < pattern.arity:
                 raise ValueError(
                     f"SMARTS hit has {len(atoms)} atoms but pattern arity is "
                     f"{pattern.arity} ({pattern.pattern!r})"
                 )
-            columns.append([int(a) for a in atoms[: pattern.arity]])
+            columns.append(atoms[: pattern.arity])
 
         # Stack as [arity, K]
         return torch.tensor(columns, dtype=torch.long).T.contiguous()
-
-
-def _hit_atom_list(hit: Any) -> list[int]:
-    """Normalize a molpy/molrs SmartsMatch (or list) to atom indices."""
-    if isinstance(hit, (list, tuple)):
-        return [int(x) for x in hit]
-    if hasattr(hit, "as_list"):
-        return [int(x) for x in hit.as_list()]
-    if hasattr(hit, "atoms"):
-        return [int(x) for x in hit.atoms]
-    raise TypeError(f"unsupported SMARTS hit type: {type(hit)!r}")

@@ -1,7 +1,7 @@
 """The MACE products on the molnex potential contract.
 
 :class:`MacePotential` is :class:`molix.autograd.Potential` over
-:class:`~molzoo.mace.encoder.MACEEncoder`. It **inherits** the body rather than
+:class:`~molrep.encoders.mace.encoder.MACEEncoder`. It **inherits** the body rather than
 holding one — upstream's ``ScaleShiftMACE(MACE)`` shape — so the ``state_dict``
 keys stay flat and an official checkpoint loads onto the product. Which
 variant it is comes entirely from the spec it is built from; the products
@@ -84,10 +84,17 @@ from molpot.heads.rescale import GlobalRescale
 from molpot.potentials.elec.les import LatentEwaldEnergy
 from molpot.potentials.repulsion import ZBLRepulsion
 from molrep.embedding.geometry import edge_lengths, edge_vectors
+from molrep.encoders.mace.encoder import MACEEncoder
 from molrep.equivariance import Linear
 from molzoo.checkpoint import CheckpointRemap
-from molzoo.mace.checkpoint import MACE_SKIP, les_keys, matpes_keys, off_keys, omol_keys
-from molzoo.mace.encoder import MACEEncoder
+from molzoo.mace.checkpoint import (
+    MACE_CONVERSIONS,
+    MACE_SKIP,
+    les_keys,
+    matpes_keys,
+    off_keys,
+    omol_keys,
+)
 from molzoo.mace.heads import LinearReadout, NonLinearBiasReadout, NonLinearReadout
 from molzoo.mace.spec import (
     MACELesSpec,
@@ -290,7 +297,9 @@ class MacePotential(Potential, MACEEncoder):
             raise ValueError(
                 "checkpoint atomic_numbers disagree with the configuration element table"
             )
-        CheckpointRemap(keys, on_unexpected=on_unexpected, skip=MACE_SKIP).load(model, state)
+        CheckpointRemap(
+            keys, on_unexpected=on_unexpected, skip=MACE_SKIP, conversions=MACE_CONVERSIONS
+        ).load(model, state)
         return model
 
     # ----------------------------------------------------------------- energy

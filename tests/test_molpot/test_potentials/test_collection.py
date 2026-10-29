@@ -30,6 +30,17 @@ class TestPotentials:
         parts = [pots[key](batch, **PARAMS[key]) for key in pots]
         torch.testing.assert_close(pots(batch, PARAMS), parts[0] + parts[1])
 
+    def test_named_styles_price_only_those(self):
+        pots = Potentials({"bond:harmonic": BondHarmonic(), "angle:harmonic": AngleHarmonic()})
+        batch = chain_batch()
+        bond = pots["bond:harmonic"](batch, **PARAMS["bond:harmonic"])
+        torch.testing.assert_close(pots(batch, PARAMS, styles=("bond:harmonic",)), bond)
+
+    def test_a_named_style_it_does_not_hold_is_refused(self):
+        pots = Potentials({"bond:harmonic": BondHarmonic()})
+        with pytest.raises(ValueError, match="angle:harmonic"):
+            pots(chain_batch(), styles=("angle:harmonic",))
+
     def test_params_for_a_style_it_does_not_hold_are_refused(self):
         pots = Potentials({"bond:harmonic": BondHarmonic()})
         with pytest.raises(ValueError, match="angle:harmonic"):
@@ -89,6 +100,7 @@ class TestPotentialsCompile:
 
 def _forcefield() -> mp.ForceField:
     ff = mp.ff.forcefield.ForceField(name="t", units="real")
+    ff.set_special_bonds([0.0, 0.0, 0.5], [0.0, 0.0, 0.5])
     c = ff.def_style("atom", "full").def_type("c", mass=12.0)
     ff.def_style("bond", "harmonic").def_type("cc", c, c, k=300.0, r0=1.4)
     ff.def_style("angle", "harmonic")
@@ -97,7 +109,7 @@ def _forcefield() -> mp.ForceField:
 
 
 class TestFromForcefield:
-    """``Potentials.from_forcefield``: every declared style becomes its potential."""
+    """``from_forcefield`` returns one ``Potentials`` for the declared styles."""
 
     def test_every_declared_style_becomes_its_potential(self):
         pots = Potentials.from_forcefield(_forcefield())

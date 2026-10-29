@@ -5,7 +5,8 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
-from molrep.chem import AtomTypeReadout, ChemEncoder
+from molrep.chem import AtomTypeReadout
+from molrep.encoders.message_passing import MessagePassingEncoder, MessagePassingEncoderSpec
 
 #: Floating dtype every module under test is built at.
 DTYPE = torch.float32
@@ -15,19 +16,14 @@ def _batch(Z: list[int], bonds: list[tuple[int, int]] | None = None) -> TensorDi
     n = len(Z)
     atoms = TensorDict({"Z": torch.tensor(Z, dtype=torch.long)}, batch_size=[n])
     td = TensorDict({"atoms": atoms}, batch_size=[])
-    if bonds:
-        atomi = torch.tensor([a for a, _ in bonds], dtype=torch.long)
-        atomj = torch.tensor([b for _, b in bonds], dtype=torch.long)
-        td["bonds"] = TensorDict(
-            {"atomi": atomi, "atomj": atomj},
-            batch_size=[len(bonds)],
-        )
+    index = torch.tensor(bonds or [], dtype=torch.long).reshape(-1, 2).T.contiguous()
+    td["bonds"] = TensorDict({"bond_index": index}, batch_size=[])
     return td
 
 
 class TestAtomTypeReadout:
     def test_forward_shapes(self):
-        enc = ChemEncoder(atom_dim=8, bond_dim=4, dtype=DTYPE)
+        enc = MessagePassingEncoder(MessagePassingEncoderSpec(atom_dim=8, bond_dim=4), dtype=DTYPE)
         probe = AtomTypeReadout(enc, num_types=3, dtype=DTYPE)
         batch = _batch([6, 1], bonds=[(0, 1)])
         out = probe(batch)
@@ -35,7 +31,7 @@ class TestAtomTypeReadout:
         assert out["atoms", "pred_type_id"].shape == (2,)
 
     def test_labels_do_not_affect_encoder(self):
-        enc = ChemEncoder(atom_dim=8, bond_dim=4, dtype=DTYPE)
+        enc = MessagePassingEncoder(MessagePassingEncoderSpec(atom_dim=8, bond_dim=4), dtype=DTYPE)
         probe = AtomTypeReadout(enc, num_types=2, dtype=DTYPE)
         b1 = _batch([6, 8], bonds=[(0, 1)])
         b2 = _batch([6, 8], bonds=[(0, 1)])

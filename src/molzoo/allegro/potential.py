@@ -1,7 +1,7 @@
 """Allegro energy model: the feature body plus upstream's energy heads.
 
 :class:`AllegroPotential` is a :class:`~molix.autograd.Potential` over the
-:class:`~molzoo.allegro.encoder.AllegroEncoder` body: it registers, at the
+:class:`~molrep.encoders.allegro.encoder.AllegroEncoder` body: it registers, at the
 module root, upstream's ``edge_readout`` MLP, ``per_type_energy_scale_shift``
 and the optional ZBL ``pair_potential`` — the energy of ``FullAllegroModel``
 (``src/molzoo/specs/allegro.md`` §5 step 7):
@@ -39,8 +39,8 @@ from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY
 from molpot.heads.rescale import PerSpeciesScaleShift
 from molpot.potentials.repulsion import UniversalZBL
 from molrep.embedding.mlp import ScalarMLPFunction
+from molrep.encoders.allegro.encoder import AllegroEncoder
 from molzoo.allegro.checkpoint import allegro_keys
-from molzoo.allegro.encoder import AllegroEncoder
 from molzoo.allegro.spec import AllegroSpec
 from molzoo.allegro.utils import NequipPackage
 from molzoo.checkpoint import CheckpointRemap

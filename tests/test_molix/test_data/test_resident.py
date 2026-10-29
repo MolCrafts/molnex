@@ -30,3 +30,15 @@ class TestResidentValidation:
         second = [float(b["x"]) for b in resident.val_dataloader()]
         assert first == second == [0.0, 1.0, 2.0]
         assert inner.val_calls == 1
+
+    def test_a_pass_writes_onto_a_copy_not_onto_the_resident_batch(self) -> None:
+        resident = ResidentValidation(_Counting(), "cpu")
+        for batch in resident.val_dataloader():
+            batch["pred"] = batch["x"] * 2
+        second = list(resident.val_dataloader())
+        assert all(sorted(b.keys()) == ["x"] for b in second)
+        # The tensors themselves are the resident ones — no copy of the data.
+        third = list(resident.val_dataloader())
+        assert all(
+            a["x"].data_ptr() == b["x"].data_ptr() for a, b in zip(second, third, strict=True)
+        )

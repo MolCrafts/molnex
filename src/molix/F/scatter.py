@@ -13,8 +13,7 @@ indices. We do **not** depend on that package:
 The native kernel ``torch.ops.molix.scatter_sum`` streams source rows with
 atomics; workspace is the output ``(dim_size, *src.shape[1:])`` only — no
 ``(N, tile)`` scratch. Backward is gather. When the ``.so`` is missing, this
-module falls back to ``index_add_`` (same math, inductor needs the
-``register_inductor_fallbacks`` path).
+module falls back to ``index_add_`` (same math).
 
 ``dim_size`` is always an argument, never ``int(index.max())``: the bucket
 count is a static shape the caller already holds (``graphs.batch_size[0]``,

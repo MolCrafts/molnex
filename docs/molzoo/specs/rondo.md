@@ -6,12 +6,49 @@ tutorial; use the MolZoo user guide for theory narrative and worked examples.
 | Field | Value |
 |-------|-------|
 | Module | `molzoo.rondo` |
-| Entry point | `Rondo(forcefield, spec, wrt=, dtype=)` (config `RondoSpec`) |
+| Entry point | `Rondo(forcefield, *, dtype=)`. One force field; `Rondo.graph` is the covalent-graph encoder (`molrep.encoders.covalent_graph.CovalentGraphEncoder`, no coordinates) returning `EncoderFeatures(atom, bond)`; one `molpot.classical` term per priced style. `predict` / `price` are the primitives `energy` composes; `forward` differentiates `atoms.pos` and writes `atoms.forces_pred`. The published pair heads are `molzoo.byteff.ByteFF`. |
 | Paper | Not a reproduction. Lineage: Wang *et al.*, "End-to-end differentiable construction of molecular mechanics force fields", *Chem. Sci.* **13**, 12016 (2022) — Espaloma. Structure aligned with: Zheng *et al.*, "Data-driven parametrization of molecular mechanics force fields for expansive chemical space coverage", *Chem. Sci.* (2025) — ByteFF. |
 | arXiv | Lineage [2010.01196](https://arxiv.org/abs/2010.01196) (Espaloma); structure [2408.12817](https://arxiv.org/abs/2408.12817) (ByteFF) |
 | DOI | [10.1039/D2SC02739A](https://doi.org/10.1039/D2SC02739A) (Espaloma) |
 | Reference implementation | `choderalab/espaloma@413eb55074037540e1414eb365da7304bd5d72be`, `bytedance/byteff@90ef54a7c38e58f162adc23f3e8f457aaf922d46` |
-| Spec status | stable |
+| Spec status | revising (2026-10-28 revision below supersedes §3.2–§3.4, §4 and the encoder / head rows of §5–§6) |
+
+## Revision 2026-10-28 — encoder, interfaces and heads
+
+Spec of the change: `.claude/specs/rondo-enc-01-graph-encoder.md` (operator
+rulings, paper↔code map, parity record). Where this section and §2–§6 below
+disagree, this section wins until the body is rewritten.
+
+- **Encoder.** The Espaloma-style `ChemEncoder` is no longer Rondo's. `Rondo.graph`
+  is the covalent-graph encoder (edge-augmented attention over the bonds,
+  `molrep.encoders.covalent_graph`): element `Z − 1`, degree (from the bond list),
+  formal charge, ring connectivity, smallest ring; bond order and ring
+  membership; features averaged over topological equivalence classes. The
+  message-passing encoder is kept as a second encoder
+  (`molrep.encoders.message_passing.MessagePassingEncoder`).
+- **Interfaces Rondo owns.** encoder → heads: `EncoderFeatures(atom (N, D),
+  bond (N_bonds, D'))`, nothing else. heads → potentials: `Term.predict(features,
+  frame, potential)` columns in molrs conventions. No encoder builds angle,
+  torsion or improper features.
+- **Bonded heads** (`molpot.classical`): symmetric assembly of each term's atom
+  and bond rows (bond and its reverse; angle and its reverse; proper and its
+  reverse; the three improper legs), `pre` summed over the copies, `post`, one
+  MLP per parameter, `t·tanh(raw)·std + mean` with a straight-through clamp;
+  hypervalent P/S patch; `K = k/2` for bonds and angles, improper cvff `d = −1,
+  n = 2`, proper `n = 1..4` at phases 0°/180°. Replaces the reference·exp
+  windows, the covalent-radius / VSEPR references and `Hybridization` (ledger
+  A5–A24 rows on those are superseded).
+- **Pair heads unchanged**: D1 (EEM, MBIS) and D2 (LJ around GAFF2).
+- **Inputs added**: `atoms.equi_index` (first atom of the atom's topological
+  class; rebased by the collate, one class per ghost in the padder) and
+  `propers.linear` (the reference's linear-centre SMARTS). **Changed**:
+  `impropers` is one row per C/N centre with three neighbours, centre first,
+  legs ascending (a batch in another engine's order names the chemical centre in
+  `impropers.centre` / `leg1..3`). **Dropped** as an encoder channel:
+  `graphs.total_charge` (EEM still reads it).
+- **Validation**: §7.1 is now *claimed* for the encoder and bonded heads — every
+  parameter of the five ByteFF-26 members within 2.7e-14, energies within the
+  reference's own float32-π phase (spec 01 §8).
 
 ## 1. Scope
 
@@ -24,18 +61,20 @@ It is a *recipe*, in the MolZoo sense — the named composition of primitives
 that already live in `molrep` and `molpot`. The force field **is** the
 Hamiltonian: a molpy `ForceField` declares the styles, cutoff, mixing rule,
 Coulomb constant and 1-4 scales once (operator ruling 2026-10-06), and
-`Potentials.from_forcefield(ff)` turns it into torch potentials. Rondo adds
-the encoder and one head per parameter table, nothing else, and owns no kernel.
+`Potentials.from_forcefield(ff)` returns that one `Potentials`. Rondo holds
+it, adds the encoder and one parameter head per style it prices, and owns no
+energy of its own.
 
 ### 1.1 What Rondo owns
 
 | Concern | Rondo surface |
 |---------|---------------|
-| The parameters a style leaves open, as functions of the graph | `Rondo.heads` — `BondHead`, `AngleHead`, `PeriodicHead`, `CvffHead`, `LJHead` (`molpot.heads.classical`) and the charge model (`molpot.charge.AtomicChargeModel`) |
-| The chemical-perception backbone and its width | `Rondo.encoder` → `molrep.chem.ChemEncoder` |
-| Hybridization read off the bond list (reference angles, linear centres) | `Rondo.hybridization` → `molrep.chem.Hybridization` |
-| The three primitives a training step composes | `Rondo.tables`, `Rondo.energy` (every style, or `styles=` a named subset), `Rondo.partial_hessian` |
-| Energy and derivatives as one model forward | `Rondo.forward` = `molix.autograd.Derivative(Rondo.energy, wrt)` |
+| The parameters a style leaves open, as functions of the graph | one class per LAMMPS style in `molpot.classical` (`BondHarmonic`, `AngleHarmonic`, `DihedralPeriodic`, `ImproperCvff`, `LJCut`, `PairCoulCut`), the same names as `molpot.potentials`, registered on `Rondo.heads` |
+| The molecular-graph encoder | `Rondo.graph`, a `molrep.chem.ChemEncoder` with ByteFF's channels. It reads no coordinates. `Rondo.features` dispatches to exactly one encoder. The coordinate encoder is the other mode on the same terms |
+| Hybridization read off the bond list (reference angles, linear centres) | the angle term and the proper term, each a `molrep.chem.Hybridization` |
+| Which terms the model carries | one `Potentials`, `Potentials.from_forcefield` of the force field. A later style is a force field that declares it; a subclass overrides `load_state_dict` to accept the parent's checkpoint |
+| What a training step calls | `Rondo.energy` (every carried style, or `styles=` a named subset; `trainable=` keeps a gradient on the named columns), `Rondo.partial_hessian`, `Rondo.features` |
+| Energy and derivatives as one model forward | `Rondo.forward` = `molix.autograd.Derivative(Rondo.energy, wrt=("atoms.pos",))`, writing `atoms.forces_pred` |
 | The configuration contract | `RondoSpec(encoder=EncoderSpec, heads=HeadsSpec)` |
 
 ### 1.2 What Rondo does not own
@@ -45,7 +84,7 @@ the encoder and one head per parameter table, nothing else, and owns no kernel.
 | The functional form, its settings and units | the molpy `ForceField` (molrs IR) |
 | The torch implementation of each style | `molpot.potentials` (`bond:harmonic`, `angle:harmonic`, `dihedral:periodic`, `dihedral:opls`, `improper:cvff`, `pair:lj/cut`, `pair:coul/cut`) |
 | Which loss trains which parameters | the training step (`molix.core.steps.JointObjective.trainable`) |
-| Pair relations (1-2 / 1-3 / 1-4) and the cutoff pair list | `molix.data.PairRelation`, `molix.data.NeighborList` |
+| Pair relations (1-2 / 1-3 / 1-4) and the cutoff pair list | `molix.data.PairRelation`, `molix.neighbor.NeighborList` |
 | Input columns: formal charge, ring features, bond order, GAFF2 reference σ/ε | MolHub (THEMol decoding) |
 | The per-term partial Hessian | `molpot.forcefield.partial_hessian.TermHessian` |
 | The derivative op | `molix.autograd.Derivative` |
@@ -79,7 +118,7 @@ construction.
 | Direction | TensorDict path | Shape | Dtype | Contract |
 |-----------|------------------|-------|-------|----------|
 | In | `atoms.Z` | `(N,)` | int64 | Atomic numbers; ghost rows carry `0` |
-| In | `atoms.pos` | `(N, 3)` | the model's `dtype` | Positions, Å. Differentiated against; never read by the encoder |
+| In | `atoms.pos` | `(N, 3)` | the model's `dtype` | Positions, Å. Differentiated against; read by `CoordinateEncoder`, never by the graph encoder |
 | In | `atoms.batch` | `(N,)` | int64 | Graph membership |
 | In | `atoms.formal_charge` | `(N,)` | int64 | Encoder channel (clamped to ±2) |
 | In | `atoms.ring_connectivity` | `(N,)` | int64 | Encoder channel: ring bonds on the atom (clamped to 4) |
@@ -224,9 +263,11 @@ Torsions carry a **signed** $k_n$ at fixed phases — ByteFF's and GAFF2's form
 declared with $n = 1..4$). Every term is even in the dihedral, so a mirror
 image has the same energy; and $\partial E/\partial k_n = 1 + \cos(n\phi -
 \gamma_n)$ does not vanish at the zero start, where an $|a|$ parameterization
-would (A13).
+would (A13). A typed dihedral series — a `GaffTypifier` force field carries
+one — sets the head's width to that table's term count. Periodicity and phase
+stay the force field's. Charges are not a GAFF parameter.
 
-Propers through a **linear centre** (an sp atom at position $j$ or $k$) are
+A dihedral through a **linear centre** (an sp atom at position $j$ or $k$) are
 multiplied by zero before pricing: their dihedral is undefined
 (`Rondo._proper_mask`, ByteFF `mlparams.py:151-153`, A16).
 
@@ -242,8 +283,7 @@ A molecule over capacity fails closed (eager: raises; compiled: `NaN`).
 
 ### 3.6 Class-I energy
 
-`Rondo.energy` maps the tables onto the parameters each style's potential
-reads and sums `Potentials.from_forcefield(ff)`:
+`Rondo.energy` maps the tables onto parameters and calls that one `Potentials`:
 
 | Style | Potential | Parameters from the tables |
 |-------|-----------|----------------------------|
@@ -251,7 +291,7 @@ reads and sums `Potentials.from_forcefield(ff)`:
 | `angle harmonic` | $K (\theta - \theta_0)^2$, $\theta_0$ in degrees | `angles.k`, `angles.theta0` |
 | `dihedral periodic` | $\sum_n k_n [1 + \cos(n\phi - \gamma_n)]$ | `propers.k` (masked at linear centres), periodicities and phases of the head |
 | `dihedral opls` | $\tfrac12 K_1(1+\cos\phi) + \tfrac12 K_2(1-\cos2\phi) + \tfrac12 K_3(1+\cos3\phi) + \tfrac12 K_4(1-\cos4\phi)$ | $K_n = 2 k_n$ |
-| `improper cvff` | $k [1 - \cos(n\psi)]$ on each of the three cyclic rows of a centre | `impropers.k` |
+| `improper cvff` | $k [1 - \cos(n\psi)]$ on the one row of a centre (centre first, legs ascending) | `impropers.k` |
 | `pair lj/cut` | $w\, 4\varepsilon_{ij}[(\sigma_{ij}/r)^{12} - (\sigma_{ij}/r)^6]$, the field's mixing and cutoff | `atoms.epsilon`, `atoms.sigma` |
 | `pair coul/cut` | $w\, C\, q_i q_j / (\epsilon_r r)$, the field's `coulomb` and `dielectric` | `atoms.charge` |
 
@@ -263,8 +303,9 @@ the negative of another, A15).
 
 ### 3.7 Derivatives, the three primitives and the compile seam
 
-`forward = Derivative(energy, wrt)`, built in `__init__` like every molzoo
-potential; the training step marks its leaves before the traced body. A joint
+`forward = Derivative(energy, wrt=("atoms.pos",))`, built in `__init__`, writes
+`atoms.forces_pred`. It is not a constructor argument. The training step marks
+its leaves before the traced body. A joint
 training step composes the primitives itself: it predicts `tables` **once per
 source batch**, and every objective on that source (`JointObjective.source`;
 the four Hessian objectives share the hessian batch, ByteFF's "every loss of a
@@ -282,8 +323,8 @@ evaluation step detaches the loss and every column it wrote once the loss is
 computed — the validation batches are resident, and a graph left on them
 stayed alive through training (GH200 3732774 / 3735480, 90 GiB).
 
-`energy(frame, tables, styles=("bond:harmonic", "angle:harmonic"))` sums the
-named styles only — ByteFF's `calc_terms` (A18). Three objectives use it: the
+`energy(frame, tables, styles=("bond:harmonic", "angle:harmonic"))` asks that
+`Potentials` for the named styles only — ByteFF's `calc_terms` (A18). Three objectives use it: the
 bond and angle energy on a QM minimum, per term, trained through `r0` / `θ0`
 (ByteFF `Bond_Energy` / `Angle_Energy`, `loss.py:302-314`; molix
 `MeanTermEnergyLoss`); the improper energy on the same minimum trained through
@@ -314,15 +355,28 @@ form is the force field.
 | `heads.hidden` | Head MLP hidden width | `64` |
 | `heads.bond_k_ref`, `heads.bond_r0_gain` | §3.4 | `450`, `0.1` |
 | `heads.angle_k_ref`, `heads.angle_theta0_gain_deg` | §3.4 | `40`, `20` |
-| `heads.proper_periodicity` | $n$ of the proper series | `(1,2,3,4,5,6)` (`(1,2,3,4)` for `dihedral opls`) |
+| `heads.proper_periodicity` | $n$ of a proper series whose style declares no types. A typed table (GAFF) uses that table's term count instead | `(1,2,3,4,5,6)` (`(1,2,3,4)` for `dihedral opls`) |
 | `heads.improper_periodicity` | $n$ of the improper | `2` |
 | `heads.improper_k_ref` | §3.4, per row | `4.291 / 3` |
 | `heads.lj_sigma_gain`, `heads.lj_epsilon_gain` | §3.4 | `0.1`, `1.0` |
 | `heads.eem_max_atoms`, `heads.eem_jitter` | §3.5 | `512`, `1e-4` |
 
-`Rondo(ff, spec, wrt=("atoms.pos",), dtype=torch.float64)`: `wrt=()` makes `forward` the energy
-alone. The optimizer is `Adam(model.parameters())`: a head with no loss has a
-zero gradient and Adam leaves it where it starts.
+`Rondo(ff, dtype=torch.float64, width=64, ...)`.
+The keyword settings are checked by the internal `RondoSpec`; a caller does not
+build that object.
+The force field is one `Potentials` (`Potentials.from_forcefield`). Rondo adds
+one parameter head per style that object prices. A later style is a
+force field that declares it, and a subclass of `Rondo` that overrides
+`load_state_dict` so a checkpoint of the parent loads; the new head stays at
+its initial value. `energy(styles=)` asks that same `Potentials` for a subset
+of its styles, named as classes in `molpot.classical` or as the force field's
+style keys.
+`model.graph` is the molecular-graph encoder and does not read `atoms.pos`, and `model.features(frame)` dispatches to exactly one encoder (`CoordinateEncoder` reads `atoms.pos`): another head reads those tensors and predicts something other than
+a force-field parameter. The coordinate encoder shares these terms and does
+not read a different force field.
+`forward` differentiates `atoms.pos` and writes `atoms.forces_pred`. The
+optimizer is `Adam(model.parameters())`. Which of the carried tables a loss
+moves stays on `JointObjective(trainable=)`.
 
 ## 5. Reference Crosswalk
 
@@ -441,8 +495,8 @@ not in this repo. Measure on a compute node.
 | Functional form | molpy `ForceField` | styles, settings, special bonds — declared once |
 | Style kernels | `molpot.potentials` | molrs conventions, molpy oracle to 1e-10 |
 | Covalent-graph perception | `molrep.chem` | topology and integer channels only |
-| Parameter tables | `Rondo.tables` | namespace → parameter → tensor, with references |
-| Per-loss parameter sets | `molix.core.steps.JointObjective` | detach between `tables` and `energy` |
+| Predicted parameters | `Rondo.energy` | written on the batch beside the rows (`bonds.k`, `dihedral` columns, …) |
+| Per-loss parameter sets | `molix.core.steps.JointObjective` | `energy(..., trainable=, styles=)` |
 | Derivatives | `molix.autograd.Derivative` | the single force op |
 | Input columns | MolHub | `formal_charge`, ring features, `bond_type`, `in_ring`, `gaff2_sigma/epsilon`, three improper rows |
 
@@ -453,7 +507,7 @@ not in this repo. Measure on a compute node.
 | Reference commits | `choderalab/espaloma@413eb55…`, `bytedance/byteff@90ef54a…` |
 | molrs / molpy | 0.17 (`ff.def_style`, `special_bonds`, `to_section`) |
 | GAFF2 reference | AmberTools25 `dat/leap/parm/gaff2.dat` (GAFF 2.2.30), MOD4 RE section; σ = 2R*/2^{1/6} |
-| Dependencies | `molrep.chem`, `molpot.heads.classical`, `molpot.charge`, `molpot.potentials`, `molpot.forcefield.partial_hessian`, `molix.autograd` |
+| Dependencies | `molrep.chem`, `molpot.classical`, `molpot.charge`, `molpot.potentials`, `molpot.forcefield.partial_hessian`, `molix.autograd` |
 | Public docs mirror | `docs/molzoo/specs/rondo.md` |
 
 ## 10. Drift Policy
@@ -480,6 +534,13 @@ without a test asserting equal parameters for chemically equivalent atoms.
 
 ## Appendix A. Maintenance Log
 
+- 2026-10-27: `Rondo(forcefield, *, dtype=)`. The force field is one
+  `Potentials` (`Potentials.from_forcefield`); Rondo holds that object and adds
+  one parameter head per style it prices. `terms=` and `wrt=` are not
+  constructor arguments. `forward` differentiates `atoms.pos` and writes
+  `atoms.forces_pred`. A later style is a force field that declares it, loaded
+  with `load_state_dict(strict=False)`.
+- 2026-10-27: `load_state_dict` writes only a present prefix (`graph.`, `coordinate.`, `heads.`, `potentials.`); a missing prefix and an encoder the model was not built with are not written, and any other first component is unexpected.
 - 2026-10-12: `energy(styles=)` (A18) after the S1 runs 3680577 / 3685025 /
   3685026 showed sp3 `θ0` walking 109° → 99° → 95° under the stationary-force
   loss alone: a common `θ0` shift at a symmetric centre moves no atom, so the
@@ -557,7 +618,7 @@ without a test asserting equal parameters for chemically equivalent atoms.
   `Rondo(ff, spec, wrt=)` on the molrs force-field IR through
   `Potentials.from_forcefield`; `outputs` / `trainable` / `energy_terms` /
   `param_groups` and the per-objective machinery removed from the model — the
-  training step owns them. Heads moved to `molpot.heads.classical` with per-row
+  training step owns them. Heads moved to `molpot.classical` with per-row
   references (covalent radii, hybridization angle, GAFF2 σ/ε); torsions as
   signed $k_n$ at fixed phases; three improper rows per centre; linear-centre
   mask; ByteFF input channels on the encoder. **Every earlier checkpoint is

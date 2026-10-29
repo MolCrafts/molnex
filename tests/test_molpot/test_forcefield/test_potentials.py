@@ -3205,9 +3205,9 @@ class TestPotentialsMlip:
         The MD route is first-order **inference**: those evaluations run under
         ``torch.no_grad()``. Outside it the ambient grad mode asks for
         ``create_graph=True``, which AOTAutograd serves only while buffer
-        donation is off — ``register_inductor_fallbacks`` pins
-        ``torch._functorch.config.donated_buffer = False`` for exactly that
-        reason. Pinned here rather than left as folklore: it is the difference
+        donation is off — ``Compiler`` sets
+        ``torch._functorch.config.donated_buffer = False`` by default for exactly
+        that reason. Pinned here rather than left as folklore: it is the difference
         between "MD" and "force-loss training" reaching the same compiled op
         (spec ``cuet-force-doublebackward``).
         """

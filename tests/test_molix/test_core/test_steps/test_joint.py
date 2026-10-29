@@ -53,47 +53,60 @@ class _StubModel(nn.Module):
     def derivative(self) -> Derivative:
         return self._derivative
 
-    def tables(self, frame: Any) -> dict[str, dict[str, torch.Tensor]]:
+    def _heads(
+        self, frame: Any, *, trainable: tuple[str, ...] | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = torch.tanh(self.encoder(frame["atoms", "pos"]))
-        return {
-            "a": {"x": self.head_a(hidden).squeeze(-1)},
-            "b": {"y": self.head_b(hidden).squeeze(-1)},
-        }
+        x = self.head_a(hidden).squeeze(-1)
+        y = self.head_b(hidden).squeeze(-1)
+        if trainable is not None:
+            named = set(trainable)
+            if "a" not in named and "a.x" not in named:
+                x = x.detach()
+            if "b" not in named and "b.y" not in named:
+                y = y.detach()
+        if "a" in frame.keys():
+            frame["a", "x"] = x
+        if "b" in frame.keys():
+            frame["b", "y"] = y
+        return x, y
 
     def energy(
         self,
         frame: Any,
-        tables: dict[str, dict[str, torch.Tensor]] | None = None,
         *,
         styles: tuple[str, ...] | None = None,
+        trainable: tuple[str, ...] | None = None,
     ) -> Any:
-        if tables is None:
-            tables = self.tables(frame)
         chosen = self.STYLES if styles is None else styles
         unknown = [style for style in chosen if style not in self.STYLES]
         if unknown:
             raise ValueError(f"unknown styles {unknown}")
+        x, y = self._heads(frame, trainable=trainable)
         pos = frame["atoms", "pos"]
         per_atom = pos.new_zeros(pos.shape[0])
         if "quad" in chosen:
-            per_atom = per_atom + tables["a"]["x"] * pos.pow(2).sum(-1)
+            per_atom = per_atom + x * pos.pow(2).sum(-1)
         if "lin" in chosen:
-            per_atom = per_atom + tables["b"]["y"] * pos.sum(-1)
+            per_atom = per_atom + y * pos.sum(-1)
         n_graphs = frame["graphs", "num_atoms"].shape[0]
         frame["graphs", "energy"] = per_atom.new_zeros(n_graphs).index_add(
             0, frame["atoms", "batch"], per_atom
         )
         return frame
 
+    def tables(self, frame: Any, *, trainable: tuple[str, ...] | None = None) -> Any:
+        self._heads(frame, trainable=trainable)
+        return frame
+
     def partial_hessian(
-        self, frame: Any, tables: dict[str, dict[str, torch.Tensor]] | None = None
+        self, frame: Any, *, trainable: tuple[str, ...] | None = None
     ) -> torch.Tensor:
-        if tables is None:
-            tables = self.tables(frame)
+        x, y = self._heads(frame, trainable=trainable)
         pos = frame["atoms", "pos"]
         i, j = frame["hessian_pairs", "i"], frame["hessian_pairs", "j"]
         diff = pos[j] - pos[i]
-        stiffness = tables["a"]["x"][i] + tables["b"]["y"][j]
+        stiffness = x[i] + y[j]
         return stiffness.unsqueeze(-1) * (diff.unsqueeze(-1) * diff.unsqueeze(-2)).reshape(-1, 9)
 
 
@@ -378,7 +391,8 @@ class TestJointTrainStep:
         step.forward_loss(trainer, TrainState(), batch)
 
         pos = sub["atoms", "pos"]
-        quad = trainer.model.tables(sub)["a"]["x"] * pos.pow(2).sum(-1)
+        hidden = torch.tanh(trainer.model.encoder(pos))
+        quad = trainer.model.head_a(hidden).squeeze(-1) * pos.pow(2).sum(-1)
         expected = quad.new_zeros(2).index_add(0, sub["atoms", "batch"], quad)
         torch.testing.assert_close(sub["graphs", "energy_pred"], expected)
 
@@ -396,7 +410,8 @@ class TestJointTrainStep:
         aside = sub["atoms", "forces_nonbonded"]
         assert not aside.requires_grad
         # ``lin`` is y Σ_k pos_k per atom with y detached: the force is -y on every component.
-        y = trainer.model.tables(sub)["b"]["y"].detach()
+        hidden = torch.tanh(trainer.model.encoder(sub["atoms", "pos"]))
+        y = trainer.model.head_b(hidden).squeeze(-1).detach()
         torch.testing.assert_close(aside, -y.unsqueeze(-1).expand(-1, 3))
         full = sub["atoms", "forces_pred"]
         assert full.requires_grad
@@ -432,8 +447,8 @@ class TestJointTrainStep:
         assert shared.sources["s"] == shared.objectives[:2]
         assert shared.sources["m"] == shared.objectives[2:]
 
-    def test_objectives_on_one_source_share_the_batch_and_one_tables_call(self) -> None:
-        """ByteFF: every loss of a dataset on the one batch drawn from it, the model run once."""
+    def test_objectives_on_one_source_share_the_batch(self) -> None:
+        """ByteFF: every loss of a dataset reads the one batch drawn from it."""
         k = JointObjective(
             "k", _Recording(HESSIAN), trainable=("a.x",), output="partial_hessian", source="s"
         )
@@ -451,20 +466,10 @@ class TestJointTrainStep:
         step = JointTrainStep([k, g, e])
         trainer = _trainer(train_step=step)
         model = trainer.model
-        seen: list[Any] = []
-        tables = model.tables
-
-        def counting(frame: Any) -> Any:
-            seen.append(frame)
-            return tables(frame)
-
-        model.tables = counting  # an instance attribute shadows the method
         batch = TensorDict({"s": _sub(0)}, batch_size=[])
         state = TrainState()
 
         total, predictions = step.forward_loss(trainer, state, batch)
-
-        assert len(seen) == 1 and seen[0] is batch["s"]
         for objective in (k, g, e):
             ((pred, got),) = objective.loss.calls  # ty: ignore[unresolved-attribute]
             assert pred is got is batch["s"]
@@ -517,6 +522,25 @@ class TestJointTrainStep:
         assert not sub["atoms", "pos"].requires_grad
         ((pred, got),) = loss.calls
         assert pred is got is sub
+
+    def test_tables_output_runs_on_a_source_without_an_energy_label(self) -> None:
+        # MBIS records carry charges and no energy.
+        loss = _Recording(("a", "x"))
+        step = JointTrainStep([JointObjective("t", loss, trainable=("a.x",), output="tables")])
+        trainer = _trainer(train_step=step)
+        batch = _nested("t")
+        sub = batch["t"]
+        sub["a"] = TensorDict({}, batch_size=[4])
+        sub["b"] = TensorDict({}, batch_size=[4])
+        del sub["graphs", "energy"]
+        columns = sorted(sub["graphs"].keys())
+
+        step.forward_loss(trainer, TrainState(), batch)
+
+        assert sub["a", "x"].requires_grad
+        assert len(loss.calls) == 1
+        # Scored twice (a resident validation batch), it must arrive the same.
+        assert sorted(sub["graphs"].keys()) == columns
 
     def test_trainer_compile_replaces_every_body_and_leaves_the_model_alone(self) -> None:
         train_step = JointTrainStep(_two_objectives())

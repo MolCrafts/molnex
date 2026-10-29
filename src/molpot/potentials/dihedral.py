@@ -73,16 +73,23 @@ class DihedralPeriodic(BondedPotential):
 
     @staticmethod
     def _series(t: Any) -> list[tuple[float, float, float]]:
-        keys = set(t.keys())
+        params = t.params
+        keys = set(params)
         terms: list[tuple[float, float, float]] = []
         m = 1
         while f"k{m}" in keys:
             terms.append(
-                (float(t[f"k{m}"]), float(t[f"periodicity{m}"]), float(t.get(f"phase{m}", 0.0)))
+                (
+                    float(params[f"k{m}"]),
+                    float(params[f"periodicity{m}"]),
+                    float(params.get(f"phase{m}", 0.0)),
+                )
             )
             m += 1
         if not terms and "k" in keys:
-            terms.append((float(t["k"]), float(t["periodicity"]), float(t.get("phase", 0.0))))
+            terms.append(
+                (float(params["k"]), float(params["periodicity"]), float(params.get("phase", 0.0)))
+            )
         if not terms:
             raise ValueError(f"dihedral:periodic type {t.name!r} has no terms")
         return terms

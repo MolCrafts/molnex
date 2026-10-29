@@ -1,106 +1,81 @@
 """Validated configuration snapshot for the Rondo recipe.
 
-Spec: ``src/molzoo/specs/rondo.md`` §4. The spec holds only what is Rondo's
-own — the encoder and the heads. The functional form (styles, cutoff, mixing,
-1-4 scales, Coulomb constant) is the force field handed to
-:class:`~molzoo.rondo.model.Rondo` and is not restated here.
+Spec: ``src/molzoo/specs/rondo.md`` §4 and ``.claude/specs/rondo-enc-01-graph-encoder.md``
+§3. The spec holds only what is Rondo's own — the encoder and the heads. The
+functional form (styles, cutoff, mixing, 1-4 scales, Coulomb constant) is the
+force field handed to :class:`~molzoo.rondo.model.Rondo` and is not restated
+here. The defaults are the published model's sizes (the reference
+``fftrainer_config_in_use.yaml``), except Rondo's own pair heads (D1, D2).
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from molrep.chem.embed import DiscreteChannel
+from molrep.encoders.covalent_graph.spec import CovalentGraphEncoderSpec
 
-__all__ = ["EncoderSpec", "HeadsSpec", "RondoSpec"]
-
-#: ByteFF's atom features, as the batch columns molhub writes for THEMol
-#: (``mol_data.py:174-189``): formal charge clamped to ±2, total molecular
-#: charge clamped to ±5, the number of ring bonds on the atom, the smallest
-#: ring through it (0 = none, rings above 8 read as 8).
-DEFAULT_ATOM_CHANNELS: tuple[DiscreteChannel, ...] = (
-    DiscreteChannel(name="formal_charge", num_classes=5, offset=2),
-    DiscreteChannel(name="total_charge", num_classes=11, offset=5, per="graph"),
-    DiscreteChannel(name="ring_connectivity", num_classes=5),
-    DiscreteChannel(name="min_ring_size", num_classes=9),
-)
-
-#: ByteFF's bond features (``mol_data.py:192-201``): bond order as molpy's
-#: ``bond_type`` (1 single, 2 double, 3 triple, 4 aromatic) and ring membership.
-DEFAULT_BOND_CHANNELS: tuple[DiscreteChannel, ...] = (
-    DiscreteChannel(name="bond_type", num_classes=5),
-    DiscreteChannel(name="in_ring", num_classes=2),
-)
-
-
-class EncoderSpec(BaseModel):
-    """The :class:`~molrep.chem.encoder.ChemEncoder` under Rondo.
-
-    Attributes:
-        width: Feature width of the atom / bond / angle / proper / improper
-            channels and of the hop MLPs. A power of two.
-        n_blocks: Covalent hops ``L``; the receptive field of a predicted
-            parameter is ``L`` bonds.
-        local_attention: Softmax over an atom's incident covalent bonds
-            instead of a plain sum.
-        num_elements: Atomic-number embedding table size.
-        atom_channels: Extra integer atom (or graph) columns summed into the
-            atom seed; every one is a required batch column.
-        bond_channels: Extra integer bond columns summed into the bond seed.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    width: int = Field(default=64, gt=0)
-    n_blocks: int = Field(default=4, ge=0)
-    local_attention: bool = False
-    num_elements: int = Field(default=119, gt=0)
-    atom_channels: tuple[DiscreteChannel, ...] = DEFAULT_ATOM_CHANNELS
-    bond_channels: tuple[DiscreteChannel, ...] = DEFAULT_BOND_CHANNELS
+__all__ = ["HeadsSpec", "RondoSpec"]
 
 
 class HeadsSpec(BaseModel):
-    """The parameter heads: one MLP per parameter, each starting at a reference.
+    """The parameter heads.
 
-    Force constants are LAMMPS ``K`` (no ½); angles are degrees.
+    The bonded heads are the published model's (``MMBonded``: ``pre_mlp_dims
+    (256, 256, 3)``, ``out_mlp_dims (256, 4)``, ``tanh_output 20``). Rondo's
+    pair heads are its own: EEM charges (D1) and σ / ε around GAFF2 (D2), one
+    MLP per parameter of width :attr:`hidden`.
+    :class:`~molzoo.byteff.potential.ByteFF` uses the published pair heads
+    instead (``LJEs``: ``pre_mlp_dims (512, 512, 4)``, ``out_mlp_dims (256,
+    3)``, ``tanh_output 20``).
 
     Attributes:
-        hidden: Hidden width of every head MLP.
-        bond_k_ref: Reference bond ``K``, kcal/mol/Å². GAFF2 bonds run
-            300-700; THEMol's 1-2 Hessian blocks put the median at ``−2K =
-            −932``.
-        bond_r0_gain: Relative change of ``r0`` per unit of pre-activation.
-        angle_k_ref: Reference angle ``K``, kcal/mol/rad² (GAFF2: 35-70).
-        angle_theta0_gain_deg: Degrees of ``theta0`` per unit of pre-activation.
-        proper_periodicity: Fourier terms ``n`` of a proper torsion. ``(1, 2,
-            3, 4)`` is the OPLS / GAFF capacity.
-        improper_periodicity: The ``n`` of the improper term (ByteFF: 2).
-        improper_k_ref: Reference improper amplitude per row, kcal/mol (ByteFF's
-            GAFF2 mean 4.29 per centre over its three rows). Positive by
-            construction; the improper-strain objective is unbounded below for a
-            signed amplitude.
+        bonded_hidden: Hidden width of each bonded head's ``pre`` and ``post``.
+        bonded_width: Output width of ``pre`` and ``post``.
+        bonded_layers: Linears in ``pre`` and in ``post``.
+        bonded_out_hidden: Hidden width of each bonded parameter MLP.
+        bonded_out_layers: Linears in each bonded parameter MLP.
+        tanh_output: Saturation of the published model's output transform.
+        hidden: Hidden width of the pair heads.
         lj_sigma_gain: Relative change of σ per unit of pre-activation.
         lj_epsilon_gain: Log change of ε per unit of pre-activation.
         eem_max_atoms: Fixed per-molecule capacity of the dense charge-
             equilibration solve. Must cover the largest molecule in the train
             set; sizing it from the batch is a host sync and a graph break.
         eem_jitter: Added to every hardness before the solve.
+        lj_direct_hidden: Hidden width of the published model's σ and ε MLPs
+            (:class:`~molzoo.byteff.potential.ByteFF` only).
+        lj_direct_layers: Linears in each of them.
+        bcc_hidden: Hidden width of the published model's bond-charge ``pre`` MLP.
+        bcc_width: Output width of ``pre``.
+        bcc_layers: Linears in ``pre``.
+        bcc_out_hidden: Hidden width of the bond-charge ``out`` MLP.
+        bcc_out_layers: Linears in ``out``.
+        pair_tanh_output: Saturation of the published model's σ, ε and charge transfer.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
+    bonded_hidden: int = Field(default=256, gt=0)
+    bonded_width: int = Field(default=256, gt=0)
+    bonded_layers: int = Field(default=3, ge=1)
+    bonded_out_hidden: int = Field(default=256, gt=0)
+    bonded_out_layers: int = Field(default=4, ge=1)
+    tanh_output: float = Field(default=20.0, gt=0.0)
     hidden: int = Field(default=64, gt=0)
-    bond_k_ref: float = Field(default=450.0, gt=0.0)
-    bond_r0_gain: float = Field(default=0.1, gt=0.0)
-    angle_k_ref: float = Field(default=40.0, gt=0.0)
-    angle_theta0_gain_deg: float = Field(default=20.0, gt=0.0)
-    proper_periodicity: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
-    improper_periodicity: int = Field(default=2, ge=1)
-    improper_k_ref: float = Field(default=4.291 / 3.0, gt=0.0)
     lj_sigma_gain: float = Field(default=0.1, gt=0.0)
     lj_epsilon_gain: float = Field(default=1.0, gt=0.0)
     eem_max_atoms: int = Field(default=512, ge=1)
     eem_jitter: float = Field(default=1e-4, ge=0.0)
+    lj_direct_hidden: int = Field(default=256, gt=0)
+    lj_direct_layers: int = Field(default=3, ge=1)
+    bcc_hidden: int = Field(default=512, gt=0)
+    bcc_width: int = Field(default=512, gt=0)
+    bcc_layers: int = Field(default=4, ge=1)
+    bcc_out_hidden: int = Field(default=256, gt=0)
+    bcc_out_layers: int = Field(default=3, ge=1)
+    pair_tanh_output: float = Field(default=20.0, gt=0.0)
 
 
 class RondoSpec(BaseModel):
@@ -111,7 +86,23 @@ class RondoSpec(BaseModel):
     force field the model is built on.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    encoder: EncoderSpec = EncoderSpec()
+    encoder: CovalentGraphEncoderSpec = CovalentGraphEncoderSpec()
     heads: HeadsSpec = HeadsSpec()
+
+
+def validate(**values: Any) -> RondoSpec:
+    """Check constructor keywords and return the snapshot the classes keep.
+
+    A caller passes ``width=``, ``n_layers=``, ``hidden=`` and the other fields
+    of :class:`CovalentGraphEncoderSpec` and :class:`HeadsSpec`. The snapshot is not a
+    constructor argument.
+    """
+    unknown = set(values) - set(CovalentGraphEncoderSpec.model_fields) - set(HeadsSpec.model_fields)
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise TypeError(f"unknown setting {names}")
+    encoder = {key: values[key] for key in values if key in CovalentGraphEncoderSpec.model_fields}
+    heads = {key: values[key] for key in values if key in HeadsSpec.model_fields}
+    return RondoSpec(encoder=CovalentGraphEncoderSpec(**encoder), heads=HeadsSpec(**heads))

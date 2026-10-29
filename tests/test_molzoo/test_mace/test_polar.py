@@ -17,7 +17,7 @@ import molrep.eq as meq
 from molix.compile import Compiler
 from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_KEY
 from molzoo.checkpoint import CheckpointRemap
-from molzoo.mace.checkpoint import MACE_SKIP, polar_keys
+from molzoo.mace.checkpoint import MACE_CONVERSIONS, MACE_SKIP, polar_keys
 from molzoo.mace.polar import (
     AgnosticEmbeddedOneBodyVariableUpdate,
     EnvironmentDependentSpinSourceBlock,
@@ -41,7 +41,9 @@ from tests.test_molzoo.test_mace.conftest import (
     official_layout,
 )
 
-polar_remap = CheckpointRemap(polar_keys, on_unexpected="return", skip=MACE_SKIP)
+polar_remap = CheckpointRemap(
+    polar_keys, on_unexpected="return", skip=MACE_SKIP, conversions=MACE_CONVERSIONS
+)
 
 FORCES = ("atoms.pos",)
 

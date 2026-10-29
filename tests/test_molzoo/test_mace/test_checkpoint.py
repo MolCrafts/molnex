@@ -39,8 +39,10 @@ import torch
 from tensordict import TensorDict
 
 import molrep.eq as meq
+from molrep.encoders.mace.layers import ElementLinear, OneHotLinear
 from molzoo.checkpoint import CheckpointRemap
 from molzoo.mace.checkpoint import (
+    MACE_CONVERSIONS,
     MACE_SKIP,
     element_linear_weight,
     les_keys,
@@ -49,13 +51,14 @@ from molzoo.mace.checkpoint import (
     omol_keys,
     one_hot_weight,
 )
-from molzoo.mace.layers import ElementLinear, OneHotLinear
 from molzoo.mace.potential import MaceLes, MaceMatpes, MaceOff, MaceOmol, MacePotential
 from molzoo.mace.spec import MACEMatpesSpec, MACEOMolSpec, MACESpec
 from tests.test_molzoo.test_mace.conftest import DTYPE, official_layout
 
-matpes_remap = CheckpointRemap(matpes_keys, skip=MACE_SKIP)
-omol_remap = CheckpointRemap(omol_keys, on_unexpected="return", skip=MACE_SKIP)
+matpes_remap = CheckpointRemap(matpes_keys, skip=MACE_SKIP, conversions=MACE_CONVERSIONS)
+omol_remap = CheckpointRemap(
+    omol_keys, on_unexpected="return", skip=MACE_SKIP, conversions=MACE_CONVERSIONS
+)
 
 #: Model name → official cueq name: the hand-written inverse of ``matpes_keys``.
 MATPES_OFFICIAL_NAMES: dict[str, str] = {
@@ -238,9 +241,9 @@ def _assert_roundtrip(
     """Official names load back bit-for-bit into a fresh model of ``product``."""
     source = _filled(product, spec, seed=0)
     target = _filled(product, spec, seed=1)
-    CheckpointRemap(keys, on_unexpected="return", skip=MACE_SKIP).load(
-        target, _official_state(source, names)
-    )
+    CheckpointRemap(
+        keys, on_unexpected="return", skip=MACE_SKIP, conversions=MACE_CONVERSIONS
+    ).load(target, _official_state(source, names))
     for (name, want), (_, got) in zip(
         source.named_parameters(), target.named_parameters(), strict=True
     ):

@@ -11,14 +11,11 @@ key table and its archive reader (``molzoo.mace.checkpoint`` /
   (what the target rebuilds itself), land upstream's ``.weight`` in the layout
   the target module **declares by type, never by shape** — ``(in, out)``
   transposed on the ``.linear.weight`` of an ``upstream_linear_layout =
-  "in_out"`` module, or converted by the :class:`ConvertedWeight` subclass's
-  ``upstream_weight`` — allow only scalar-rank and cuEq-Linear singleton-axis
-  reshapes, and refuse to leave any ``nn.Parameter`` unfilled.
-* :class:`ConvertedWeight` — the base of a module whose forward reads its
-  ``weight`` in a layout the upstream checkpoint does not ship. The
-  conversion is a function of the model package's checkpoint module (where
-  the official dialect lives), never a method of the module; the subclass
-  names it, and the loader applies it once at the boundary.
+  "in_out"`` module, or converted by the function a product registers for the
+  module's type (``conversions``; the official dialect lives in the model
+  package's checkpoint module, never on the module) — allow only scalar-rank
+  and cuEq-Linear singleton-axis reshapes, and refuse to leave any
+  ``nn.Parameter`` unfilled.
 * :class:`OfficialArchive` — the one reader pattern: ``read(path) ->
   (state, config)``, unpickling through :class:`StubUnpickler`, which rebuilds
   a pickled upstream module *tree* without importing upstream (every class
@@ -42,6 +39,7 @@ import io
 import pickle
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, ClassVar, Literal
 
 import torch
@@ -187,22 +185,6 @@ class OfficialArchive:
         return dict(state)
 
 
-class ConvertedWeight(nn.Module):
-    """A module whose ``weight`` the upstream checkpoint stores in another layout.
-
-    The forward reads one layout; the official checkpoint ships another
-    (cuEquivariance's flat weight operand, for the MACE per-element maps).
-    The conversion belongs to the boundary: a function of the model package's
-    checkpoint module, which a subclass names as :attr:`upstream_weight`.
-    :meth:`CheckpointRemap.load` applies it to upstream's ``<p>.weight`` by
-    this type — never by shape — before any shape comparison, as it transposes
-    a declared ``in_out`` linear.
-    """
-
-    #: ``(module, upstream weight) -> weight`` in the layout the forward reads.
-    upstream_weight: ClassVar[Callable[[nn.Module, torch.Tensor], torch.Tensor]]
-
-
 class CheckpointRemap:
     """Translate official checkpoint keys into molnex ``state_dict`` keys.
 
@@ -227,6 +209,11 @@ class CheckpointRemap:
             that carry nothing learned and that the target rebuilds itself
             (``molzoo.mace.checkpoint.MACE_SKIP``). Checked before the
             unexpected-key policy, so a skipped key is never reported.
+        conversions: Module type → ``(module, upstream weight) -> weight``,
+            for a module whose forward reads its ``weight`` in a layout the
+            checkpoint does not ship (``molzoo.mace.checkpoint.MACE_CONVERSIONS``).
+            Applied to upstream's ``<p>.weight`` by the target's type — never by
+            shape — before any shape comparison.
 
     Raises:
         ValueError: If ``on_unexpected`` is neither ``"raise"`` nor
@@ -239,6 +226,9 @@ class CheckpointRemap:
         *,
         on_unexpected: Literal["raise", "return"] = "raise",
         skip: tuple[str, ...] = (),
+        conversions: Mapping[type[nn.Module], Callable[[nn.Module, torch.Tensor], torch.Tensor]] = (
+            MappingProxyType({})
+        ),
     ) -> None:
         if on_unexpected not in ("raise", "return"):
             raise ValueError(f'on_unexpected must be "raise" or "return", got {on_unexpected!r}')
@@ -247,6 +237,7 @@ class CheckpointRemap:
         self._prefixes: tuple[str, ...] = tuple(sorted(self._table, key=len, reverse=True))
         self._on_unexpected = on_unexpected
         self._skip: tuple[str, ...] = tuple(skip)
+        self._conversions = dict(conversions)
 
     def rename(self, official_state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Translate checkpoint keys, dropping what the model rebuilds itself.
@@ -293,8 +284,8 @@ class CheckpointRemap:
         The target module's type, not the tensor's shape, decides how
         upstream's ``<p>.weight`` lands: a module declaring
         ``upstream_linear_layout = "in_out"`` has the ``(in, out)`` matrix
-        transposed onto its ``<p>.linear.weight``; a :class:`ConvertedWeight`
-        has its declared ``upstream_weight`` applied. Both before any shape
+        transposed onto its ``<p>.linear.weight``; a module of a type in
+        ``conversions`` has that function applied. Both before any shape
         comparison. Otherwise only scalar rank differences and cuEq Linear's
         singleton shared-weight axis may be reshaped; equal numel alone does
         not establish a layout.
@@ -337,17 +328,21 @@ class CheckpointRemap:
         # any shape comparison: a module declaring ``upstream_linear_layout =
         # "in_out"`` keeps its weight in a contained ``nn.Linear``
         # (``<p>.linear.weight``, ``(out, in)``) where upstream stores ``(in,
-        # out)``; a ``ConvertedWeight`` reads a layout upstream never ships and
-        # names the boundary function that produces it. A square hidden layer,
-        # or an equal-numel flat weight, would otherwise match by shape and load
+        # out)``; a module of a registered type reads a layout upstream never
+        # ships, and ``conversions`` names the boundary function that produces
+        # it. A square hidden layer, or an equal-numel flat weight, would
+        # otherwise match by shape and load
         # unconverted — the silently wrong result the equal-numel rule below
         # exists to refuse.
         for path, module in model.named_modules():
             key = f"{path}.weight" if path else "weight"
             if key not in renamed:
                 continue
-            if isinstance(module, ConvertedWeight):
-                renamed[key] = type(module).upstream_weight(module, renamed[key])
+            convert = next(
+                (fn for kind, fn in self._conversions.items() if isinstance(module, kind)), None
+            )
+            if convert is not None:
+                renamed[key] = convert(module, renamed[key])
             elif getattr(type(module), "upstream_linear_layout", None) == "in_out":
                 renamed[f"{path}.linear.weight" if path else "linear.weight"] = renamed.pop(key).t()
         own = {k: v for k, v in model.state_dict().items() if not _is_extra_state(k)}

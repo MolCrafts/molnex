@@ -295,7 +295,7 @@ class EffectiveTemperature:
     """
 
     #: Boltzmann constant in eV/K (pint: ``(1.0 * units.k_B).to("eV / kelvin")``).
-    KB_EV_PER_K: float = (1.0 * units.k_B).to("eV / kelvin").magnitude
+    KB_EV_PER_K: float = (1.0 * units.k_B).to("eV / kelvin").value
 
     def __init__(self, *, dt: float, gamma: float, mass: float, dof: int):
         self.dt = dt

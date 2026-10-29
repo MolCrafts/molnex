@@ -5,11 +5,10 @@ The path documented for PyTorch 2.14:
     https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/torch.compiler_aot_inductor.html
 
 :func:`package` is those two calls — ``torch.export.export`` then
-``torch._inductor.aoti_compile_and_package`` — plus the inductor fallback
-``index_add`` needs, registered immediately before the package step, and one
-step before them: the forward is traced with ``make_fx`` below autograd first,
-so a forward that calls ``torch.autograd.grad`` (forces as ``-dE/dpos``)
-reaches ``torch.export`` as plain ATen forward-and-backward ops. A C++
+``torch._inductor.aoti_compile_and_package`` — and one step before them:
+the forward is traced with ``make_fx`` below autograd first, so a forward
+that calls ``torch.autograd.grad`` (forces as ``-dE/dpos``) reaches
+``torch.export`` as plain ATen forward-and-backward ops. A C++
 runtime loads the ``.pt2`` with ``torch::inductor::AOTIModelPackageLoader``;
 operators outside ATen run through the dispatcher there, so their namespaces
 (:func:`custom_op_namespaces`) must be registered natively in that process.
@@ -34,7 +33,6 @@ import torch.nn as nn
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from molix import logger as _logger_mod
-from molix.compile import register_inductor_fallbacks
 
 logger = _logger_mod.getLogger(__name__)
 
@@ -95,9 +93,6 @@ def package(
     )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # index_add's fused atomic scatter mis-counts padded lanes unless the ATen
-    # fallback is registered before this lowering.
-    register_inductor_fallbacks()
     with _cpu_codegen_workaround(_compile_device(module, example_inputs)):
         torch._inductor.aoti_compile_and_package(
             exported, package_path=str(path), inductor_configs=inductor_configs

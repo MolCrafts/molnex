@@ -66,11 +66,11 @@ from molpot.potentials.gto.features import GTOFieldFeatures
 from molpot.potentials.gto.fukui import FukuiEquilibration
 from molpot.potentials.gto.hartree import GTOHartreeEnergy
 from molrep.embedding.geometry import edge_lengths, edge_vectors
+from molrep.encoders.mace.layers import GatedNonlinearity, RadialMLP
 from molrep.equivariance import Linear
 from molrep.interaction.product import irreps_from_l_max, sh_irreps_from_l_max
 from molzoo.mace.checkpoint import polar_keys
 from molzoo.mace.heads import NonLinearBiasReadout
-from molzoo.mace.layers import GatedNonlinearity, RadialMLP
 from molzoo.mace.potential import MacePotential, Wrt
 from molzoo.mace.spec import MACEPolarSpec
 

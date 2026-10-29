@@ -316,6 +316,23 @@ class Trainer:
         except (AttributeError, TypeError):
             return True
 
+    def _resume(self) -> None:
+        """Restore ``resume_from_checkpoint`` once, at the first :meth:`evaluate` or :meth:`train`.
+
+        An evaluation before the train loop fires ``on_eval_step_complete``, and a
+        ``CheckpointHook`` there writes ``last.pt`` — the file being resumed —
+        with the unrestored step-0 state; restoring only inside :meth:`train`
+        then read that back and restarted at step 0 (rondo-enc phase 2,
+        2026-10-29).
+        """
+        if self._resume_from_checkpoint is None:
+            return
+        path, self._resume_from_checkpoint = self._resume_from_checkpoint, None
+        if self.device is not None:
+            self.model = self.model.to(self.device)
+            self._checkpoint.model = self.model
+        self._load_checkpoint(path)
+
     def _load_checkpoint(self, path: str | Path) -> None:
         """Load checkpoint and restore all training state.
 
@@ -541,8 +558,7 @@ class Trainer:
         if callable(setup):
             setup("fit")
 
-        if self._resume_from_checkpoint is not None:
-            self._load_checkpoint(self._resume_from_checkpoint)
+        self._resume()
 
         self._wrap_distributed()
         self._data_wait_s = 0.0
@@ -1016,6 +1032,7 @@ class Trainer:
             the eval hooks (e.g. ``{"E_MAE": ..., "F_MAE": ..., "loss": ...}``),
             in the model's native units. Empty if no eval hook published anything.
         """
+        self._resume()
         self._run_eval_phase(datamodule)
         evals = self.state.get("eval")
         return dict(evals) if evals else {}

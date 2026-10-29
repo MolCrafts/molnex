@@ -5,7 +5,7 @@ the ``forward`` built from ``wrt`` — over the parameter heads in
 :mod:`molpot.composition.heads`. Classical force fields live under
 :mod:`molpot.forcefield` (:class:`~molpot.forcefield.ForceField`,
 :class:`~molpot.forcefield.OPLSAAForceField`); the learnable Class-I heads
-are :mod:`molpot.heads.classical` and the torch twins of the molrs styles are
+are :mod:`molpot.classical` and the torch twins of the molrs styles are
 :mod:`molpot.potentials`.
 """
 

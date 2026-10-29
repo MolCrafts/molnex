@@ -103,6 +103,11 @@ _ATOM_STRUCTURAL = frozenset(
 GRAPH_LEAF = {"pe": "energy"}
 
 _ATOM_INDEX_COLS: frozenset[str] = frozenset({"atomi", "atomj", "atomk", "atoml"})
+#: ``atoms`` columns whose entries are atom indices of the same molecule:
+#: ``equi_index`` names the representative of the atom's topological
+#: equivalence class (spec ``rondo-enc-01-graph-encoder`` §4), so concatenating
+#: molecules shifts it by the atom offset like any other atom index.
+_ATOM_SELF_INDEX: frozenset[str] = frozenset({"equi_index"})
 
 #: Valence columns that index **another namespace's rows**, by prefix.
 #:
@@ -125,6 +130,8 @@ def rebase_kind(ns: str, name: str) -> tuple[str, int]:
     """
     if ns == "atoms" and name == "batch":
         return "graph", 0
+    if ns == "atoms" and name in _ATOM_SELF_INDEX:
+        return "atom", 0
     if ns == "graphs" and name == "row":
         return "row", 0
     if name in INDEX_KEYS:
@@ -247,7 +254,7 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
     * ``meta`` — every scalar becomes a per-graph leaf ``graphs.<name>``.
     * ``box`` — a frame's lattice becomes ``graphs.cell`` ``(B, 3, 3)`` with the
       lattice vectors as **rows** (the convention every reader of ``graphs.cell``
-      uses: ``fractional @ cell``); molpy's ``Box.h`` holds them as columns
+      uses: ``fractional @ cell``); molpy's ``Box.matrix`` holds them as columns
       and is transposed here. Either every frame carries a box or none does.
     * ``bonds`` block — ``atomi``/``atomj`` become the COO ``bonds.bond_index``
       (rebased into batch space), ``type`` becomes ``bonds.bond_types``.
@@ -359,15 +366,19 @@ def collate_molecules(frames: Sequence[Any], *, dtype: torch.dtype | None = None
             # torch cannot hold numpy.str_.
             if array.dtype.kind in {"U", "S", "O"}:
                 continue
+            if name in _ATOM_SELF_INDEX:
+                index = torch.as_tensor(array.astype(np.int64), dtype=torch.long)
+                atom_extras.setdefault(name, []).append(index + offset)
+                continue
             atom_extras.setdefault(name, []).append(_column(array, dtype))
 
         box = getattr(frame, "box", None)
         if box is None:
             boxless.append(graph_idx)
         else:
-            # molpy holds the lattice vectors as the columns of ``Box.h``;
+            # molpy holds the lattice vectors as the columns of ``Box.matrix``;
             # ``graphs.cell`` holds them as rows.
-            matrix = np.asarray(box.h, dtype=np.float64).T
+            matrix = np.asarray(box.matrix, dtype=np.float64).T
             cells.append(_column(matrix, dtype).reshape(3, 3))
 
         for key, raw in (getattr(frame, "meta", None) or {}).items():

@@ -287,10 +287,16 @@ class TestMACESpec:
         json.dumps(_base_spec().model_dump())
 
     def test_spec_module_imports_no_heavy_dependencies(self):
-        """spec.py stays torch-free: only ``re`` / ``typing`` / ``pydantic`` and friends."""
+        """spec.py stays torch-free: ``re`` / ``typing`` / ``pydantic`` and the encoder spec."""
+        import ast
+        import inspect
+
         import molzoo.mace.spec as spec_module
 
-        assert not (_imported_roots(spec_module) & FORBIDDEN_IMPORT_ROOTS)
+        assert not (_imported_roots(spec_module) - {"molrep"}) & FORBIDDEN_IMPORT_ROOTS
+        tree = ast.parse(inspect.getsource(spec_module))
+        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert {m for m in modules if m and m.startswith("molrep")} == {"molrep.encoders.mace.spec"}
 
 
 class TestMACEMatpesSpec:

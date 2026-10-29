@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from molrep.embedding.mlp import (
+    DenseMLP,
     FFLayer,
     MomentNormalizedMLP,
     ScalarLinearLayer,
@@ -192,3 +193,16 @@ class TestFFLayer:
     def test_empty_stack_is_identity(self):
         x = torch.randn(2, 3)
         torch.testing.assert_close(FFLayer([], in_dim=3, dtype=DTYPE)(x), x)
+
+
+class TestDenseMLP:
+    def test_the_activation_sits_between_the_linears_and_not_after_the_last(self):
+        mlp = DenseMLP(3, 4, 2, 3, dtype=torch.float64)
+        linears = [m for m in mlp.modules() if isinstance(m, torch.nn.Linear)]
+        assert [(m.in_features, m.out_features) for m in linears] == [(3, 4), (4, 4), (4, 2)]
+        assert isinstance(mlp[1], torch.nn.Linear)
+
+    def test_one_layer_is_a_single_linear(self):
+        mlp = DenseMLP(3, 8, 2, 1, bias=False, dtype=torch.float64)
+        linears = [m for m in mlp.modules() if isinstance(m, torch.nn.Linear)]
+        assert len(linears) == 1 and linears[0].bias is None

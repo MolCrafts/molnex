@@ -143,14 +143,9 @@ def _library_requirement(library: str) -> str:
     ``csrc/equivariance``; the C++ runtime checks the library it loads against
     the same string.
     """
-    if library == "molnex_opLib":
-        from molix import _op_lib_path
+    from molix import _op_lib_path
 
-        path = _op_lib_path()
-    else:
-        from molrep.equivariance.backend import NativeBackend
-
-        path = NativeBackend.library_path()
+    path = _op_lib_path(library)
     if path is None:
         raise ValueError(
             f"the package calls operators of {library} but that native library is "

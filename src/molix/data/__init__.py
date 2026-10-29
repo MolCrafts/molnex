@@ -70,7 +70,6 @@ from molix.data.sampler import (
 from molix.data.task import BatchTask
 from molix.data.valence_columns import (
     IMPROPER_ROWS_PER_CENTRE,
-    cyclic_impropers,
     stack_angle_index,
     stack_improper_index,
     stack_proper_index,
@@ -110,7 +109,6 @@ __all__ = [
     "collate_molecules",
     "group_split_indices",
     "IMPROPER_ROWS_PER_CENTRE",
-    "cyclic_impropers",
     "stack_angle_index",
     "stack_improper_index",
     "stack_proper_index",

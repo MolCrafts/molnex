@@ -1,45 +1,22 @@
-"""molrep.chem — continuous chemical perception (no energy / no molpot).
+"""molrep.chem — chemical-graph utilities for the force-field heads (no energy, no molpot).
 
 Public surface:
-    AtomChemEmbedding, BondChemEmbedding, ChemGraphBlock, context builders,
-    ChemEmbeddings, ChemEncoder.
+    BondTable (bond rows by endpoint pair), Equivalence (topological classes),
+    Hybridization (degree / π count off the bond list), and the eval-only
+    atom-typing probe. The encoders are :mod:`molrep.encoders`.
 """
 
-from molrep.chem.blocks import ChemGraphBlock
 from molrep.chem.bond_table import BondTable
-from molrep.chem.context import (
-    AngleContext,
-    BondContext,
-    ImproperContext,
-    ProperContext,
-)
-from molrep.chem.embed import (
-    AtomChemEmbedding,
-    BondChemEmbedding,
-    DiscreteChannel,
-    DiscreteChannels,
-)
-from molrep.chem.encoder import ChemEncoder
-from molrep.chem.features import ChemEmbeddings
+from molrep.chem.equivalence import Equivalence
 from molrep.chem.hybridization import Hybridization
 from molrep.chem.typing_metrics import TypingRecoveryMetrics, TypingRecoveryReport
 from molrep.chem.typing_probe import AtomTypeReadout
 
 __all__ = [
-    "AngleContext",
-    "AtomChemEmbedding",
     "AtomTypeReadout",
-    "BondChemEmbedding",
-    "BondContext",
     "BondTable",
-    "ChemEmbeddings",
-    "ChemEncoder",
-    "ChemGraphBlock",
-    "DiscreteChannel",
-    "DiscreteChannels",
+    "Equivalence",
     "Hybridization",
-    "ImproperContext",
-    "ProperContext",
     "TypingRecoveryMetrics",
     "TypingRecoveryReport",
 ]

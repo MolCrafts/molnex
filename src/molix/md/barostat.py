@@ -38,7 +38,7 @@ _MD_PRESSURE = "amu / angstrom / femtosecond ** 2"
 
 def pressure_bar_to_md(bar: float) -> float:
     """One bar expressed in amu Å⁻¹ fs⁻²."""
-    return float((float(bar) * units.bar).to(_MD_PRESSURE).magnitude)
+    return float((float(bar) * units.bar).to(_MD_PRESSURE).value)
 
 
 def instantaneous_pressure(

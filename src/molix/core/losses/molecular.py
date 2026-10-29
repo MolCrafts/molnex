@@ -1695,7 +1695,11 @@ class MeanTermEnergyLoss(nn.Module):
                 )
             block = batch[namespace]
             live = block.get(self.mask)
-            count = count + (
-                float(block.batch_size[0]) if live is None else live.to(energy.dtype).sum()
-            )
+            if live is not None:
+                count = count + live.to(energy.dtype).sum()
+            elif "bond_index" in block.keys():
+                # ``bonds`` has no row axis: its index is ``(2, N)``.
+                count = count + float(block["bond_index"].shape[1])
+            else:
+                count = count + float(block.batch_size[0])
         return total / count.clamp(min=1.0)

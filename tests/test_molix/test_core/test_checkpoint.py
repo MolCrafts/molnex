@@ -403,6 +403,28 @@ class TestTrainerResume:
         assert state2.epoch == 4
         assert state2.global_step == 12  # 6 from before + 6 new
 
+    def test_evaluate_before_train_does_not_clobber_the_resumed_checkpoint(self, tmp_path):
+        """An eval ahead of the loop restores first, so CheckpointHook writes the resumed state."""
+        ckpt_dir = tmp_path / "ckpts"
+        dm = _MockDataModule(batches_per_epoch=3)
+        val = _make_batch()
+        dm.val_dataloader = lambda: iter([val])
+        _make_trainer(hooks=[CheckpointHook(checkpoint_dir=str(ckpt_dir), save_best=True)]).train(
+            dm, max_epochs=1
+        )
+        best = (ckpt_dir / "best.pt").stat().st_mtime_ns
+
+        trainer = _make_trainer(
+            hooks=[CheckpointHook(checkpoint_dir=str(ckpt_dir), save_best=True)],
+            resume_from_checkpoint=str(ckpt_dir / "last.pt"),
+        )
+        trainer.evaluate(dm)
+
+        assert trainer.state.global_step == 3
+        assert TorchSaveBackend().load(ckpt_dir / "last.pt")["global_step"] == 3
+        # The resumed best is the bar: re-scoring the same weights is no improvement.
+        assert (ckpt_dir / "best.pt").stat().st_mtime_ns == best
+
     def test_resume_from_nonexistent_starts_fresh(self, tmp_path):
         """Resume from missing file starts from epoch 0."""
         dm = _MockDataModule(batches_per_epoch=2)

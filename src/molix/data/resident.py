@@ -51,7 +51,14 @@ class ResidentValidation:
         return self.datamodule.train_dataloader()
 
     def val_dataloader(self) -> Iterable:
-        """The validation batches, built and moved to the device on first use."""
+        """The validation batches, built and moved to the device on first use.
+
+        Each pass gets a shallow copy of every batch — the key structure is new,
+        the tensors are the resident ones — so what an evaluation writes onto a
+        batch (the predicted columns) never lands on the resident set. Without
+        it the second pass met batches with more columns than the first and
+        recompiled every compiled eval body.
+        """
         if self._batches is None:
             self._batches = [batch.to(self.device) for batch in self.datamodule.val_dataloader()]
-        return iter(self._batches)
+        return (batch.copy() for batch in self._batches)

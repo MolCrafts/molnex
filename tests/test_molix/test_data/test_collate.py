@@ -149,16 +149,16 @@ def test_integer_meta_scalars_stay_integral():
 def test_a_frame_box_becomes_graphs_cell_with_the_lattice_vectors_as_rows():
     """``frame.box`` → ``graphs.cell (B, 3, 3)``, rows = lattice vectors, at the frame's precision.
 
-    molpy's ``Box.h`` holds the lattice vectors as *columns*; every
+    molpy's ``Box.matrix`` holds the lattice vectors as *columns*; every
     reader of ``graphs.cell`` (the MD list, the periodic pair terms) computes
     ``fractional @ cell``, so the collate transposes. A triclinic box is the
     only geometry that can tell the two apart.
     """
     from molpy import Box
 
-    columns = Box.matrix_from_lengths_angles(
+    columns = Box.from_lengths_angles(
         np.array([10.0, 12.0, 14.0]), np.array([90.0, 90.0, 60.0])
-    )
+    ).matrix
     rows = np.asarray(columns).T  # the helper takes rows and rebuilds the same Box
     batch = collate_molecules(
         [
@@ -454,3 +454,16 @@ def test_a_frame_without_atomic_numbers_is_refused_by_name():
     sample = _renamed_atoms(frame(Z=[6, 1], pos=[[0, 0, 0], [1, 0, 0]]), "atomic_number", None)
     with pytest.raises(KeyError, match="atomic-number column"):
         collate_molecules([sample])
+
+
+def test_an_equivalence_index_is_shifted_like_any_atom_index():
+    """``atoms.equi_index`` names an atom of the same molecule, so it moves with the atom offset."""
+    frames = []
+    for z, classes in (([8, 1, 1], [0, 1, 1]), ([6, 1], [0, 1])):
+        f = frame(Z=z, pos=np.zeros((len(z), 3)))
+        block = {key: np.asarray(f["atoms"][key]) for key in f["atoms"].keys()}
+        block["equi_index"] = np.asarray(classes, dtype=np.int64)
+        f["atoms"] = block
+        frames.append(f)
+    batch = collate_molecules(frames)
+    assert batch["atoms", "equi_index"].tolist() == [0, 1, 1, 3, 4]

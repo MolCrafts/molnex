@@ -45,13 +45,13 @@ __all__ = [
 ]
 
 KCAL_PER_MOL_TO_KJ_PER_MOL: float = (
-    (1.0 * units.kilocalorie_per_mole).to(units.kilojoule_per_mole).magnitude
+    (1.0 * units.kilocalorie_per_mole).to(units.kilojoule_per_mole).value
 )
-ANGSTROM_TO_NM: float = (1.0 * units.angstrom).to(units.nanometer).magnitude
+ANGSTROM_TO_NM: float = (1.0 * units.angstrom).to(units.nanometer).value
 BOND_K_IR_TO_OPENMM: float = (
     (1.0 * units.parse("kilocalorie_per_mole / angstrom ** 2"))
     .to("kilojoule_per_mole / nanometer ** 2")
-    .magnitude
+    .value
 )
 ANGLE_K_IR_TO_OPENMM: float = KCAL_PER_MOL_TO_KJ_PER_MOL
 

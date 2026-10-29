@@ -10,16 +10,18 @@ model→task mapping — was retired by the operator ruling of 2026-09-29.
 are deleted. Do not reintroduce them; the sections below that still name them
 are history.
 
-**Current shape (2026-10-11, plan `rondo-byteff-squishy-iverson`).**
-`molzoo.rondo.Rondo(forcefield, spec, wrt=("atoms.pos",))` is shaped like every
-other molzoo model: `forward = Derivative(energy, wrt)`. The force field **is**
-the Hamiltonian — a molpy `ForceField` (molrs IR, LAMMPS conventions: `K`
-without ½, degrees) declares the styles, cutoff, mixing, Coulomb constant and
-special bonds once; `molpot.potentials.collection.Potentials.from_forcefield(ff)`
-is the one factory (A3; `molpot.instantiate` is gone). Rondo adds `ChemEncoder`
+**Current shape (2026-10-27).**
+`molzoo.rondo.Rondo(forcefield, *, dtype=)` is shaped like every other molzoo
+model. `forward` differentiates `atoms.pos` and writes `atoms.forces_pred`.
+There is no `terms=` and no `wrt=`. The force field **is** the Hamiltonian — a
+molpy `ForceField` (molrs IR, LAMMPS conventions: `K` without ½, degrees)
+declares the styles, cutoff, mixing, Coulomb constant and special bonds once;
+`molpot.potentials.collection.Potentials.from_forcefield(ff)` returns that one
+`Potentials` (A3; `molpot.instantiate` is gone). Rondo holds it and builds one
+parameter head per style it prices. Rondo adds `ChemEncoder`
 (ByteFF input channels: formal charge, total charge, ring connectivity,
 smallest ring; bond order, in-ring), `Hybridization`, and one head per open
-parameter (`molpot.heads.classical`: `BondHead`, `AngleHead`, `PeriodicHead`,
+parameter (`molpot.classical`: `BondHead`, `AngleHead`, `PeriodicHead`,
 `CvffHead`, `LJHead`; charges `molpot.charge.AtomicChargeModel`). Three
 primitives — `tables(frame)`, `energy(frame, tables=None, styles=None)`
 (`styles=` sums a named subset: ByteFF `calc_terms`, for the bonded strain at a
@@ -29,7 +31,19 @@ no `outputs=`, `trainable=`, `energy_terms=`, `param_groups`, no objective
 views (user: "Rondo 和其他模型的 __init__ 不太一样啊"). Which loss trains which
 parameters is `molix.core.steps.JointObjective(trainable=)`: the step detaches
 the tables its loss does not name between `tables` and `energy`; the optimizer
-is `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
+is `Adam(model.parameters())`.
+
+**A later style is another force field (2026-10-27; supersedes 2026-10-22).**
+The styles live in `molpot.classical` under the same LAMMPS names as
+`molpot.potentials`: `BondHarmonic`, `AngleHarmonic`, `DihedralPeriodic`,
+`ImproperCvff`, `LJCut`, `PairCoulCut`. The 2026-10-22 `terms=(...)` catalogue
+is withdrawn: a style the force field does not declare is not a head and is not
+priced. A later style is a force field that declares it. A subclass constructed
+on that field overrides `load_state_dict` to accept the parent's checkpoint;
+the new head stays at its initial value.
+`RondoEncoder` / `Rondo.features` is the graph featurizer with no force field;
+another head reads `ChemEmbeddings` and predicts something else. Which tables a
+loss trains stays on `JointObjective(trainable=)`. Training is ByteFF's joint multi-source step
 (`JointTrainStep` / `JointDataModule`, one batch per source per step, weighted
 sum, one backward). Objectives on one source name it (`JointObjective(source=)`)
 and share its batch and **one** `tables` prediction per step — one traced
@@ -38,9 +52,10 @@ table itself (MBIS charges) uses `output="tables"` and prices no energy
 (2026-10-12). Spec: `src/molzoo/specs/rondo.md`.
 
 Data contract the model needs (MolHub writes it for THEMol): `atoms.formal_charge`,
-`ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`;
-`bonds.bond_type`, `in_ring`; `impropers` as **three cyclic rows per centre**
-(ByteFF's k/3); `graphs.total_charge`.
+`ring_connectivity`, `min_ring_size`, `equi_index`, `gaff2_sigma`, `gaff2_epsilon`;
+`bonds.bond_type`, `in_ring`; `propers` with `linear`; `impropers` as **one row
+per centre**, centre first and legs ascending (ByteFF-26; the three cyclic rows
+with k/3 were ByteFF v1, dropped 2026-10-28); `graphs.total_charge`.
 
 **Deleted 2026-10-11:** `molpot.composition.mm_heads`, `molpot.classical`
 (the EvenTorsion/HarmonicBond/... function modules — the molrs-style

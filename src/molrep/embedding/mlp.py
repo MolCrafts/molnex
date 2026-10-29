@@ -364,3 +364,44 @@ class FFLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the stack to ``x`` ``(..., in_dim)`` → ``(..., output_dim)``."""
         return self.layers(x)
+
+
+class DenseMLP(nn.Sequential):
+    """``layers`` linears with the activation between them and none after the last.
+
+    The hidden part is an :class:`FFLayer` (child ``0``); the output linear is
+    child ``1``. This is torch_geometric's ``MLP(in, hidden, out, num_layers)``
+    with its default ``plain_last=True`` and no normalisation, the block the published model
+    builds its feed-forward and parameter heads from.
+
+    Args:
+        in_dim: Input width.
+        hidden_dim: Width of every hidden linear.
+        out_dim: Output width.
+        layers: Number of linears, ``>= 1``; ``1`` is a single linear.
+        activation: Name or module class (:func:`molix.nn.activation_from_name`).
+        bias: Give every linear a bias.
+        dtype: Floating dtype of every linear.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        layers: int,
+        *,
+        activation: str | type[nn.Module] | None = "gelu",
+        bias: bool = True,
+        dtype: torch.dtype,
+    ) -> None:
+        if layers < 1:
+            raise ValueError(f"layers must be >= 1, got {layers}")
+        hidden = FFLayer(
+            [hidden_dim] * (layers - 1),
+            in_dim=in_dim,
+            activation=activation,
+            use_bias=bias,
+            dtype=dtype,
+        )
+        super().__init__(hidden, nn.Linear(hidden.output_dim, out_dim, bias=bias, dtype=dtype))

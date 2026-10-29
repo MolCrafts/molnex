@@ -281,11 +281,16 @@ src/<pkg>/<area>/<module>.py  →  tests/test_<pkg>/test_<area>/test_<module>.py
 Gate for the model spine: `python scripts/check_test_mirror.py --strict-spine`.
 See `.claude/notes/notes.md` §"Industrial module layout" for the full decision.
 
-Model package layout — every molzoo model has MACE's shape: a torch-free
-`spec.py` (pydantic, `extra="forbid"`, every default lives here), an
-`encoder.py` body exposing primitives (`ElementTable` mixin from
-`molzoo/encoder.py` for the element-table precondition), a `potential.py`
-product that **subclasses** the body (flat checkpoint keys) and
+Package layout (operator ruling 2026-10-28): **every molzoo subpackage is one
+named network** (`mace`, `allegro`, `pinet`, `rondo`, `byteff`); **components —
+encoders and their blocks, heads, terms — live in molrep / molpot**. Every
+encoder is `molrep/encoders/<arch>/` (`encoder.py`, `layers.py`, a torch-free
+`spec.py` with the encoder's fields only; `ElementTable` mixin in
+`molrep/encoders/element_table.py`); a network's `spec.py` subclasses the
+encoder spec and adds the readout (`MACESpec(MACEEncoderSpec)`,
+`AllegroSpec(AllegroEncoderSpec)`, `PiNetSpec(PiNetEncoderSpec)`). A molzoo
+network has a `potential.py` product that **subclasses** the encoder (flat
+checkpoint keys) and
 `molix.autograd.Potential`, and, where official weights exist, `checkpoint.py`
 key tables + `utils.py` archive reader behind `.load(path, ...)`. A product
 has exactly two public methods and no layer between them: `energy(frame)` —
@@ -301,22 +306,27 @@ wrt=(), energy_dtype=torch.float64, input_dtype=None)`,
 wrt=())`. Official loading: `MaceMatpes.load(path, *, config=None, wrt=(), ...)`
 → `MaceArchive.read` → typed `MaceOfficialConfig` →
 `MACEMatpesSpec.from_official(cfg)` → `CheckpointRemap(matpes_keys,
-skip=MACE_SKIP)`; `AllegroPotential.load(path, *, wrt=(), tp_method=None)` over
+skip=MACE_SKIP, conversions=MACE_CONVERSIONS)` (a module whose weight the
+official checkpoint stores in another layout is converted by type through
+`conversions`, registered by the network, never declared on the module);
+`AllegroPotential.load(path, *, wrt=(), tp_method=None)` over
 `NequipPackage.read(path) -> (state, AllegroSpec)`. `molzoo/__init__.py` is a
 docstring: import a family from its subpackage, eagerly (`from molzoo.mace
-import MaceMatpes`), no lazy tables. **A block that serves one model lives in
-that model's package** (`layers.py`; MACE also `heads.py`, `coupling.py`);
-only generic components and operators (MLPs, radial bases, cutoffs, spherical
-harmonics, edge geometry, scatter, `interaction.product`, `molrep.equivariance`)
-live in molrep (operator ruling 2026-10-15; MACE blocks moved 2026-10-16).
+import MaceMatpes`), no lazy tables. An encoder's own blocks live in its
+`molrep/encoders/<arch>/layers.py`; a network's readout heads stay in the
+network package for now (`molzoo/mace/heads.py`, `molzoo/pinet/layers.py`
+`OutLayer`). This supersedes the 2026-10-15/16 ruling that put model-specific
+blocks in molzoo.
 Equivariant operations use cuEquivariance's descriptors (`molrep.eq`) on
 molnex's own kernels (`molrep.equivariance`).
 
 ```
 src/molix/autograd/potential.py    # Potential: abstract energy(frame); forward = the Derivative op
-src/molzoo/encoder.py              # ElementTable mixin (validate_elements, spent once eagerly)
-src/molzoo/{mace,pinet,allegro}/   # spec, encoder, potential, layers (+ heads / coupling / checkpoint / utils / properties)
-src/molzoo/checkpoint.py           # OfficialArchive + StubUnpickler + CheckpointRemap(table, *, on_unexpected, skip=())
+src/molrep/encoders/element_table.py  # ElementTable mixin (validate_elements, spent once eagerly)
+src/molrep/encoders/{mace,allegro,pinet,covalent_graph,message_passing}/  # encoder, layers, spec
+src/molrep/encoders/features.py    # EncoderFeatures(atom, bond): what the force-field heads read
+src/molzoo/{mace,pinet,allegro,rondo,byteff}/   # network: spec, potential (+ heads / checkpoint / utils / properties)
+src/molzoo/checkpoint.py           # OfficialArchive + StubUnpickler + CheckpointRemap(table, *, on_unexpected, skip=(), conversions={})
 src/molrep/embedding/geometry.py   # edge_vectors / edge_lengths (the one owner)
 ```
 
@@ -740,7 +750,7 @@ hooks (`MetricsHook`, `TensorBoardHook`) should write their
 
 ### Key Design Patterns
 
-- **Encoder body + product**: an encoder's `forward(td)` takes the post-collate batch, writes per-layer features `(N, layers, features)` under `atoms.node_features` (`pairs.edge_features` for Allegro) and exposes its primitives as methods; the named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, …) subclass the body and `molix.autograd.Potential` and own only `energy(frame)` + `forward`; reusable physics heads stay in molpot. Element-table validation is `molzoo.encoder.ElementTable`, spent once on the first eager call and folded out under tracing.
+- **Encoder body + product**: an encoder's `forward(td)` takes the post-collate batch, writes per-layer features `(N, layers, features)` under `atoms.node_features` (`pairs.edge_features` for Allegro) and exposes its primitives as methods; the named products (`MaceMatpes`, `AllegroPotential`, `PiNetPotential`, …) subclass the body and `molix.autograd.Potential` and own only `energy(frame)` + `forward`; reusable physics heads stay in molpot. Element-table validation is `molrep.encoders.ElementTable`, spent once on the first eager call and folded out under tracing.
 - **Pydantic specs**: molzoo model specs are torch-free `BaseModel`s with `ConfigDict(extra="forbid")` — typed fields and validators, no `getattr(spec, …, default)` duck typing; official-archive configs (`MaceOfficialConfig`, `NequipConfig`) use `extra="ignore"` and declare only the fields that are read; molpot head specs that carry tensors use `ConfigDict(arbitrary_types_allowed=True, frozen=True)`
 - **Equivariance**: group theory and descriptors are cuEquivariance's ported frontend `molrep.eq` / `molrep.eq.torch` (`import molrep.eq as meq`); every contraction runs on molnex's own operators in `molrep.equivariance` — `ChannelWiseTensorProduct`, `SymmetricContraction`, `SphericalHarmonics`, Allegro's `Contracter` and `WeightedChannels`, and `Linear` (one GEMM per irrep block over cue's linear descriptor, same flat `weight`) — on CUDA through `libmolnex_equivariance` (`csrc/equivariance`, namespace `molnex_equivariance`: deterministic, fused first and second adjoints, Meta kernels, loaded through `MOLNEX_OP_LIBRARY_PATH`) and on CPU through `molrep.equivariance.reference`, the same term table in plain PyTorch (tests and correctness only). The device of the tensor picks the path; there is no `method=` switch, no `use_fallback`, and no cuEquivariance kernel on any path (replacement completed 2026-10-26, notes topic `native-equivariance-default`; the earlier `cue-kernels-only` ruling is superseded). Precision is fixed at construction (`dtype=`), never cast. Edge convolutions are always indexed (conv fusion): global `indices_out` with `size_out=N`, the CSR edge schedule built once per batch by the encoder. Never `conv_tp(x[source], …)` + Python `scatter_sum`, which materialises an `(E, target.dim)` message (`.claude/notes/notes.md` topic `cueq-conv-fusion`).
 - **Force derivation (one op)**: every batch-level derivative is `molix.autograd.Derivative(energy, *, of="graphs.energy", wrt=(), outputs=None)` — `energy(frame) -> frame` writes `of`; `wrt` names TensorFrame keys (`"atoms.pos" → atoms.forces` scale −1, `"graphs.strain" → graphs.virial` (1,3,3) symmetrised, any other column → `<ns>.<name>_grad`). The op makes a leaf for every variable unless the column already is a live leaf (then it is differentiated as is and left in the frame — the caller's), rebuilds live edge geometry from it, does the one `torch.autograd.grad`, puts the caller's buffers back, detaches `of` iff grad is off; `Derivative.mark_leaves(frame)` is the eager prologue that marks the columns so a force-supervised training step traces as one graph on stock torch (the default steps run it in `forward_loss` before the traced body). Every potential exposes `energy(frame)` and takes `wrt=()` at construction; `forward` is the op built in `__init__` (`MaceMatpes(..., wrt=("atoms.pos",))` ≡ `Derivative(MaceMatpes(...).energy, wrt=("atoms.pos",))`; base class `molix.autograd.Potential`, never `Derivative(<potential object>)`). `MD` composes `Derivative(pots.energy, wrt=("atoms.pos"[, "graphs.strain"]))` once per run; compile with `Compiler(...)(op)` after one eager forward — no `compile_core`, no `compute_forces`, no `calc_forces` family. There is no other force module: `Sonata`, `PotentialComposer`, `Rondo` and the model zoo are `Potential`s on this op; `HessianDerivation` owns its own leaf and calls `torch.autograd` directly. Do not hand-roll a second force or virial path anywhere (decision 2026-09-11, spec `derivation-head-04-molix-derivative`).
@@ -775,11 +785,11 @@ which is the thing that is forbidden, not the type declaration.
 
 ### Adding New Components
 
-**New model family** (molzoo): a subpackage `molzoo/<family>/` in MACE's shape. `spec.py`: torch-free pydantic spec (`extra="forbid"`, every default here). `encoder.py`: the body, `class <Family>Encoder(ElementTable, nn.Module)` (`molzoo.encoder.ElementTable`), `__init__(spec)`, primitives as methods, `forward(td: TensorDict) -> TensorDict` reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` under `atoms.node_features`. `layers.py`: the blocks only this family uses (generic ones come from `molrep`). `potential.py`: `class <Family>Potential(Potential, <Family>Encoder)` taking `(spec, *, wrt=())`, implementing `energy(frame)` only and ending `__init__` with `self._derivative = Derivative(self.energy, wrt=wrt)`; official weights, if any, through a `checkpoint.py` key table + an `OfficialArchive` reader in `utils.py` behind `.load(path, *, wrt=(), ...)` and `CheckpointRemap(table, skip=...)`. Export eagerly from `molzoo/<family>/__init__.py`, never from `molzoo/__init__.py`. Add the paper reference and the spec under `src/molzoo/specs/` (mirrored to `docs/molzoo/specs/`).
+**New model family**: the encoder in `molrep/encoders/<family>/` — `spec.py`: torch-free pydantic `<Family>EncoderSpec` (`extra="forbid"`, every encoder default here); `encoder.py`: `class <Family>Encoder(ElementTable, nn.Module)` (`molrep.encoders.ElementTable`), `__init__(spec)`, primitives as methods, `forward(td: TensorDict) -> TensorDict` reading `td["atoms", "Z"]` / `td["pairs", ...]` and writing per-layer features `(N, layers, features)` under `atoms.node_features`; `layers.py`: its own blocks. The network in `molzoo/<family>/` — `spec.py`: `<Family>Spec(<Family>EncoderSpec)` adding the readout; `potential.py`: `class <Family>Potential(Potential, <Family>Encoder)` taking `(spec, *, wrt=())`, implementing `energy(frame)` only and ending `__init__` with `self._derivative = Derivative(self.energy, wrt=wrt)`; official weights, if any, through a `checkpoint.py` key table + an `OfficialArchive` reader in `utils.py` behind `.load(path, *, wrt=(), ...)` and `CheckpointRemap(table, skip=...)`. Export eagerly from `molzoo/<family>/__init__.py`, never from `molzoo/__init__.py`. Add the paper reference and the spec under `src/molzoo/specs/` (mirrored to `docs/molzoo/specs/`).
 
 **New potential** (molpot): one class per molrs style under `molpot.potentials` (`bond.py`, `angle.py`, `dihedral.py`, `improper.py`, `pair.py`), registered with `@register`, built from the force field by `from_style` and reached through `Potentials.from_forcefield(ff)`; a bonded style implements `term_energy(x, **params)`, a pair style prices `pairs` under the field's `special_bonds`. Forces come from `molix.autograd.Derivative`. `BasePotential` (keyword-only tensor kernels: `forward(*, pos, <term>_index, <term>_types, term_batch, num_graphs, tables)` reducing per graph) is the fixed tabulated path (MD / export / OPLS-AA).
 
-**New embedding/interaction** (molrep): only when at least two families use it — a block that serves one model lives in that model's `layers.py`. Pure `nn.Module`; build cue ops through `molrep.cueq`.
+**New embedding/interaction** (molrep): a block that serves one encoder lives in that encoder's `molrep/encoders/<arch>/layers.py`; one that two encoders use goes to `molrep.embedding` / `molrep.interaction`. Pure `nn.Module`.
 
 ## Scientific Correctness Requirements
 
@@ -890,17 +900,23 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
 
 0. **The named product is `Rondo`** (`src/molzoo/rondo/`, spec
    `src/molzoo/specs/rondo.md`), shaped like every other molzoo model:
-   `Rondo(forcefield, spec, wrt=("atoms.pos",))`, `forward = Derivative(energy, wrt)`.
+   `Rondo(forcefield, *, dtype=)`. The force field is one `Potentials`
+   (`Potentials.from_forcefield`); `forward` differentiates
+   `atoms.pos` and writes `atoms.forces_pred`.
+   The spec checks constructor keywords inside the class.
    The force field **is** the Hamiltonian — a molpy `ForceField` (molrs IR,
    LAMMPS `K` without ½, degrees) declares styles / cutoff / mixing / Coulomb
-   constant / special bonds once; `Potentials.from_forcefield(ff)` is the one
-   factory. Rondo adds `ChemEncoder` (ByteFF channels), `Hybridization` and one
-   head per open parameter (`molpot.heads.classical`); three primitives —
-   `tables(frame)`, `energy(frame, tables=None, styles=None)`, `partial_hessian(frame, tables=None)`
-   — and **no training-stage arguments** (no `outputs=` / `trainable=` /
+   constant / special bonds once; `Potentials.from_forcefield(ff)` returns that
+   one `Potentials`. Rondo holds it and adds the covalent-graph encoder
+   (`molrep.encoders.covalent_graph`, returning `EncoderFeatures(atom, bond)`)
+   and one head per style it prices (`molpot.classical`; the bonded heads
+   assemble angle / torsion / improper features themselves);
+   `predict(frame)` / `price(frame, tables)` are the primitives `energy` composes;
+   `energy(frame, *, styles=None, trainable=None)` and `partial_hessian(frame)`.
+   **No training-stage arguments on the constructor** (no `outputs=` /
    `energy_terms=` / `param_groups`; user ruling 2026-10-11). Which loss trains
-   which parameters is the training step's: `molix.core.steps.JointObjective(trainable=)`
-   detaches the other tables between `tables` and `energy`; the optimizer is
+   which parameters is the training step's: `JointObjective(trainable=, styles=)`
+   is passed into `energy`; the optimizer is
    `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
    (`JointTrainStep` + `JointDataModule`). `energy` writes `graphs.energy` and
    every table column (`bonds.k`, `bonds.k_ref`, …, `atoms.charge`); `forward`
@@ -908,7 +924,10 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
    joint step's job (`molix.frame.beside_labels`), not the model's.
    Required input columns (MolHub writes them for THEMol): `atoms.formal_charge`,
    `ring_connectivity`, `min_ring_size`, `gaff2_sigma`, `gaff2_epsilon`;
-   `bonds.bond_type`, `in_ring`; `impropers` as three cyclic rows per centre.
+   `atoms.equi_index` (topological symmetry class, molpy `assign_symmetry_classes`);
+   `bonds.bond_type`, `in_ring`; `propers.linear` (molpy
+   `perceive_linear_dihedrals`); `impropers` as one row per centre (centre first,
+   legs ascending).
 1. **Style potentials are molrs-verbatim** (`molpot.potentials`, one class per
    molrs style, registered with `@register`): what is fixed about the form
    (cutoff, mixing, special bonds, Coulomb constant) comes from the force field
@@ -932,3 +951,14 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
    `composable-a0` → `a1` → `iface` → `b1` → `b2` → `a2` chains live in
    `.claude/notes/composable-potentials.md`. Open later chains with `/mol:spec` only
    after re-reading it.
+
+
+## Classical force-field ownership (operator ruling, 2026-10-23)
+
+Each physical potential has one energy implementation. Fixed parameters,
+trainable tensors and reference-plus-delta prediction are parameter sources,
+never `Fixed*` / `Reference*` potential subclasses. molpy ForceFieldIR owns
+parameter-file import, unit/convention/form conversions and native backend
+serialization. Molnex consumes canonical tables and differentiates the energy;
+it must not introduce another conversion registry or handwritten export path.
+An IR parity failure blocks deployment; correct it at the IR owner.

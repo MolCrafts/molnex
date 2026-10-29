@@ -212,7 +212,7 @@ class LammpsWriter:
                 force constant and ``system`` has impropers — the deck would
                 omit their energy (ledger debt ``F25``).
         """
-        from molpy.io import write_lammps_forcefield
+        from molpy.io.lammps import LammpsForcefieldWriter
 
         self._refuse_omitted_impropers(forcefield, system)
 
@@ -226,24 +226,15 @@ class LammpsWriter:
         ff = forcefield.clone().realize(
             system, masses=masses, types=types, pairs=not skip_pair_style
         )
-        write_lammps_forcefield(
-            dest,
-            ff,
-            frame=frame,
+        # A pair-less include leaves ``special_bonds`` to the pair block
+        # (``write_pair_block``); a deck that read both would set it twice.
+        LammpsForcefieldWriter(
+            frame,
             units=ff.units,
             skip_pair_style=skip_pair_style,
+            skip_special_bonds=skip_pair_style,
             skip_units=True,
-        )
-        if skip_pair_style:
-            # molpy 0.17 still states ``special_bonds`` in a pair-less include;
-            # here that line belongs to the pair block (``write_pair_block``),
-            # and a deck that reads both would set it twice.
-            kept = [
-                line
-                for line in dest.read_text().splitlines()
-                if not line.startswith("special_bonds")
-            ]
-            dest.write_text("".join(f"{line}\n" for line in kept))
+        ).write(dest, ff)
         return dest
 
     @staticmethod
@@ -558,12 +549,14 @@ class LammpsWriter:
         # same strings, and molrs then numbers the types in class order, which is
         # the numbering ``write_pair_block`` addresses (see
         # ``ForceField.assign_types``).
+        numbers = frame_view["atoms", "Z"].detach().cpu().tolist()
         world = Atomistic()
         handles = []
         for i in range(n_atoms):
             handles.append(
-                world.def_atom(
-                    {
+                world.add_atom(
+                    **{
+                        "atomic_number": int(numbers[i]),
                         "type": types.atom_labels[types.atom_type[i]],
                         "x": float(xyz[i, 0]),
                         "y": float(xyz[i, 1]),
@@ -583,16 +576,16 @@ class LammpsWriter:
                 )
             )
         for n, (i, j) in enumerate(ForceField._arity(frame_view, "bonds", 2)):
-            world.def_bond(handles[i], handles[j], type=types.bond_labels[types.bond_type[n]])
+            world.add_bond(handles[i], handles[j], type=types.bond_labels[types.bond_type[n]])
         for n, (i, j, k) in enumerate(ForceField._arity(frame_view, "angles", 3)):
-            world.def_angle(
+            world.add_angle(
                 handles[i],
                 handles[j],
                 handles[k],
                 type=types.angle_labels[types.angle_type[n]],
             )
         for n, (i, j, k, l) in enumerate(ForceField._arity(frame_view, "propers", 4)):
-            world.def_dihedral(
+            world.add_dihedral(
                 handles[i],
                 handles[j],
                 handles[k],
@@ -601,10 +594,12 @@ class LammpsWriter:
             )
         frame = world.to_frame()
         cell = self._cell(frame_view)
+        # ``graphs.cell`` holds the lattice vectors as rows; a molpy ``Box`` takes
+        # them as the columns of its matrix.
         frame.box = (
-            Box(cell)
+            Box(np.ascontiguousarray(cell.T))
             if cell is not None
-            else Box.from_bounds(np.asarray(xyz, dtype=float), padding=box_pad_A)
+            else Box.bounding(np.asarray(xyz, dtype=float), [box_pad_A] * 3, [False] * 3)
         )
         return frame
 

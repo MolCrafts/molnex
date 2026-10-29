@@ -11,7 +11,6 @@ import torch
 
 from molzoo.checkpoint import (
     CheckpointRemap,
-    ConvertedWeight,
     ModuleStub,
     OfficialArchive,
     StubUnpickler,
@@ -60,17 +59,15 @@ class TestCheckpointRemap:
         assert CheckpointRemap({}).load(target, {"m.weight": upstream}) == ([], [])
         torch.testing.assert_close(target.m.linear.weight, upstream.t(), atol=0, rtol=0)
 
-    def test_a_declared_upstream_weight_is_converted_by_type_not_shape(self):
-        """A ``ConvertedWeight`` has its ``upstream_weight`` applied to upstream's
-        ``.weight`` — even when the shapes already agree and no reshape rule
-        would have fired."""
+    def test_a_registered_conversion_is_applied_by_type_not_shape(self):
+        """A module of a type in ``conversions`` has that function applied to
+        upstream's ``.weight`` — even when the shapes already agree and no
+        reshape rule would have fired."""
 
         def transposed(module: torch.nn.Module, weight: torch.Tensor) -> torch.Tensor:
             return weight.t()
 
-        class Declared(ConvertedWeight):
-            upstream_weight = transposed
-
+        class Declared(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.weight = torch.nn.Parameter(torch.zeros(3, 3))
@@ -78,7 +75,8 @@ class TestCheckpointRemap:
         target = torch.nn.Module()
         target.m = Declared()
         upstream = torch.arange(9.0).reshape(3, 3)  # not symmetric
-        assert CheckpointRemap({}).load(target, {"m.weight": upstream}) == ([], [])
+        remap = CheckpointRemap({}, conversions={Declared: transposed})
+        assert remap.load(target, {"m.weight": upstream}) == ([], [])
         torch.testing.assert_close(target.m.weight, upstream.t(), atol=0, rtol=0)
 
     def test_unknown_policy_is_refused(self):

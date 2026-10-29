@@ -36,10 +36,6 @@ def _config(**overrides) -> NequipConfig:
 
 
 class TestAllegroSpec:
-    def test_rejects_duplicate_atomic_numbers(self):
-        with pytest.raises(ValidationError, match="unique"):
-            AllegroSpec(atomic_numbers=[1, 1], r_max=4.0)
-
     def test_rejects_a_type_table_of_the_wrong_length(self):
         with pytest.raises(ValidationError, match="one per type"):
             AllegroSpec(atomic_numbers=[1, 6, 8], r_max=4.0, per_type_energy_shifts=[0.0, 1.0])
@@ -71,7 +67,11 @@ class TestAllegroSpec:
             if isinstance(n, ast.Import)
             for a in n.names
         }
-        assert roots <= {"__future__", "typing", "pydantic"}
+        modules = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+        assert roots <= {"__future__", "typing", "pydantic", "molrep"}
+        assert {m for m in modules if m and m.startswith("molrep")} == {
+            "molrep.encoders.allegro.spec"
+        }
 
     def test_from_package_keeps_the_default_width_of_a_depth_zero_mlp(self):
         spec = AllegroSpec.from_package(_config())

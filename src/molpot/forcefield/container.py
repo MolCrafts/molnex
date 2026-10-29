@@ -15,6 +15,7 @@ from typing import Any, Self
 
 import torch
 from molpy.ff.forcefield import ForceField as MolpyForceField
+from molpy.ff.forcefield import Style
 
 from molix.frame import TensorFrame, as_tensor_frame
 from molix.neighbor import NeighborList
@@ -485,11 +486,12 @@ class ForceField(MolpyForceField):
     def style_names(self) -> list[str]:
         """Declared styles as ``"<category>:<name>"`` keys, in declaration order.
 
-        molrs 0.15 exposes styles as handles (:attr:`styles`); this is the key
-        form the registry (:class:`~molpot.forcefield.schema.PotentialMeta`) and
-        the option table here are indexed by.
+        molpy lists styles as handles (``get_styles(Style)``, every category);
+        this is the key form the registry
+        (:class:`~molpot.forcefield.schema.PotentialMeta`) and the option table
+        here are indexed by.
         """
-        return [f"{style.category}:{style.name}" for style in self.styles]
+        return [f"{style.category}:{style.name}" for style in self.get_styles(Style)]
 
     def has_style(self, key: str) -> bool:
         return key in self.style_names()

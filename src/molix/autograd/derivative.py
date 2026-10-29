@@ -269,10 +269,7 @@ class Derivative(nn.Module):
                 energy reads, and ``graphs.cell`` ``(3, 3)`` or ``(1, 3, 3)`` Å
                 when ``graphs.strain`` is a variable.
             **energy_kwargs: Handed to the energy unchanged —
-                ``energy(frame, **energy_kwargs)``. A training step that has
-                already predicted a model's parameter tables on this batch
-                passes them here (``op(frame, tables=tables)``) so the energy
-                does not predict them again; the derivative is still only
+                ``energy(frame, **energy_kwargs)``. The derivative is only
                 with respect to ``wrt``, through whatever graph the kwargs
                 carry.
 

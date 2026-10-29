@@ -187,6 +187,45 @@ error for MD, not a reason to skip the rebuild.
 **Supersedes**: "warn and continue with pure-Python NeighborList" as the GH200
 workflow; "rebuild only molnex op, leave molrs".
 
+**x86_64 (2026-10-28).** `.venv-x86_64`'s libraries are compiled on a `cpu`
+compute node, never the login node: `.jobs/op-rebuild-x86_64.sbatch`
+(`naiss2026-1-53-cpu`, 128 G, `-j 16` — 32 parallel `cicc` of the equivariance
+tables OOM at 32 G; ~4 min). No CUDA 13 module exists (only 12.9) and torch is
+cu130, so the toolkit is the pip wheels `nvidia-cuda-{nvcc,cccl,runtime,crt}`,
+`nvidia-nvvm` 13.0 in `build/cuda-x86_64` (`uv pip install --target`), merged with
+the env's own `nvidia/cu13` libraries into one root; nvcc resolves its real path
+and links from `<wheel>/cu13/lib64`, which the job points at the merged `lib64`.
+`buildenv-gcc/2026.03` (GCC 14.3) + `CMake/4.3.2-bdist`, under `bash -l`
+(`module` is undefined in a plain batch shell). CUDA arch 89 (the login node's
+L40). ~~The built libraries load on the login node without extra
+`LD_LIBRARY_PATH`.
+
+**torch 2.15 (2026-10-29).** torch 2.15.0 ships CUDA 13.2 (`cuda-toolkit==13.2.2`).
+Both arches now build with the **13.2 `nvcc` wheels** (`nvidia-cuda-{nvcc,cccl,runtime,crt}`,
+`nvidia-nvvm` `==13.2.*`, `uv pip install --target build/cuda-<arch>`) merged with the
+env's `nvidia/cu13` libraries into `build/cuda-<arch>/root`; the GH200 CUDA module (13.0)
+is loaded only for GCC 14. nvcc 13.2 reads its profile relative to the path it is called
+through, so the merged root needs `lib -> lib64` too. GH200: `.jobs/env-build-aarch64.sbatch`
+(env + molpy + molhub + native ops, ~11 min); x86: `.jobs/op-rebuild-x86_64.sbatch` (~5 min).
+Torch's CMake still prints the module's `nvcc` as "CUDA nvcc"; `CMAKE_CUDA_COMPILER` (the
+13.2 wheel) is what compiles.~~ No longer true — see below.
+
+**Release + OpenMP (2026-10-29, spec `neighbor-01`).** `CMAKE_BUILD_TYPE` was
+never set, so `libmolnex_opLib` and the equivariance host code were built at
+**-O0**, and without `-fopenmp`, so every `at::parallel_for` (an inline
+`#pragma omp parallel` in ATen's header under torch's OpenMP backend) ran on
+one thread. Found when the new neighbour search took 785 ms on 16 threads
+against 562 ms on one (GH200 job 4606830). `csrc/CMakeLists.txt` and
+`csrc/molix/CMakeLists.txt` now default to Release, and the molix library links
+`OpenMP::OpenMP_CXX` — `libgomp.so.1`, the soname torch itself loads, so one
+runtime serves the process and `torch.set_num_threads` holds. Optimised GCC 14
+code references `__cxa_call_terminate` (`CXXABI_1.3.15`), which the system
+libstdc++ (RHEL 9) lacks, so the libraries now need GCC 14's runtime on x86 as
+on GH200: `scripts/env/activate.sh` prepends the `lib64` of the compiler each
+build recorded (`CMAKE_CXX_COMPILER` in `build/csrc-<arch>/CMakeCache.txt`) to
+`LD_LIBRARY_PATH`. A process that loads the libraries without
+`activate.sh` needs the same export.
+
 ---
 
 <!-- mol:note:topic:cue-kernels-only -->
@@ -1084,7 +1123,13 @@ kernel** under inductor — `molix.compile.register_inductor_fallbacks()`
 removes the `index_add` decompositions from `torch._inductor.decomposition`
 and `torch._decomp` (clearing the lru caches so it also holds after an
 earlier compile in the process) and registers `make_fallback` for
-`index_add` / `index_add_`. With it: probe error at round-off (fp64 N=4995
+`index_add` / `index_add_`. **Removed 2026-10-29:** the leak is absent on
+torch 2.14.1 — the probe below under raw inductor, no fallback, is round-off
+on CPU and on GH200 (fp32 4.9e-4 of a ~6500 sum, fp64 7e-12; job 4606803) —
+and the forced fallback was what made AOTI packages crash on torch ≤ 2.14
+(next paragraph's proxy-executor `alpha` count, "AOTI index_add"). The
+`Compiler` keeps only the `donated_buffer = False` default; the slow test
+`TestIndexAddUnderInductor` keeps the probe (CPU, and CUDA where present). With it: probe error at round-off (fp64 N=4995
 9.8e-11, N=21 0.0; fp32 3.9e-3), PEO-box compiled core dE **0.0**, dF 5.7e-14,
 dW 1.9e-10. It runs from `Compiler.__call__` and from the AOTI packager
 (`Exporter._package`), is process-global and idempotent; a direct
@@ -1670,7 +1715,14 @@ passes on the nightly. Note that `torch.library.custom_op` infers **SymInt**
 for an `int` annotation, which takes a different path and does *not*
 reproduce — the schema has to be spelled out.
 
-**Reach while molnex is on 2.14.** Anything exported through AOTI whose graph
+**Cause on molnex's side (2026-10-29):** the op reached the proxy executor
+only because molnex forced every `index_add` to an ATen fallback
+(`register_inductor_fallbacks`, the 2.12 leak workaround) — inductor otherwise
+lowers it itself and no extern call is emitted. With the fallback removed
+(leak measured absent on 2.14.1) the reach below no longer applies. Kept for
+the record:
+
+**Reach while molnex is on 2.14** (with the fallback). Anything exported through AOTI whose graph
 contains the *functional* `Tensor.index_add`: `molrep/embedding/angular.py:200`
 (the only functional use; the other 227 call sites are the in-place
 `index_add_`, which export functionalises back to the same node) and the

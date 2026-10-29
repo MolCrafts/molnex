@@ -15,7 +15,7 @@ from molix.schema import ENERGY_KEY, FORCES_KEY, VIRIAL_KEY
 from molpot.composition import LJParameterHead, PotentialComposer
 from molpot.pooling import EdgeToNodePooling, LayerPooling
 from molpot.potentials import LJ126
-from molzoo.allegro import AllegroEncoder, AllegroSpec
+from molrep.encoders.allegro import AllegroEncoder, AllegroEncoderSpec
 
 #: Finite-difference step (Å for positions, dimensionless for strain) and the
 #: gate of the fourth-order stencil in float64.
@@ -208,7 +208,7 @@ class TestPotentialComposer:
         """An encoder's layered edge features, pooled to ``atoms.node_features``, price."""
         batch = _batch(_positions(torch.float32))
         encoder = AllegroEncoder(
-            AllegroSpec(
+            AllegroEncoderSpec(
                 atomic_numbers=[1, 6, 7, 8],
                 num_scalar_features=16,
                 num_tensor_features=8,

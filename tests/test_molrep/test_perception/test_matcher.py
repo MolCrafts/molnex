@@ -37,20 +37,10 @@ class TestFakeSmartsMatcher:
 
 
 class TestMolpySmartsMatcher:
-    def test_functional_match_if_available(self):
-        """Optional smoke: match carbon atoms in ethanol when molpy works."""
-        try:
-            import molpy as mp
-            from molpy.perceive import SmartsPattern  # noqa: F401
+    def test_matches_the_carbons_of_ethanol(self):
+        import molpy as mp
 
-            matcher = MolpySmartsMatcher()
-            mol = mp.io.read_smiles_str("CCO")
-        except Exception as exc:  # pragma: no cover - env-dependent
-            pytest.skip(f"molpy SMARTS smoke unavailable: {exc}")
-
-        pat = SymbolicPattern("[#6]", arity=1)
-        out = matcher.match(mol, pat)
-        assert out.ndim == 2
-        assert out.shape[0] == 1
-        assert out.shape[1] >= 1  # ethanol has ≥1 carbon (heavy-only graph)
+        mol = mp.io.smiles.read_smiles("CCO").to_atomistic()
+        out = MolpySmartsMatcher().match(mol, SymbolicPattern("[#6]", arity=1))
         assert out.dtype == torch.long
+        assert out.shape == (1, 2)  # heavy-atom graph: C0, C1

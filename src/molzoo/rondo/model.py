@@ -1,374 +1,383 @@
-"""Rondo: a graph network that predicts a Class-I force field, priced through molpot potentials.
+"""Rondo: a graph encoder and one parameter head per style, priced through molpot potentials.
 
-Spec: ``src/molzoo/specs/rondo.md``.
+Spec: ``src/molzoo/specs/rondo.md``; the encoder and the bonded heads are
+``.claude/specs/rondo-enc-01-graph-encoder.md``.
 
-``Rondo(forcefield, spec, wrt=("atoms.pos",), dtype=torch.float64)`` is shaped like every other
+``Rondo(forcefield, *, dtype=torch.float64)`` is shaped like every other
 molzoo model (:class:`molix.autograd.Potential`): ``forward`` is the
-:class:`~molix.autograd.Derivative` of :meth:`Rondo.energy`, writing
-``graphs.energy`` and, for ``atoms.pos``, the force at ``atoms.forces_pred`` —
-a training batch holds the DFT force at ``atoms.forces``. Where the energy
-must sit beside its own label, the training step wraps the call in
+:class:`~molix.autograd.Derivative` of :meth:`Rondo.energy` with respect to
+``atoms.pos``, writing ``graphs.energy`` and the force at ``atoms.forces_pred``.
+A training batch holds the DFT force at ``atoms.forces``. Where the energy must
+sit beside its own label, the training step wraps the call in
 :func:`molix.frame.beside_labels` (``graphs.energy → graphs.energy_pred``), as
 :class:`molix.core.steps.JointTrainStep` does; the model itself moves nothing.
-Three primitives sit underneath it —
 
-* :meth:`tables` — the encoder and one head per parameter table turn the
-  covalent graph into this batch's parameters (``bonds.k`` …), never reading a
-  coordinate, so every parameter is geometry-independent and the force is
-  exactly ``−dE/dpos``;
-* :meth:`energy` — the force field's styles, as the torch potentials
-  :meth:`molpot.potentials.collection.Potentials.from_forcefield` built from
-  the IR, priced on those tables (or on tables the caller hands in — a training
-  step detaches the ones its loss does not train), every style or the ones the
-  caller names (ByteFF's ``calc_terms``: the bonded strain at a QM minimum, the
-  non-bonded force alone);
-* :meth:`partial_hessian` — the MM ``3×3`` blocks on the pairs a Hessian
-  objective names.
+Rondo owns the two interfaces and nothing between them:
 
-The force field **is** the Hamiltonian: which terms exist, their cutoff, mixing
-rule, Coulomb constant and 1-4 scales are the molpy ``ForceField``'s, declared
-once. Rondo adds the heads that supply the parameters the IR leaves open and
-nothing else. Conventions are molrs's: LAMMPS ``K`` (no ½), angles in degrees.
+* encoder → heads: :attr:`graph`
+  (:class:`~molrep.encoders.covalent_graph.encoder.CovalentGraphEncoder`) returns
+  :class:`~molrep.encoders.features.EncoderFeatures`, one row per atom and per bond.
+  :meth:`features` is that call and evaluates no head.
+* heads → potentials: one :class:`~molpot.classical.Term` per style the
+  :class:`~molpot.potentials.collection.Potentials` prices. The bonded heads
+  assemble angle, torsion and improper features from the atom and bond rows
+  themselves; the pair heads are EEM charges (D1) and LJ around GAFF2 (D2)
+  (:class:`molzoo.byteff.potential.ByteFF` overrides them). Their columns are
+  in molrs's conventions (LAMMPS ``K`` without ½, degrees).
+
+:meth:`predict` (parameters only) and :meth:`price` (energy at given
+parameters) are the two primitives :meth:`energy` composes.
+
+The force field **is** the catalogue of styles: cutoff, mixing, Coulomb
+constant and 1-4 scales are the molpy ``ForceField``'s. A declared style with
+no registered potential, and a priced style with no parameter head, are refused
+at construction.
 
 References:
+    Zheng, T. et al. "Data-driven parametrization of molecular mechanics force
+    fields for expansive chemical space coverage." Chem. Sci. 2025.
+    https://arxiv.org/abs/2408.12817
     Wang, Y. et al. "End-to-end differentiable construction of molecular
     mechanics force fields." (Espaloma) https://arxiv.org/abs/2010.01196
-    Zheng, T. et al. "Data-driven parametrization of molecular mechanics force
-    fields for expansive chemical space coverage." (ByteFF)
-    https://arxiv.org/abs/2408.12817
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 
 import torch
-import torch.nn as nn
 from molpy.ff.forcefield import ForceField
 from tensordict import TensorDict
 
 from molix.autograd import Derivative, Potential
 from molix.schema import ENERGY_KEY, FORCES_PRED_KEY, POS_KEY
-from molpot.charge import (
-    AtomicChargeModel,
-    ChiEtaHead,
-    DiagonalHardnessKernel,
-    ElectronegativityEqualization,
-)
+from molpot.classical import TERMS, Term
 from molpot.forcefield.partial_hessian import TermHessian
-from molpot.heads.classical import (
-    AngleHead,
-    BondHead,
-    CovalentRadiusSum,
-    CvffHead,
-    LJHead,
-    PeriodicHead,
-)
 from molpot.potentials.collection import Potentials
 from molpot.potentials.potential import BondedPotential
-from molrep.chem.encoder import ChemEncoder
-from molrep.chem.hybridization import Hybridization
+from molrep.encoders.covalent_graph import CovalentGraphEncoder
+from molrep.encoders.features import EncoderFeatures
 
-from .spec import RondoSpec
+from .spec import validate
 
 __all__ = ["Rondo"]
 
 Tables = dict[str, dict[str, torch.Tensor]]
 
 
+def _term_style(kind: type[Term]) -> str:
+    """The force-field key of a term class."""
+    if isinstance(kind, type) and issubclass(kind, Term):
+        return kind.style
+    raise TypeError(f"a term is a Term class, got {kind!r}")
+
+
+def _detach(predicted: Tables, trainable: Sequence[str] | None) -> Tables:
+    """Drop the gradient of every predicted column *trainable* does not name."""
+    if trainable is None:
+        return predicted
+    named = tuple(trainable)
+    for entry in named:
+        namespace, _, name = entry.partition(".")
+        if namespace not in predicted or (name and name not in predicted[namespace]):
+            raise KeyError(
+                f"trainable entry {entry!r} names no predicted parameter: the model predicts "
+                f"{ {ns: sorted(columns) for ns, columns in predicted.items()} }"
+            )
+    kept: Tables = {}
+    for namespace, columns in predicted.items():
+        whole = namespace in named
+        kept[namespace] = {
+            column: value if whole or f"{namespace}.{column}" in named else value.detach()
+            for column, value in columns.items()
+        }
+    return kept
+
+
+def _style_of(kind: str | type[Term]) -> str:
+    """A term class, or a style key a training objective already holds."""
+    if isinstance(kind, str):
+        return kind
+    return _term_style(kind)
+
+
 class Rondo(Potential):
-    """Predict every open Class-I parameter from the covalent graph and evaluate the energy.
+    """Predict the open parameters of the force field's styles and evaluate their energy.
 
     Args:
-        forcefield: The molpy ``ForceField`` whose styles are priced. Every
-            style must have a registered molpot potential **and** a head here
-            that supplies its parameters: ``bond harmonic``, ``angle
-            harmonic``, ``dihedral periodic`` or ``opls``, ``improper cvff``,
-            ``pair lj/cut``, ``pair coul/cut``. A style outside this set is
-            refused at construction, by name.
-        spec: Encoder and head settings (:class:`~molzoo.rondo.spec.RondoSpec`).
-            Defaults to the spec's defaults.
-        wrt: Variables :meth:`forward` differentiates against, as for every
-            molzoo potential (``("atoms.pos",)`` writes ``atoms.forces_pred``;
-            ``()`` makes ``forward`` the energy alone).
+        forcefield: The molpy ``ForceField``. Its energy is one
+            :class:`~molpot.potentials.collection.Potentials`
+            (:meth:`~molpot.potentials.collection.Potentials.from_forcefield`).
+            Rondo adds one parameter head per style that object prices. A
+            later style is a force field that declares it; a subclass
+            overrides :meth:`load_state_dict` to accept this checkpoint.
         dtype: Floating dtype every parameter and buffer is built at.
+        **settings: Fields of
+            :class:`~molrep.encoders.covalent_graph.spec.CovalentGraphEncoderSpec`
+            and :class:`~molzoo.rondo.spec.HeadsSpec`. Omitted fields take the
+            spec's defaults.
 
     Raises:
-        ValueError: A declared style has no potential or no head, or a
-            ``dihedral opls`` is declared with a proper periodicity other than
-            ``(1, 2, 3, 4)``.
+        ValueError: The field declares no priced style, a declared style has no
+            registered potential, or a priced style has no parameter head.
 
     Example::
 
-        ff = mp.ff.ForceField(name="class-i", units="real")
-        ff.def_style("bond", "harmonic")
-        ...
-        model = Rondo(ff, RondoSpec(), wrt=("atoms.pos",), dtype=torch.float64)
-        out = model(batch)      # graphs.energy, atoms.forces_pred, atoms.charge, bonds.k …
+        from molzoo.rondo import Rondo
+
+        model = Rondo(ff, dtype=torch.float64)
+        model.load_state_dict(torch.load("rondo.pt"))
+        features = model.features(batch)          # EncoderFeatures, no head
+        out = model(batch)                        # graphs.energy, atoms.forces_pred, bonds.k …
     """
 
-    #: Styles Rondo can supply parameters for, with the head each one needs.
-    SUPPORTED_STYLES: tuple[str, ...] = (
-        "bond:harmonic",
-        "angle:harmonic",
-        "dihedral:periodic",
-        "dihedral:opls",
-        "improper:cvff",
-        "pair:lj/cut",
-        "pair:coul/cut",
-    )
+    SUPPORTED_STYLES: tuple[str, ...] = tuple(TERMS)
 
-    def __init__(
-        self,
-        forcefield: ForceField,
-        spec: RondoSpec | None = None,
-        *,
-        wrt: Sequence[str] = ("atoms.pos",),
-        dtype: torch.dtype,
-    ) -> None:
+    def __init__(self, forcefield: ForceField, *, dtype: torch.dtype, **settings: object) -> None:
         super().__init__()
         #: The build dtype of every float parameter and buffer.
         self.dtype = dtype
-        spec = RondoSpec() if spec is None else spec
+        spec = validate(**settings)
         self.spec = spec
         # Plain attribute: the IR is data, not a module.
-        self.forcefield = forcefield
-        width = spec.encoder.width
-        hidden = spec.heads.hidden
-
-        self.encoder = ChemEncoder(
-            atom_dim=width,
-            bond_dim=width,
-            angle_dim=width,
-            proper_dim=width,
-            improper_dim=width,
-            hidden_dim=width,
-            num_elements=spec.encoder.num_elements,
-            atom_channels=spec.encoder.atom_channels,
-            bond_channels=spec.encoder.bond_channels,
-            n_blocks=spec.encoder.n_blocks,
-            local_attention=spec.encoder.local_attention,
-            dtype=dtype,
-        )
-        self.hybridization = Hybridization()
-        self.covalent_radius = CovalentRadiusSum(spec.encoder.num_elements, dtype=dtype)
-        self.potentials = Potentials.from_forcefield(forcefield)
-
-        unknown = [key for key in self.potentials.keys() if key not in self.SUPPORTED_STYLES]
-        if unknown:
+        self.forcefield = forcefield.canonical()
+        self.graph = CovalentGraphEncoder(spec.encoder, dtype=dtype)
+        self.heads = torch.nn.ModuleDict()
+        self.potentials = Potentials.from_forcefield(self.forcefield)
+        if len(self.potentials) == 0:
             raise ValueError(
-                f"Rondo has no head for the styles {unknown}; it supplies parameters for "
+                "the force field declares no style that prices an energy; "
+                "Rondo is built from those styles"
+            )
+        missing = [style for style in self.potentials if style not in TERMS]
+        if missing:
+            raise ValueError(
+                f"Rondo has no parameters for the styles {missing}; it supplies parameters for "
                 f"{self.SUPPORTED_STYLES}"
             )
-        self.heads = nn.ModuleDict()
-        for key in self.potentials.keys():
-            if key == "bond:harmonic":
-                self.heads["bonds"] = BondHead(
-                    width,
-                    hidden,
-                    k_ref=spec.heads.bond_k_ref,
-                    r0_gain=spec.heads.bond_r0_gain,
-                    dtype=dtype,
-                )
-            elif key == "angle:harmonic":
-                self.heads["angles"] = AngleHead(
-                    width,
-                    hidden,
-                    k_ref=spec.heads.angle_k_ref,
-                    theta0_gain_deg=spec.heads.angle_theta0_gain_deg,
-                    dtype=dtype,
-                )
-            elif key == "dihedral:periodic":
-                self.heads["propers"] = PeriodicHead(
-                    width, hidden, periodicity=spec.heads.proper_periodicity, dtype=dtype
-                )
-            elif key == "dihedral:opls":
-                if tuple(spec.heads.proper_periodicity) != (1, 2, 3, 4):
-                    raise ValueError(
-                        "dihedral opls is the four-term series n = 1..4; set "
-                        f"proper_periodicity=(1, 2, 3, 4), got {spec.heads.proper_periodicity}"
-                    )
-                self.heads["propers"] = PeriodicHead(
-                    width, hidden, periodicity=(1, 2, 3, 4), dtype=dtype
-                )
-            elif key == "improper:cvff":
-                self.heads["impropers"] = CvffHead(
-                    width,
-                    hidden,
-                    k_ref=spec.heads.improper_k_ref,
-                    periodicity=spec.heads.improper_periodicity,
-                    dtype=dtype,
-                )
-            elif key == "pair:lj/cut":
-                self.heads["lj"] = LJHead(
-                    width,
-                    hidden,
-                    sigma_gain=spec.heads.lj_sigma_gain,
-                    epsilon_gain=spec.heads.lj_epsilon_gain,
-                    dtype=dtype,
-                )
-            elif key == "pair:coul/cut":
-                self.heads["charge"] = AtomicChargeModel(
-                    ChiEtaHead(feature_dim=width, hidden_dim=hidden, dtype=dtype),
-                    ElectronegativityEqualization(
-                        DiagonalHardnessKernel(),
-                        max_atoms=spec.heads.eem_max_atoms,
-                        jitter=spec.heads.eem_jitter,
-                    ),
-                )
-        # One bonded potential per namespace: ``tables`` reads their indices.
-        self._bonded_keys = {
-            potential.namespace: key
-            for key, potential in self.potentials.items()
-            if isinstance(potential, BondedPotential)
-        }
-        # The op ``forward`` runs, built once like every molzoo potential's.
-        # A bound method, so no submodule is registered. The force lands beside
-        # the label (``atoms.forces_pred``); the energy is the op's ``of``.
-        keys = tuple(wrt)
-        outputs = tuple(FORCES_PRED_KEY if key == "atoms.pos" else None for key in keys)
-        self._derivative = Derivative(self.energy, wrt=keys, outputs=outputs)
+        self._terms: dict[str, Term] = {}
+        for style in self.potentials:
+            self._add(style)
+        # The op ``forward`` runs, built once. A bound method, so no submodule
+        # is registered. The force is −∂E/∂pos and lands beside the label
+        # (``atoms.forces_pred``); the energy is the op's ``of``.
+        self._derivative = Derivative(self.energy, wrt=("atoms.pos",), outputs=(FORCES_PRED_KEY,))
 
-    # ------------------------------------------------------------------
-    # tables
-    # ------------------------------------------------------------------
+    @property
+    def terms(self) -> Mapping[type[Term], Term]:
+        """The terms this model carries, keyed by their class, in price order."""
+        return MappingProxyType({type(term): term for term in self._terms.values()})
 
-    def tables(self, frame: TensorDict) -> Tables:
-        """This batch's predicted parameters, one row per term or atom.
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, object],
+        strict: bool = True,
+        assign: bool = False,
+        prefixes: Sequence[str] | None = None,
+    ):
+        """Load parameters. A subclass on a richer force field overrides this.
+
+        The base is strict: every key of this module is in *state_dict*, and
+        *state_dict* has no key this module lacks. The subclass is constructed
+        on the force field that declares the new styles and overrides this
+        method to accept the parent's checkpoint (the new heads stay at their
+        initial values)::
+
+            def load_state_dict(self, state_dict, strict=True, assign=False):
+                return super().load_state_dict(state_dict, strict=False, assign=assign)
 
         Args:
-            frame: Batch with ``atoms.Z``, the encoder's declared channel
-                columns, the covalent namespaces (``bonds.bond_type`` when
-                angles or propers are priced), ``atoms.gaff2_sigma`` /
-                ``atoms.gaff2_epsilon`` when Lennard-Jones is priced, and
-                ``graphs.total_charge`` ``(B,)`` when charges are.
+            state_dict: A ``state_dict`` from this class or, in an override,
+                from the parent.
+            strict: Require the keys to match exactly.
+            assign: Copy by assignment rather than into the existing storage.
+            prefixes: Copy only these prefixes (``"graph."``, ``"heads."``).
+                Every other tensor is left in its existing storage.
 
         Returns:
-            Namespace → name → tensor. Parameters come with their references
-            (``k_ref``, ``r0_ref``, ``theta0_ref``, ``sigma_ref``,
-            ``epsilon_ref``) so a prior can read both from one table.
+            Missing and unexpected keys, as
+            :meth:`torch.nn.Module.load_state_dict` does.
         """
-        emb = self.encoder.compose(frame)
-        atoms = frame["atoms"]
-        tables: Tables = {}
-        if "bonds" in self.heads:
-            index = self._bonded("bonds").index(frame)
-            r0_ref = self.covalent_radius(atoms["Z"][index[0]], atoms["Z"][index[1]])
-            tables["bonds"] = dict(self.heads["bonds"](emb.bond, r0_ref=r0_ref.to(emb.bond.dtype)))
-        if "angles" in self.heads or "propers" in self.heads:
-            degree, pi = self._hybridization(frame)
-        if "angles" in self.heads:
-            centre = self._bonded("angles").index(frame)[1]
-            theta0_ref = torch.rad2deg(self.hybridization.angle_reference(degree, pi))[centre]
-            tables["angles"] = dict(
-                self.heads["angles"](emb.angle, theta0_ref=theta0_ref.to(emb.angle.dtype))
+        if prefixes is not None:
+            return self._load_prefixes(state_dict, prefixes)
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def _load_prefixes(self, state_dict: Mapping[str, object], prefixes: Sequence[str]):
+        """Copy only these prefixes into the existing tensors.
+
+        Every other parameter keeps its storage. A missing key under a named
+        prefix raises. A key under a named prefix that this model does not
+        have raises. Keys outside the prefixes are ignored.
+        """
+        allowed = tuple(prefixes)
+        current = self.state_dict()
+        incoming = {
+            str(key): value for key, value in state_dict.items() if str(key).startswith(allowed)
+        }
+        owned = [key for key in current if key.startswith(allowed)]
+        missing = [key for key in owned if key not in incoming]
+        unexpected = [key for key in incoming if key not in current]
+        if missing or unexpected:
+            raise KeyError(
+                f"prefix load missing {missing or '[]'}, unexpected {unexpected or '[]'}"
             )
-        if "propers" in self.heads:
-            table = dict(self.heads["propers"](emb.proper))
-            # A dihedral about an sp centre is undefined (its cross products
-            # vanish); ByteFF zeroes those terms by a SMARTS match, here the
-            # centre's hybridization comes from the bond orders.
-            index = self._bonded("propers").index(frame)
-            linear = self.hybridization.linear(degree, pi)
-            bent = (~(linear[index[1]] | linear[index[2]])).unsqueeze(-1)
-            table["k"] = table["k"] * bent.to(table["k"].dtype)
-            tables["propers"] = table
-        if "impropers" in self.heads:
-            tables["impropers"] = dict(self.heads["impropers"](emb.improper))
-        per_atom: dict[str, torch.Tensor] = {}
-        if "lj" in self.heads:
-            for column in ("gaff2_sigma", "gaff2_epsilon"):
-                if column not in atoms.keys():
-                    raise KeyError(
-                        f"Rondo prices pair lj/cut around atoms.{column}; "
-                        "the batch has no such column"
-                    )
-            per_atom.update(
-                self.heads["lj"](
-                    emb.atom,
-                    sigma_ref=atoms["gaff2_sigma"].to(emb.atom.dtype),
-                    epsilon_ref=atoms["gaff2_epsilon"].to(emb.atom.dtype),
-                )
-            )
-        if "charge" in self.heads:
-            per_atom["charge"] = self.heads["charge"].charges(
-                emb.atom, frame, total_charge=frame["graphs", "total_charge"]
-            )
-        if per_atom:
-            tables["atoms"] = per_atom
-        return tables
+        return super().load_state_dict(incoming, strict=False, assign=False)
 
     # ------------------------------------------------------------------
-    # energy
+    # features / energy
     # ------------------------------------------------------------------
+
+    def features(self, frame: TensorDict) -> EncoderFeatures:
+        """The encoder's atom and bond features. No parameter head runs.
+
+        Args:
+            frame: Batch with the encoder's columns (``atoms.Z`` /
+                ``formal_charge`` / ``ring_connectivity`` / ``min_ring_size`` /
+                ``equi_index``; ``bonds.bond_index`` / ``bond_type`` /
+                ``in_ring`` / ``equi_index``).
+
+        Returns:
+            One row per atom and per bond.
+        """
+        return self.graph(frame)
+
+    def predict(
+        self, frame: TensorDict, *, styles: Sequence[str | type[Term]] | None = None
+    ) -> Tables:
+        """The parameters of *styles* (every carried style when ``None``), nothing priced.
+
+        Args:
+            frame: Batch with the encoder's columns and the namespaces the
+                styles read.
+            styles: Members of :attr:`potentials`, as in :meth:`energy`.
+
+        Returns:
+            ``{namespace: {column: tensor}}`` in molrs's conventions.
+
+        Raises:
+            ValueError: *styles* is empty or names a style the model does not
+                carry.
+        """
+        features = self.features(frame)
+        predicted: Tables = {}
+        for key in self._styles(styles):
+            term = self._terms[key]
+            columns = term.predict(features, frame, self.potentials[key])
+            predicted.setdefault(term.namespace, {}).update(columns)
+        return predicted
+
+    def price(
+        self,
+        frame: TensorDict,
+        tables: Tables,
+        *,
+        styles: Sequence[str | type[Term]] | None = None,
+    ) -> torch.Tensor:
+        """The energy ``(B,)`` kcal/mol of *styles* at the parameters in *tables*.
+
+        Args:
+            frame: Batch with ``atoms.pos`` and the namespaces the styles read.
+            tables: Parameters as :meth:`predict` returns them (or a mean of
+                several models' tables).
+            styles: Members of :attr:`potentials`, as in :meth:`energy`.
+        """
+        keys = self._styles(styles)
+        params = {key: self._terms[key].potential_params(tables) for key in keys}
+        return self.potentials(frame, params, styles=keys)
+
+    @staticmethod
+    def write_tables(frame: TensorDict, tables: Tables) -> None:
+        """Write every predicted column onto the namespace of *frame* that holds it."""
+        for namespace, columns in tables.items():
+            if namespace in frame.keys():
+                for name, value in columns.items():
+                    frame[namespace, name] = value
+
+    def _styles(self, styles: Sequence[str | type[Term]] | None) -> tuple[str, ...]:
+        if styles is None:
+            return tuple(self.potentials.keys())
+        keys = tuple(_style_of(item) for item in styles)
+        unknown = [key for key in keys if key not in self.potentials]
+        if not keys or unknown:
+            raise ValueError(
+                f"styles names {unknown or 'no style'}; the model carries "
+                f"{tuple(self.potentials.keys())}"
+            )
+        return keys
 
     def energy(
         self,
         frame: TensorDict,
-        tables: Tables | None = None,
         *,
-        styles: Sequence[str] | None = None,
+        styles: Sequence[str | type[Term]] | None = None,
+        trainable: Sequence[str] | None = None,
     ) -> TensorDict:
         """Write ``graphs.energy`` ``(B,)`` kcal/mol — the traced seam.
 
-        The heads run inside the energy (``tables=None``) so that everything
-        below the caller's compiled region is one graph; a caller that has
-        already predicted the tables — a training step that detaches the ones
-        its loss does not train — hands them in. The predicted tables are
-        written onto their namespaces as columns (``bonds.k``, ``atoms.charge``,
-        …) so losses and priors read them from the batch.
+        The heads of the priced styles run here, and their columns are written
+        onto the batch (``bonds.k``, ``atoms.charge``, …). ``trainable`` names
+        the columns that keep a gradient (``"bonds"`` or ``"bonds.k"``); the
+        others are detached. ``None`` keeps every column.
 
         Args:
             frame: Padded batch with ``atoms.pos``, ``atoms.batch``, ``graphs``
-                and the namespaces the force field's styles read.
-            tables: Parameters from :meth:`tables`, or ``None`` to predict them
-                here.
-            styles: The styles summed, as the force field names them
-                (``"bond:harmonic"``, ``"pair:lj/cut"`` …); ``None`` (default)
-                prices every declared style. ByteFF's ``calc_terms``: the bond
-                and angle energy on a QM minimum is the strain ``r0`` / ``θ0``
-                remove, the pair styles' force alone tells a clashing geometry.
-                A fixed tuple of names, so the sum traces as straight-line code.
+                and the namespaces the priced styles read.
+            styles: Members of :attr:`potentials` to price — the classes in
+                :mod:`molpot.classical` (``BondHarmonic``, ``LJCut``, …)
+                — or ``None`` for every member. A training objective may pass
+                the force field's style key instead. The tuple is fixed, so
+                the call traces as straight-line code.
+            trainable: Predicted columns that keep a gradient, or ``None``.
 
         Returns:
-            The same frame with ``graphs.energy`` and the table columns written.
+            The same frame with ``graphs.energy`` and the predicted columns written.
 
         Raises:
-            ValueError: *styles* is empty or names a style the force field does
-                not declare.
+            ValueError: *styles* is empty or names a style the model does not
+                carry.
+            KeyError: *trainable* names a column this call did not predict.
         """
-        if tables is None:
-            tables = self.tables(frame)
-        keys = tuple(self.potentials.keys()) if styles is None else tuple(styles)
-        unknown = [key for key in keys if key not in self.potentials]
-        if not keys or unknown:
-            raise ValueError(
-                f"energy(styles=...) names {unknown or 'no style'}; the force field declares "
-                f"{tuple(self.potentials.keys())}"
-            )
-        total: torch.Tensor | None = None
-        for key in keys:
-            term = self.potentials[key](frame, **self._style_params(key, tables))
-            total = term if total is None else total + term
-        frame[ENERGY_KEY] = total
-        for namespace, table in tables.items():
-            if namespace in frame.keys():
-                for name, value in table.items():
-                    frame[namespace, name] = value
+        predicted = _detach(self.predict(frame, styles=styles), trainable)
+        frame[ENERGY_KEY] = self.price(frame, predicted, styles=styles)
+        self.write_tables(frame, predicted)
         return frame
 
-    def partial_hessian(self, frame: TensorDict, tables: Tables | None = None) -> torch.Tensor:
+    def tables(
+        self,
+        frame: TensorDict,
+        *,
+        styles: Sequence[str | type[Term]] | None = None,
+        trainable: Sequence[str] | None = None,
+    ) -> TensorDict:
+        """Write the predicted parameter columns of *styles* onto the batch — no energy.
+
+        The heads :meth:`energy` runs, without pricing: an objective that reads
+        the parameters themselves (charges against MBIS, the torsion prior)
+        needs nothing else, and ``graphs.energy`` — the label — is not touched.
+
+        Args:
+            frame: Batch with the namespaces the styles' heads read.
+            styles: As :meth:`energy`.
+            trainable: As :meth:`energy`.
+
+        Returns:
+            The same frame with the predicted columns written.
+        """
+        self.write_tables(frame, _detach(self.predict(frame, styles=styles), trainable))
+        return frame
+
+    def partial_hessian(
+        self, frame: TensorDict, *, trainable: Sequence[str] | None = None
+    ) -> torch.Tensor:
         """The MM ``3×3`` blocks on the pairs ``hessian_pairs`` names ``(P, 9)``.
 
-        A pair's block is the sum over every bonded term containing it, so each
-        term's own blocks (:class:`~molpot.forcefield.partial_hessian.TermHessian`
-        on the gathered coordinates) are accumulated into the pair row its
-        ``hpair_<i>_<j>`` column names.
+        A pair's block is the sum over every carried bonded term containing it.
 
         Args:
             frame: Batch with ``hessian_pairs`` and the ``hpair_*`` slot columns;
                 ``atoms.pos`` must require grad (marked before the traced body).
-            tables: Predicted tables, when the caller already has them.
+            trainable: Predicted columns that keep a gradient, or ``None``.
 
         Returns:
             ``(P, 9)`` kcal mol⁻¹ Å⁻², row-major blocks in ``hessian_pairs`` order.
@@ -377,8 +386,7 @@ class Rondo(Potential):
             ValueError: A priced valence namespace has rows but no ``hpair_*``
                 column — its term would silently receive no gradient.
         """
-        if tables is None:
-            tables = self.tables(frame)
+        predicted = _detach(self.predict(frame), trainable)
         pos = frame[POS_KEY]
         blocks = pos.new_zeros((frame["hessian_pairs"].batch_size[0], 9))
         hessian = TermHessian()
@@ -399,7 +407,8 @@ class Rondo(Potential):
                     )
                 continue
             params = {
-                name: value.to(pos.dtype) for name, value in self._style_params(key, tables).items()
+                name: value.to(pos.dtype)
+                for name, value in self._terms[key].potential_params(predicted).items()
             }
             mask = self._mask(block, pos)
 
@@ -420,53 +429,65 @@ class Rondo(Potential):
     # private
     # ------------------------------------------------------------------
 
-    def _bonded(self, namespace: str) -> BondedPotential:
-        """The bonded potential priced on *namespace*; the owner of its term index."""
-        return self.potentials[self._bonded_keys[namespace]]
-
-    def _style_params(self, key: str, tables: Tables) -> dict[str, torch.Tensor]:
-        """The parameters one style's potential reads, from the predicted tables."""
-        if key == "bond:harmonic":
-            return {"k": tables["bonds"]["k"], "r0": tables["bonds"]["r0"]}
-        if key == "angle:harmonic":
-            return {"k": tables["angles"]["k"], "theta0": tables["angles"]["theta0"]}
-        if key in ("dihedral:periodic", "dihedral:opls"):
-            head = self.heads["propers"]
-            k = tables["propers"]["k"]
-            if key == "dihedral:opls":
-                return {f"k{m + 1}": 2.0 * k[:, m] for m in range(4)}
-            rows = k.shape[0]
-            return {
-                "k": k,
-                "periodicity": head.periodicity.to(k.dtype).expand(rows, -1),
-                "phase": head.phase.to(k.dtype).expand(rows, -1),
-            }
-        if key == "improper:cvff":
-            k = tables["impropers"]["k"]
-            head = self.heads["impropers"]
-            return {
-                "k": k,
-                "sign": head.sign.to(k.dtype).expand(k.shape),
-                "periodicity": head.periodicity.to(k.dtype).expand(k.shape),
-            }
-        if key == "pair:lj/cut":
-            return {"epsilon": tables["atoms"]["epsilon"], "sigma": tables["atoms"]["sigma"]}
-        if key == "pair:coul/cut":
-            return {"charge": tables["atoms"]["charge"]}
-        raise ValueError(f"no parameter mapping for style {key!r}")  # pragma: no cover
-
-    def _hybridization(self, frame: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Degree and π count per atom from ``bonds.bond_type``; a batch without it is refused."""
-        n_atoms = int(frame["atoms"].batch_size[0])
-        if "bonds" not in frame.keys() or "bond_type" not in frame["bonds"].keys():
-            raise KeyError(
-                "Rondo reads bonds.bond_type to tell sp, sp2 and sp3 centres apart; "
-                "the batch has no such column"
+    def _new(self, style: str) -> Term:
+        """Build the parameter head of *style*. The numbers live on the spec, not on molpot."""
+        kind = TERMS[style]
+        width = self.spec.encoder.width
+        heads = self.spec.heads
+        dtype = self.dtype
+        if style in ("bond:harmonic", "angle:harmonic", "dihedral:periodic", "improper:cvff"):
+            return kind(
+                width,
+                self.graph.feature.edge_dim,
+                hidden_dim=heads.bonded_hidden,
+                width=heads.bonded_width,
+                layers=heads.bonded_layers,
+                out_hidden_dim=heads.bonded_out_hidden,
+                out_layers=heads.bonded_out_layers,
+                tanh_output=heads.tanh_output,
+                dtype=dtype,
             )
-        index = self._bonded("bonds").index(frame)
-        bonds = frame["bonds"]
-        mask = bonds["mask"] if "mask" in bonds.keys() else None
-        return self.hybridization(index, bonds["bond_type"], mask, n_atoms)
+        if style == "pair:lj/cut":
+            return kind(
+                width,
+                heads.hidden,
+                sigma_gain=heads.lj_sigma_gain,
+                epsilon_gain=heads.lj_epsilon_gain,
+                dtype=dtype,
+            )
+        if style == "pair:coul/cut":
+            return kind(
+                width,
+                heads.hidden,
+                max_atoms=heads.eem_max_atoms,
+                jitter=heads.eem_jitter,
+                dtype=dtype,
+            )
+        raise ValueError(
+            f"Rondo has no parameters for {style}; it supplies {self.SUPPORTED_STYLES}"
+        )
+
+    def _add(self, style: str) -> Term:
+        """Register the parameter head of *style*.
+
+        The style is already a member of :attr:`potentials`.
+        """
+        term = self._new(style)
+        if term.head_key in self.heads:
+            raise ValueError(
+                f"{style} writes heads.{term.head_key}, which "
+                f"{self._occupant(term.head_key)} already writes"
+            )
+        self.heads[term.head_key] = term
+        self._terms[style] = term
+        return term
+
+    def _occupant(self, head_key: str) -> str:
+        """The style whose head is registered at *head_key*."""
+        for style, term in self._terms.items():
+            if term.head_key == head_key:
+                return style
+        return head_key
 
     @staticmethod
     def _mask(block: TensorDict, like: torch.Tensor) -> torch.Tensor:

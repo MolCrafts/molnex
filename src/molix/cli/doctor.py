@@ -6,7 +6,7 @@ needs and reports a per-item verdict:
 * Python and PyTorch versions against the project minimums.
 * CUDA runtime availability, device count, and compute capability.
 * The native C++ ops library (``torch.ops.molix.*``) — loaded and registered.
-* ``molrep.eq`` (the in-tree equivariance frontend).
+* The native equivariance library (``molnex_equivariance``, CUDA kernels).
 * GPU telemetry via ``nvidia-ml-py`` (``pynvml``).
 * Core runtime dependencies (tensordict, molpy, mollog, …).
 
@@ -121,7 +121,7 @@ class Doctor:
             self._check_torch(),
             self._check_cuda(),
             self._check_native_ops(),
-            self._check_cuequivariance(),
+            self._check_equivariance_ops(),
             self._check_gpu_telemetry(),
             self._check_core_deps(),
         )
@@ -225,17 +225,19 @@ class Doctor:
             hint="The shared library is likely stale relative to the Python sources.",
         )
 
-    def _check_cuequivariance(self) -> CheckResult:
-        try:
-            import molrep.eq as meq
-        except ImportError as exc:
+    def _check_equivariance_ops(self) -> CheckResult:
+        from molix import _op_lib_path
+
+        path = _op_lib_path("molnex_equivariance")
+        if path is None:
             return CheckResult(
-                "cuEquivariance",
-                Status.FAIL,
-                "missing: molrep.eq",
-                hint=str(exc).splitlines()[0] if str(exc) else "Reinstall molnex.",
+                "Equivariance ops",
+                Status.WARN,
+                "molnex_equivariance not built: CUDA equivariant layers cannot run "
+                "(CPU tensors use the PyTorch reference)",
+                hint="Build csrc/ with -DMOLNEX_OP_ENABLE_CUDA=ON (see csrc/CMakeLists.txt).",
             )
-        return CheckResult("cuEquivariance", Status.OK, meq.__version__)
+        return CheckResult("Equivariance ops", Status.OK, str(path))
 
     def _check_gpu_telemetry(self) -> CheckResult:
         if _util.find_spec("pynvml") is None:

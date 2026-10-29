@@ -4,9 +4,9 @@ Every operator of ``libmolnex_equivariance`` is a sum of scalar monomials read
 off a term table: ``out[row, o, c] += C_t · Π_f factor_f[row, index_f(t), c]``.
 This module evaluates those tables with ordinary tensor operations, so the
 same term table runs on a CPU tensor (where the library has no kernel) and
-serves as the oracle the CUDA kernels are tested against. Autograd — first
-and second derivatives — is PyTorch's own here; the CUDA path registers its
-fused adjoints in :mod:`molrep.equivariance.backend`.
+serves as the oracle the CUDA kernels are tested against. Autograd — of any
+order — is PyTorch's own here; the CUDA path registers its fused adjoints and
+the composed higher orders in :mod:`molrep.equivariance.backend`.
 
 The evaluation is exact in the sense of the term table (every monomial, in
 the compute dtype); the summation order differs from the kernels', so the two
@@ -79,7 +79,9 @@ def schedule(
 
     def csr(index: torch.Tensor, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
         order = torch.argsort(index, stable=True).to(torch.int32)
-        counts = torch.bincount(index, minlength=rows)
+        # Counted into ``rows`` slots: ``bincount``'s length follows the data
+        # (its largest index), a dynamic shape under compile.
+        counts = index.new_zeros(rows).index_add(0, index, torch.ones_like(index))
         rowptr = torch.cat([counts.new_zeros(1), counts.cumsum(0)]).to(torch.int32)
         return order, rowptr
 
@@ -156,19 +158,17 @@ def symmetric_contraction(
         ``(N, O · channels)``.
     """
     nodes = x.shape[0]
-    features = x.view(nodes, x.shape[1] // channels, channels)
+    segments = x.shape[1] // channels
     weights = w.view(w.shape[0], w.shape[1] // channels, channels)[indices.long()]
-    out = x.new_zeros(nodes, output_segments, channels)
-    slots = (terms[:, 1:4] >= 0).sum(dim=1)
-    for degree in (1, 2, 3):
-        rows = slots == degree
-        if not bool(rows.any()):
-            continue
-        table = terms[rows]
-        factors = [(weights, table[:, 0])] + [
-            (features, table[:, 1 + slot]) for slot in range(degree)
-        ]
-        out = out + monomials(factors, coefficients[rows], table[:, 4], nodes, output_segments)
+    # A term below degree 3 reads the appended segment of ones in its empty
+    # slots, so every term is one three-factor product — one static-shape pass
+    # over the whole table, no split by degree (a host sync under compile).
+    features = torch.cat(
+        [x.view(nodes, segments, channels), x.new_ones(nodes, 1, channels)], dim=1
+    )
+    slots = torch.where(terms[:, 1:4] >= 0, terms[:, 1:4], segments)
+    factors = [(weights, terms[:, 0])] + [(features, slots[:, slot]) for slot in range(3)]
+    out = monomials(factors, coefficients, terms[:, 4], nodes, output_segments)
     return out.view(nodes, output_segments * channels)
 
 
@@ -187,22 +187,12 @@ def spherical_harmonics(
         ``(N, components)``.
     """
     rows = v.shape[0]
-    out = v.new_zeros(rows, components, 1)
-    slots = (terms[:, :3] >= 0).sum(dim=1)
-    for degree in (0, 1, 2, 3):
-        mask = slots == degree
-        if not bool(mask.any()):
-            continue
-        table = terms[mask]
-        factors = [(v, table[:, slot]) for slot in range(degree)]
-        if not factors:
-            constant = v.new_zeros(rows, components, 1)
-            constant = constant.index_add(
-                1, table[:, 3], coefficients[mask].view(1, -1, 1).expand(rows, -1, -1)
-            )
-            out = out + constant
-            continue
-        out = out + monomials(factors, coefficients[mask], table[:, 3], rows, components)
+    # Empty slots read an appended component of ones: every term, the constant
+    # included, is one three-factor product over the whole table.
+    padded = torch.cat([v, v.new_ones(rows, 1)], dim=1)
+    slots = torch.where(terms[:, :3] >= 0, terms[:, :3], 3)
+    factors = [(padded, slots[:, slot]) for slot in range(3)]
+    out = monomials(factors, coefficients, terms[:, 3], rows, components)
     return out.view(rows, components)
 
 

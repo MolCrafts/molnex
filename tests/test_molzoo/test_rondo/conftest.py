@@ -1,8 +1,10 @@
 """Fixtures for the Rondo recipe: a Class-I force field and molecules collated the real way.
 
-The frames carry every column the ByteFF-aligned encoder declares (formal
-charge, ring features, bond order, ring membership) and the GAFF2 reference
-wells the Lennard-Jones head starts from — the columns MolHub writes for THEMol.
+The frames carry every column the covalent-graph encoder reads (formal charge, ring
+features, bond order, ring membership, the topological equivalence class) and
+the GAFF2 reference wells the Lennard-Jones head starts from — the columns
+MolHub writes for THEMol. Impropers are one row per centre, the
+centre first and the legs ascending.
 Every batch is float64 and every model is built at ``DTYPE``: cuEquivariance
 fixes its working precision at construction, so a model built at float32 and
 then ``.double()``-d would still compute in float32.
@@ -18,10 +20,9 @@ from tensordict import TensorDict
 
 from molix.data import PairRelation, TotalCharge
 from molix.data.collate import collate_molecules
-from molix.data.valence_columns import cyclic_impropers as molix_cyclic_impropers
 from molix.neighbor import NeighborList
+from molpot.classical import LJHead
 from molpot.forcefield.partial_hessian import PartialHessianPairs
-from molzoo.rondo import EncoderSpec, HeadsSpec, RondoSpec
 from tests.conftest import (
     BUTANE_BONDS,
     BUTANE_POSITIONS,
@@ -44,17 +45,30 @@ GAFF2 = {
 }
 
 
-def class_i_forcefield(cutoff: float = CUTOFF, *, dihedral: str = "periodic") -> mp.ForceField:
-    """The Class-I force field every Rondo fixture is built on (molrs IR)."""
+def class_i_forcefield(
+    cutoff: float = CUTOFF, *, dihedral: str = "periodic", styles: tuple[str, ...] | None = None
+) -> mp.ForceField:
+    """The Class-I force field every Rondo fixture is built on (molrs IR).
+
+    ``styles`` keeps a subset of the declared keys (``"bond:harmonic"``, …).
+    ``None`` declares the whole field.
+    """
     ff = mp.ff.forcefield.ForceField(name="rondo-test", units="real")
-    ff.def_style("bond", "harmonic")
-    ff.def_style("angle", "harmonic")
-    ff.def_style("dihedral", dihedral)
-    ff.def_style("improper", "cvff")
-    ff.def_style("pair", "lj/cut", params={"cutoff": cutoff, "mixing": "geometric"})
-    ff.def_style(
-        "pair", "coul/cut", params={"cutoff": cutoff, "coulomb": 332.0637, "dielectric": 1.0}
+    declared = (
+        ("bond", "harmonic", None),
+        ("angle", "harmonic", None),
+        ("dihedral", dihedral, None),
+        ("improper", "cvff", None),
+        ("pair", "lj/cut", {"cutoff": cutoff, "mixing": "geometric"}),
+        ("pair", "coul/cut", {"cutoff": cutoff, "coulomb": 332.0637, "dielectric": 1.0}),
     )
+    for category, name, params in declared:
+        if styles is not None and f"{category}:{name}" not in styles:
+            continue
+        if params is None:
+            ff.def_style(category, name)
+        else:
+            ff.def_style(category, name, params=params)
     ff.set_special_bonds(lj=[0.0, 0.0, 0.5], coul=[0.0, 0.0, 0.5])
     return ff
 
@@ -70,27 +84,68 @@ def _with_columns(f: mp.Frame, *, atoms: dict, bonds: dict) -> mp.Frame:
     return f
 
 
-def cyclic_impropers(centres: list[tuple[int, int, int, int]]) -> dict[str, list[int]]:
-    """The batch's three rows per centre (:func:`molix.data.cyclic_impropers`), as frame columns."""
-    block = {
-        name: torch.tensor([centre[n] for centre in centres], dtype=torch.long)
+def impropers(centres: list[tuple[int, int, int, int]]) -> dict[str, list[int]]:
+    """Improper rows: one per centre, the centre first and the legs ascending."""
+    rows = [(centre[0], *sorted(centre[1:])) for centre in centres]
+    return {
+        name: [row[n] for row in rows]
         for n, name in enumerate(("atomi", "atomj", "atomk", "atoml"))
     }
-    return {name: column.tolist() for name, column in molix_cyclic_impropers(block).items()}
 
 
-SPEC = RondoSpec(
-    encoder=EncoderSpec(width=8, n_blocks=1),
-    heads=HeadsSpec(hidden=8, proper_periodicity=(1, 2), eem_max_atoms=32),
+def equivalence(z: list[int], bonds: list[tuple[int, int]]) -> np.ndarray:
+    """Each atom's topological class, as the index of its first member.
+
+    Colour refinement on the element-labelled graph with bond orders erased —
+    the partition the reference implementation takes from RDKit's
+    ``CanonicalRankAtoms(breakTies=False)``
+    on the same graph.
+    """
+    neighbours: list[list[int]] = [[] for _ in z]
+    for i, j in bonds:
+        neighbours[i].append(j)
+        neighbours[j].append(i)
+    colour = list(z)
+    while True:
+        signature = [
+            (colour[a], tuple(sorted(colour[b] for b in neighbours[a]))) for a in range(len(z))
+        ]
+        relabel = {key: n for n, key in enumerate(sorted(set(signature)))}
+        refined = [relabel[key] for key in signature]
+        if len(set(refined)) == len(set(colour)):
+            break
+        colour = refined
+    first: dict[int, int] = {}
+    return np.array([first.setdefault(c, a) for a, c in enumerate(colour)], dtype=np.int64)
+
+
+#: Small network the tests build. The fields are the constructor keywords.
+TINY = dict(
+    atom_embedding_dim=4,
+    channel_dim=2,
+    node_mlp=(8, 8, 2),
+    edge_mlp=(8, 8, 2),
+    width=8,
+    n_layers=2,
+    heads=2,
+    head_dim=4,
+    ffn=(8, 2),
+    bonded_hidden=8,
+    bonded_width=8,
+    bonded_layers=2,
+    bonded_out_hidden=8,
+    bonded_out_layers=2,
+    hidden=8,
+    eem_max_atoms=32,
 )
 
 
 def butane_frame() -> mp.Frame:
-    """One butane at rest, no lattice, with ByteFF's input columns and GAFF2 wells.
+    """One butane at rest, no lattice, with the encoder's input columns and GAFF2 wells.
 
-    Butane has no planar centre; the two inner carbons are given improper rows
-    anyway (three cyclic rows each, legs = three of the centre's neighbours) so
-    the improper path is exercised.
+    Butane has no planar centre; the two inner carbons are given an improper
+    row anyway (legs = three of the centre's neighbours) so the improper path
+    is exercised.
     """
     angles = butane_angles()
     propers = butane_propers()
@@ -112,8 +167,9 @@ def butane_frame() -> mp.Frame:
                 "atomj": [p[1] for p in propers],
                 "atomk": [p[2] for p in propers],
                 "atoml": [p[3] for p in propers],
+                "linear": [False] * len(propers),
             },
-            "impropers": cyclic_impropers(centres),
+            "impropers": impropers(centres),
         },
         total_charge=0.0,
         energy=-1.0,
@@ -125,6 +181,7 @@ def butane_frame() -> mp.Frame:
             "formal_charge": np.zeros(len(z), dtype=np.int64),
             "ring_connectivity": np.zeros(len(z), dtype=np.int64),
             "min_ring_size": np.zeros(len(z), dtype=np.int64),
+            "equi_index": equivalence(z, [tuple(b) for b in BUTANE_BONDS]),
             "gaff2_sigma": np.array([GAFF2["c3" if zz == 6 else "hc"][0] for zz in z]),
             "gaff2_epsilon": np.array([GAFF2["c3" if zz == 6 else "hc"][1] for zz in z]),
         },
@@ -173,8 +230,9 @@ def butyne_frame() -> mp.Frame:
                 "atomj": [0, 1, 2],
                 "atomk": [1, 2, 3],
                 "atoml": [2, 3, 4],
+                "linear": [False, True, True],
             },
-            "impropers": cyclic_impropers([(0, 5, 6, 7)]),
+            "impropers": impropers([(0, 5, 6, 7)]),
         },
         total_charge=0.0,
         energy=0.0,
@@ -186,6 +244,7 @@ def butyne_frame() -> mp.Frame:
             "formal_charge": np.zeros(10, dtype=np.int64),
             "ring_connectivity": np.zeros(10, dtype=np.int64),
             "min_ring_size": np.zeros(10, dtype=np.int64),
+            "equi_index": equivalence(z, list(zip(*bonds, strict=True))),
             "gaff2_sigma": np.array([GAFF2[t][0] for t in types]),
             "gaff2_epsilon": np.array([GAFF2[t][1] for t in types]),
         },
@@ -245,12 +304,15 @@ def with_hessian_pairs(batch: TensorDict) -> PartialHessianPairs:
 
 
 def excite(model) -> None:
-    """Give every zero-started head a random non-zero output layer, in place."""
+    """Give the zero-started Lennard-Jones head a random non-zero output layer, in place.
+
+    The bonded heads start from a random initialisation; only Rondo's D2
+    head starts exactly on its reference.
+    """
     with torch.no_grad():
         for head in model.heads.values():
-            mlps = getattr(head, "mlps", None)
-            if mlps is None:
+            if not isinstance(head, LJHead):
                 continue
-            for mlp in mlps.values():
+            for mlp in head.mlps.values():
                 mlp[-1].weight.normal_(0, 0.3)
                 mlp[-1].bias.normal_(0, 0.3)

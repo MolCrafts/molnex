@@ -130,12 +130,12 @@ class TestCondenser:
             return str(SmartsPattern.from_environment(mol, handle))
 
         mol = Atomistic()
-        atoms = [mol.def_atom({"element": el}) for el in ("C", "C", "O")]
-        mol.def_bond(atoms[0], atoms[1])
-        mol.def_bond(atoms[1], atoms[2])
+        atoms = [mol.add_atom(atomic_number=z) for z in (6, 6, 8)]
+        mol.add_bond(atoms[0], atoms[1])
+        mol.add_bond(atoms[1], atoms[2])
         envs = [
             [
-                tuple(sorted((write_smarts(mol, b.itom.handle), write_smarts(mol, b.jtom.handle))))
+                tuple(sorted((write_smarts(mol, b.itom), write_smarts(mol, b.jtom))))
                 for b in mol.bonds
             ]
         ]

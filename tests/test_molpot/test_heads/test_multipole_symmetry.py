@@ -49,7 +49,7 @@ from tensordict import TensorDict
 import molrep.eq as meq
 import molrep.eq.torch as cuet
 from molpot.heads import PermMultipoleHead
-from molzoo.allegro import AllegroEncoder, AllegroSpec
+from molrep.encoders.allegro import AllegroEncoder, AllegroEncoderSpec
 from tests.conftest import (
     make_graph_batch,
     permute_graph,
@@ -161,7 +161,7 @@ def small_molecule_neutral() -> TensorDict:
 def _build_allegro(*, expose_tensor_track: bool) -> AllegroEncoder:
     torch.manual_seed(0)
     encoder = AllegroEncoder(
-        AllegroSpec(
+        AllegroEncoderSpec(
             atomic_numbers=[1, 6, 7, 8],
             num_scalar_features=16,
             num_tensor_features=8,

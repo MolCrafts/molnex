@@ -400,7 +400,6 @@ produces a model that runs and is wrong.
   weights in the layout the forward reads (`(C, Σ u·w)` / `(C, F)`); cue's
   flat layout is converted once at the official boundary
   (`molzoo.mace.checkpoint.element_linear_weight` / `one_hot_weight`, applied
-  by target type through `molzoo.checkpoint.ConvertedWeight`). No numerical
-  claim changed (CPU equality to the product re-measured at ≤3.3e-16); the
-  seeded tiny-model reference `benchmarks/_gh200_verify/step7_ref.pt` was
-  regenerated, since the parameter shapes move the init draw.
+  by target type through `molzoo.mace.checkpoint.MACE_CONVERSIONS`). No numerical
+  claim changed (CPU equality to the product re-measured at ≤3.3e-16). The
+  parameter shapes move the init draw.

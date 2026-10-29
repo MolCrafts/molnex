@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from molix.md.barostat import BerendsenBarostat
 from molix.units import units
 
-_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").magnitude
+_KB_MD = (1.0 * units.k_B).to("amu * angstrom ** 2 / femtosecond ** 2 / kelvin").value
 
 
 class MDHook:
@@ -385,7 +385,7 @@ class TrajectoryHook(MDHook):
 
         from molix.io.extxyz import write_extxyz_frames
 
-        species = [Element(int(z)).symbol for z in self._numbers.detach().cpu()]
+        species = [Element.by_number(int(z)).symbol for z in self._numbers.detach().cpu()]
         write_extxyz_frames(
             self._out.with_suffix(".xyz"),
             species=species,

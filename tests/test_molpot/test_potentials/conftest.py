@@ -1,7 +1,7 @@
 """Two four-atom chains in one batch, and the molpy oracle every potential is checked against.
 
 The oracle is molrs's own kernels, built per explicit term with
-``mp.ff.compile.ExplicitTerms(category, style, atoms, **params).compile()`` from
+``mp.ff.ExplicitTerms(category, style, atoms, **params).compile()`` from
 the same instances and parameters and pushed into one ``mp.ff.potential.Potentials``:
 no force-field typing sits between the two sides.
 """
@@ -66,13 +66,13 @@ def oracle(*terms: tuple) -> tuple[float, np.ndarray]:
     """``(energy, forces)`` of explicit molrs terms pushed into one ``Potentials``.
 
     Each term is ``(category, style, rows, params)`` with ``params`` the keyword
-    arguments of :class:`molpy.ff.compile.ExplicitTerms` (per-term values as
+    arguments of :class:`molpy.ff.ExplicitTerms` (per-term values as
     lists, style settings as scalars, ``charges=`` per atom).
     """
     pots = mp.ff.potential.Potentials()
     for category, style, rows, params in terms:
-        pots.push(mp.ff.compile.ExplicitTerms(category, style, rows, **params).compile())
-    energy, forces = pots.calc_energy_forces(POS.reshape(-1))
+        pots.push(mp.ff.ExplicitTerms(category, style, rows, **params).compile())
+    energy, forces = pots.evaluate(POS.reshape(-1))
     return float(energy), np.asarray(forces)
 
 

@@ -5,16 +5,6 @@ All heads are plain PyTorch modules.
 
 from molpot.heads.charge_bond import BondChargeHead
 from molpot.heads.charge_response import ChargeResponseHead
-from molpot.heads.classical import (
-    AngleHead,
-    BondHead,
-    CovalentRadiusSum,
-    CvffHead,
-    ExpAround,
-    LinearAround,
-    LJHead,
-    PeriodicHead,
-)
 from molpot.heads.dipole import DipoleHead
 from molpot.heads.edge import EdgeEnergyHead
 from molpot.heads.electrostatics import (
@@ -42,15 +32,7 @@ from molpot.heads.rescale import GlobalRescale, PerSpeciesScaleShift
 from molpot.heads.type import TypeHead
 
 __all__ = [
-    "AngleHead",
     "AtomicEnergyMLP",
-    "BondHead",
-    "CovalentRadiusSum",
-    "CvffHead",
-    "ExpAround",
-    "LJHead",
-    "LinearAround",
-    "PeriodicHead",
     "AtomicReferenceEnergy",
     "BondChargeHead",
     "ChargeResponseHead",
@@ -64,11 +46,11 @@ __all__ = [
     "HardnessHead",
     "HardnessHeadSpec",
     "ParameterProvenance",
+    "PerSpeciesScaleShift",
     "PermMultipoleHead",
     "PermMultipoleHeadSpec",
     "PolarizabilityHead",
     "PolarizabilityHeadSpec",
-    "PerSpeciesScaleShift",
     "SupportClassifier",
     "TypeHead",
     "attach_provenance",

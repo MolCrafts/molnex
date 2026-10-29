@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import torch
 
-from molpot.potentials.dihedral import dihedral_angle
+from molpot.potentials.dihedral import dihedral_angle, periodic_series
 from molpot.potentials.potential import BondedPotential
 from molpot.potentials.registry import register
 
-__all__ = ["ImproperCvff"]
+__all__ = ["ImproperCvff", "ImproperPeriodic"]
 
 
 @register
@@ -37,3 +37,21 @@ class ImproperCvff(BondedPotential):
         self, x: torch.Tensor, k: torch.Tensor, sign: torch.Tensor, periodicity: torch.Tensor
     ) -> torch.Tensor:
         return k * (1.0 + sign * torch.cos(periodicity * dihedral_angle(x)))
+
+
+@register
+class ImproperPeriodic(BondedPotential):
+    """A periodic improper with its literal phase in degrees and stored order.
+
+    Its parameters and atom order come from molpy ForceFieldIR. Backend
+    representability and export are decided by the IR, never by this kernel.
+    """
+
+    style = "improper:periodic"
+    width = 4
+    params = ("k", "periodicity", "phase")
+
+    def term_energy(
+        self, x: torch.Tensor, k: torch.Tensor, periodicity: torch.Tensor, phase: torch.Tensor
+    ) -> torch.Tensor:
+        return periodic_series(dihedral_angle(x), k, periodicity, phase)
