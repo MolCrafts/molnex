@@ -315,7 +315,7 @@ class TestResidualInteraction:
         out, _ = layer(**graph)
         assert torch.allclose(out, _residual_message(layer, graph), atol=1e-12)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")
+    @pytest.mark.gpu
     def test_cuda_matches_explicit_gather_scatter(self, layer, graph) -> None:
         """molix scatter on GPU matches the explicit gather → TP → scatter route."""
         layer = layer.cuda()

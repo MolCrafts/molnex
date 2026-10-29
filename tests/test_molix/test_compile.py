@@ -148,15 +148,7 @@ class TestIndexAddUnderInductor:
     """``index_add`` with a fused producer, compiled as torch lowers it."""
 
     @pytest.mark.slow
-    @pytest.mark.parametrize(
-        "device",
-        [
-            "cpu",
-            pytest.param(
-                "cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
     def test_a_fused_producer_adds_nothing_on_padded_lanes(self, device):
         """The leak molnex once worked around must stay gone.
 
