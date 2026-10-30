@@ -35,6 +35,9 @@ from molzoo.rondo.model import Rondo
 
 __all__ = ["ByteFF"]
 
+#: The released window's lowest bond ``K`` (LAMMPS; the head's ``½k`` clamp of 80).
+PUBLISHED_BOND_K_FLOOR = 40.0
+
 
 class ByteFF(Rondo):
     """Rondo with bond-charge-correction charges and directly predicted σ, ε.
@@ -96,7 +99,9 @@ class ByteFF(Rondo):
             forcefield: The force field; every style it declares must be one
                 the checkpoint has a head for.
             dtype: Floating dtype of the model.
-            **settings: As for the constructor.
+            **settings: As for the constructor. ``bond_k_floor`` defaults to the
+                published window's 40, not Rondo's 80, so the member is
+                reproduced as released.
 
         Returns:
             The model, in training mode like any freshly built module.
@@ -105,7 +110,7 @@ class ByteFF(Rondo):
             ValueError: A tensor of the checkpoint has no home in the model, or a
                 tensor of the model is not in the checkpoint.
         """
-        model = cls(forcefield, dtype=dtype, **settings)
+        model = cls(forcefield, dtype=dtype, **{"bond_k_floor": PUBLISHED_BOND_K_FLOOR, **settings})
         archive = torch.load(Path(path), map_location="cpu", weights_only=True)
         state = OfficialArchive.tensor_state(archive["model_state_dict"])
         heads = model.spec.heads

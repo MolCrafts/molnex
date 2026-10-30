@@ -188,6 +188,18 @@ class BondHarmonic(_Bonded):
     widths = {"k": 1, "r0": 1}
     window_constants = {"k": (200.0, 700.0, 80.0, 4000.0), "r0": (0.19, 1.3, 0.5, 5.0)}
 
+    def __init__(self, atom_dim: int, bond_dim: int, *, k_floor: float, **settings) -> None:
+        """As :class:`_Bonded`, with *k_floor* the lowest ``K`` put out (LAMMPS ``K``).
+
+        The published window clamps the head's ``k`` (``½k`` units, twice LAMMPS
+        ``K``) at 80; *k_floor* replaces that clamp, so 40 is the published model.
+        """
+        super().__init__(atom_dim, bond_dim, **settings)
+        std, mean, _, high = self.window_constants["k"]
+        self.windows["k"] = TanhWindow(
+            std, mean, 2.0 * k_floor, high, tanh_output=settings["tanh_output"]
+        )
+
     def copies(
         self, features: EncoderFeatures, frame: TensorDict, index: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:

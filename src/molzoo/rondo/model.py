@@ -565,9 +565,11 @@ class Rondo(Potential):
         heads = self.spec.heads
         dtype = self.dtype
         if style in ("bond:harmonic", "angle:harmonic", "dihedral:periodic", "improper:cvff"):
+            floor = {"k_floor": heads.bond_k_floor} if style == "bond:harmonic" else {}
             return kind(
                 width,
                 self.graph.bond_width,
+                **floor,
                 hidden_dim=heads.bonded_hidden,
                 width=heads.bonded_width,
                 layers=heads.bonded_layers,

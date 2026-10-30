@@ -115,6 +115,6 @@ the profile's first).
 The MD gate is met by B and M-DP and **missed by D2** on one charged molecule — and B
 only escapes by threshold: the root is B's bond head saturating at its k floor on an
 unusual C–N⁺, which D2's larger LJ ε turns into a collapse. A conformer-reading encoder
-(M-DP) recovers that bond. Open: the bond head's k floor on charged bonds (a constraint
-or a wider window; D2 is not production-ready until then), an independent (non-THEMol)
+(M-DP) recovers that bond. Open: the bond head's k floor on charged bonds — fixed by spec
+`rondo-enc-08-bond-floor` (floor 80; D2 0 / 48 broken), an independent (non-THEMol)
 or scaffold-disjoint test set (unit 4, §2), condensed-phase MD.

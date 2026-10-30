@@ -75,7 +75,7 @@ def _at_the_mean(term) -> None:
 
 class TestBondHarmonic:
     def test_reversing_a_bond_gives_the_same_parameters(self):
-        term = BondHarmonic(4, 3, **SETTINGS)
+        term = BondHarmonic(4, 3, k_floor=40.0, **SETTINGS)
         features = _features(5, 4)
         flipped = [(j, i) for i, j in BONDS]
         one = term.predict(features, _frame(), BondPotential())
@@ -85,18 +85,27 @@ class TestBondHarmonic:
 
     def test_k_is_half_the_head_k(self):
         # The head predicts k of ½k(r − r0)²; LAMMPS harmonic is K(r − r0)².
-        term = BondHarmonic(4, 3, **SETTINGS)
+        term = BondHarmonic(4, 3, k_floor=40.0, **SETTINGS)
         _at_the_mean(term)
         out = term.predict(_features(5, 4), _frame(), BondPotential())
         torch.testing.assert_close(out["k"], torch.full((4,), 350.0, dtype=DTYPE))
         torch.testing.assert_close(out["r0"], torch.full((4,), 1.3, dtype=DTYPE))
+
+    def test_k_never_falls_below_the_floor(self):
+        term = BondHarmonic(4, 3, k_floor=80.0, **SETTINGS)
+        _at_the_mean(term)
+        with torch.no_grad():
+            term.out["k"][1].bias.fill_(-10.0)
+        out = term.predict(_features(5, 4), _frame(), BondPotential())
+        torch.testing.assert_close(out["k"], torch.full((4,), 80.0, dtype=DTYPE))
 
     def test_a_bond_to_a_hypervalent_atom_takes_the_patch(self):
         bonds = [(0, n) for n in range(1, 6)] + [(5, 6)]
         frame = _frame(
             Z=(15, 9, 9, 9, 9, 6, 1), bonds=bonds, angles=(), propers=(), impropers=(), linear=()
         )
-        out = BondHarmonic(4, 3, **SETTINGS).predict(_features(7, 6), frame, BondPotential())
+        term = BondHarmonic(4, 3, k_floor=40.0, **SETTINGS)
+        out = term.predict(_features(7, 6), frame, BondPotential())
         torch.testing.assert_close(out["k"][:5], torch.full((5,), 500.0, dtype=DTYPE))
         assert out["r0"][:5].abs().max() == 0.0 and out["r0"][5] > 0.0
 

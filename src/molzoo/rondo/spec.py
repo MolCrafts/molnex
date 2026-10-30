@@ -37,6 +37,13 @@ class HeadsSpec(BaseModel):
         bonded_out_hidden: Hidden width of each bonded parameter MLP.
         bonded_out_layers: Linears in each bonded parameter MLP.
         tanh_output: Saturation of the published model's output transform.
+        bond_k_floor: Lowest bond ``K`` the bond head puts out, kcal mol⁻¹ Å⁻²
+            (LAMMPS, ``E = K (r - r0)²``) — the lower clamp of its window. The
+            published window's is 40, which is soft enough for an
+            out-of-distribution bond to collapse in MD (a zwitterion's C–N⁺, spec
+            ``rondo-enc-08-bond-floor``); 80 is the 0.05th percentile of the DFT
+            bond stiffness on THEMol's held-out Hessians.
+            :meth:`~molzoo.byteff.potential.ByteFF.load` keeps the published 40.
         hidden: Hidden width of the pair heads.
         lj_sigma_gain: Relative change of σ per unit of pre-activation.
         lj_epsilon_gain: Log change of ε per unit of pre-activation.
@@ -63,6 +70,7 @@ class HeadsSpec(BaseModel):
     bonded_out_hidden: int = Field(default=256, gt=0)
     bonded_out_layers: int = Field(default=4, ge=1)
     tanh_output: float = Field(default=20.0, gt=0.0)
+    bond_k_floor: float = Field(default=80.0, gt=0.0)
     hidden: int = Field(default=64, gt=0)
     lj_sigma_gain: float = Field(default=0.1, gt=0.0)
     lj_epsilon_gain: float = Field(default=1.0, gt=0.0)
