@@ -53,7 +53,7 @@ from molpy.ff.forcefield import ForceField
 from tensordict import TensorDict
 
 from molix.autograd import Derivative, Potential
-from molix.schema import ENERGY_KEY, FORCES_PRED_KEY, POS_KEY
+from molix.schema import ATOMIC_ENERGY_KEY, ENERGY_KEY, FORCES_PRED_KEY, POS_KEY
 from molpot.classical import TERMS, Term
 from molpot.forcefield.partial_hessian import TermHessian
 from molpot.potentials.collection import Potentials
@@ -305,15 +305,50 @@ class Rondo(Potential):
     ) -> torch.Tensor:
         """The energy ``(B,)`` kcal/mol of *styles* at the parameters in *tables*.
 
+        The graph sum of :meth:`atom_energy` — one path for both.
+
         Args:
-            frame: Batch with ``atoms.pos`` and the namespaces the styles read.
+            frame: Batch with ``atoms.pos``, ``atoms.batch``, ``graphs`` and the
+                namespaces the styles read.
             tables: Parameters as :meth:`predict` returns them (or a mean of
                 several models' tables).
             styles: Members of :attr:`potentials`, as in :meth:`energy`.
         """
+        return self._graph_sum(frame, self.atom_energy(frame, tables, styles=styles))
+
+    def atom_energy(
+        self,
+        frame: TensorDict,
+        tables: Tables,
+        *,
+        styles: Sequence[str | type[Term]] | None = None,
+    ) -> torch.Tensor:
+        """The energy ``(N,)`` kcal/mol per atom: each term split equally over its atoms.
+
+        ``molpot.potentials.Potentials.atom_energy`` (LAMMPS ``compute pe/atom``'s
+        partition) at the parameters in *tables*; ghost atoms (``atoms.mask``)
+        carry 0.
+
+        Args:
+            frame: As :meth:`price`.
+            tables: As :meth:`price`.
+            styles: As :meth:`price`.
+        """
         keys = self._styles(styles)
         params = {key: self._terms[key].potential_params(tables) for key in keys}
-        return self.potentials(frame, params, styles=keys)
+        energy = self.potentials.atom_energy(frame, params, styles=keys)
+        atoms = frame["atoms"]
+        if "mask" in atoms.keys():
+            energy = energy * atoms["mask"].to(energy.dtype)
+        return energy
+
+    @staticmethod
+    def _graph_sum(frame: TensorDict, atom_energy: torch.Tensor) -> torch.Tensor:
+        """``(B,)``: *atom_energy* summed by ``atoms.batch`` over the graph slots."""
+        graphs = frame["graphs"].batch_size[0]
+        return atom_energy.new_zeros(graphs).index_add(
+            0, frame["atoms", "batch"].long(), atom_energy
+        )
 
     @staticmethod
     def write_tables(frame: TensorDict, tables: Tables) -> None:
@@ -452,7 +487,7 @@ class Rondo(Potential):
         *,
         styles: Sequence[str | type[Term]] | None = None,
     ) -> TensorDict:
-        """Write ``graphs.energy`` ``(B,)`` kcal/mol at the parameters in *tables*, and the columns.
+        """Write ``atoms.energy`` ``(N,)``, ``graphs.energy`` ``(B,)`` and the columns at *tables*.
 
         :meth:`energy` without the prediction: a caller that scores several
         objectives on one batch predicts once (:meth:`predict`), detaches per
@@ -467,7 +502,9 @@ class Rondo(Potential):
         Returns:
             The same frame with ``graphs.energy`` and the table columns written.
         """
-        frame[ENERGY_KEY] = self.price(frame, tables, styles=styles)
+        atom_energy = self.atom_energy(frame, tables, styles=styles)
+        frame[ATOMIC_ENERGY_KEY] = atom_energy
+        frame[ENERGY_KEY] = self._graph_sum(frame, atom_energy)
         self.write_tables(frame, tables)
         return frame
 

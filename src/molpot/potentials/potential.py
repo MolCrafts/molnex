@@ -135,12 +135,14 @@ class BondedPotential(nn.Module):
         type_id = frame[self.namespace, column].long()
         return {name: getattr(self, f"table_{name}")[type_id] for name in self.params}
 
-    def forward(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
-        """Energy per graph ``(B,)``.
+    def term_energies(
+        self, frame: TensorDictBase, **params: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(index (width, M), energy (M,))`` — each term's atoms and its energy, dead rows 0.
 
         Args:
-            frame: Batch with ``atoms.pos``, ``atoms.batch``, ``graphs`` and this
-                style's namespace (``mask`` and ``type`` optional).
+            frame: Batch with ``atoms.pos`` and this style's namespace (``mask``
+                and ``type`` optional).
             **params: Per-term parameters; omitted to use the carried table.
         """
         index = self.index(frame)
@@ -150,8 +152,30 @@ class BondedPotential(nn.Module):
         block = frame[self.namespace]
         if "mask" in block.keys():
             energy = energy * block["mask"].to(energy.dtype)
+        return index, energy
+
+    def forward(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
+        """Energy per graph ``(B,)``.
+
+        Args:
+            frame: Batch with ``atoms.pos``, ``atoms.batch``, ``graphs`` and this
+                style's namespace (``mask`` and ``type`` optional).
+            **params: Per-term parameters; omitted to use the carried table.
+        """
+        index, energy = self.term_energies(frame, **params)
         graph = frame["atoms", "batch"].long()[index[0]]
         return energy.new_zeros(_graph_count(frame)).index_add(0, graph, energy)
+
+    def atom_energy(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
+        """Energy per atom ``(N,)``: each term's energy split equally over its atoms.
+
+        LAMMPS ``compute pe/atom``'s convention (a bond ½ to each end, an angle
+        ⅓, a dihedral ¼), so the atom energies of a graph sum to its energy.
+        """
+        index, energy = self.term_energies(frame, **params)
+        share = (energy / index.shape[0]).repeat(index.shape[0])
+        n_atoms = frame["atoms", "pos"].shape[0]
+        return energy.new_zeros(n_atoms).index_add(0, index.reshape(-1), share)
 
 
 class PairPotential(nn.Module):
@@ -228,9 +252,25 @@ class PairPotential(nn.Module):
         r = torch.where(inside, r, r.new_full((), self.cutoff))
         return pair_index, r, weight
 
-    def reduce(
-        self, frame: TensorDictBase, pair_index: torch.Tensor, per_pair: torch.Tensor
-    ) -> torch.Tensor:
-        """Sum per-pair energies into ``(B,)`` by the source atom's graph."""
+    def pair_energy(
+        self, frame: TensorDictBase, **params: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(pair_index (E, 2), energy (E,))`` — each row's energy, 0 on rows not priced."""
+        raise NotImplementedError
+
+    def forward(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
+        """Energy per graph ``(B,)``: :meth:`pair_energy` summed by the source atom's graph."""
+        pair_index, per_pair = self.pair_energy(frame, **params)
         graph = frame["atoms", "batch"].long()[pair_index[:, 0]]
         return per_pair.new_zeros(_graph_count(frame)).index_add(0, graph, per_pair)
+
+    def atom_energy(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
+        """Energy per atom ``(N,)``: each pair's energy split half and half over its two atoms."""
+        pair_index, per_pair = self.pair_energy(frame, **params)
+        half = 0.5 * per_pair
+        n_atoms = frame["atoms", "pos"].shape[0]
+        return (
+            per_pair.new_zeros(n_atoms)
+            .index_add(0, pair_index[:, 0], half)
+            .index_add(0, pair_index[:, 1], half)
+        )

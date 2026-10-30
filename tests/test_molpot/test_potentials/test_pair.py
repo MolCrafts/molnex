@@ -143,6 +143,25 @@ class TestPairCoulCut:
             PairCoulCut.from_style(style, forcefield=ff)
 
 
+class TestPairAtomEnergy:
+    def test_each_live_pair_is_split_half_and_half_and_sums_to_the_graph(self):
+        lj = LJCut(cutoff=10.0, special=SPECIAL, mixing="arithmetic")
+        batch = pair_batch()
+        params = {
+            "epsilon": torch.tensor(EPS, dtype=torch.float64),
+            "sigma": torch.tensor(SIG, dtype=torch.float64),
+        }
+        pair_index, per_pair = lj.pair_energy(batch, **params)
+        atoms = lj.atom_energy(batch, **params)
+        expected = torch.zeros_like(atoms)
+        for (i, j), e in zip(pair_index.tolist(), per_pair.tolist(), strict=True):
+            expected[i] += 0.5 * e
+            expected[j] += 0.5 * e
+        torch.testing.assert_close(atoms, expected)
+        graphs = torch.zeros_like(lj(batch, **params)).index_add(0, batch["atoms", "batch"], atoms)
+        torch.testing.assert_close(graphs, lj(batch, **params))
+
+
 class TestPairGeometry:
     """The pair vector: live positions, plus a lattice remainder or a stored difference."""
 

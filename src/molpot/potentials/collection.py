@@ -112,3 +112,30 @@ class Potentials(nn.ModuleDict):
             total = energy if total is None else total + energy
         assert total is not None
         return total
+
+    def atom_energy(
+        self,
+        frame: TensorDictBase,
+        params: Mapping[str, Mapping[str, torch.Tensor]] | None = None,
+        *,
+        styles: Sequence[str] | None = None,
+    ) -> torch.Tensor:
+        """Energy per atom ``(N,)``: every member's terms split equally over their atoms.
+
+        The partition LAMMPS ``compute pe/atom`` uses; summed over a graph's
+        atoms it is that graph's :meth:`forward` energy. The deployment
+        contract (``molix.deploy``) partitions a domain's energy by it.
+
+        Args:
+            frame: As :meth:`forward`.
+            params: As :meth:`forward`.
+            styles: As :meth:`forward`.
+        """
+        params = {} if params is None else params
+        chosen = tuple(self.keys()) if styles is None else tuple(styles)
+        total: torch.Tensor | None = None
+        for key in chosen:
+            energy = self[key].atom_energy(frame, **params.get(key, {}))
+            total = energy if total is None else total + energy
+        assert total is not None
+        return total

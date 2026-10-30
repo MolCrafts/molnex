@@ -111,8 +111,10 @@ class LJCut(PairPotential):
             "sigma": torch.tensor(sig, dtype=torch.float64),
         }
 
-    def forward(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
-        """Energy per graph ``(B,)``; ``epsilon`` / ``sigma`` per atom, else the table."""
+    def pair_energy(
+        self, frame: TensorDictBase, **params: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-pair energy; ``epsilon`` / ``sigma`` per atom, else the table."""
         pair_index, r, weight = self.geometry(frame)
         if params:
             epsilon, sigma = params["epsilon"], params["sigma"]
@@ -126,7 +128,7 @@ class LJCut(PairPotential):
         )
         sr6 = (mixed["sigma_ij"] / r).pow(6)
         per_pair = weight * 4.0 * mixed["epsilon_ij"] * (sr6 * sr6 - sr6)
-        return self.reduce(frame, pair_index, per_pair)
+        return pair_index, per_pair
 
 
 @register
@@ -183,11 +185,13 @@ class PairCoulCut(PairPotential):
             delta=float(params.get("delta", 0.0)),
         )
 
-    def forward(self, frame: TensorDictBase, **params: torch.Tensor) -> torch.Tensor:
-        """Energy per graph ``(B,)``; ``charge`` per atom, else ``atoms.charge``."""
+    def pair_energy(
+        self, frame: TensorDictBase, **params: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-pair energy; ``charge`` per atom, else ``atoms.charge``."""
         pair_index, r, weight = self.geometry(frame)
         charge = params["charge"] if params else frame["atoms", "charge"]
         charge = charge.to(r.dtype)
         qq = charge[pair_index[:, 0]] * charge[pair_index[:, 1]]
         per_pair = weight * self.coulomb * qq / (self.dielectric * (r + self.delta))
-        return self.reduce(frame, pair_index, per_pair)
+        return pair_index, per_pair

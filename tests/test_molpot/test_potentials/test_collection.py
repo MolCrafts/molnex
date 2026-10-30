@@ -36,6 +36,20 @@ class TestPotentials:
         bond = pots["bond:harmonic"](batch, **PARAMS["bond:harmonic"])
         torch.testing.assert_close(pots(batch, PARAMS, styles=("bond:harmonic",)), bond)
 
+    def test_atom_energies_split_each_term_equally_and_sum_to_the_graph(self):
+        pots = Potentials({"bond:harmonic": BondHarmonic(), "angle:harmonic": AngleHarmonic()})
+        batch = chain_batch()
+        atoms = pots.atom_energy(batch, PARAMS)
+        expected = torch.zeros_like(atoms)
+        for key in pots:
+            index, energy = pots[key].term_energies(batch, **PARAMS[key])
+            for column, e in zip(index.T.tolist(), energy.tolist(), strict=True):
+                for atom in column:
+                    expected[atom] += e / len(column)
+        torch.testing.assert_close(atoms, expected)
+        graphs = torch.zeros_like(pots(batch, PARAMS)).index_add(0, batch["atoms", "batch"], atoms)
+        torch.testing.assert_close(graphs, pots(batch, PARAMS))
+
     def test_a_named_style_it_does_not_hold_is_refused(self):
         pots = Potentials({"bond:harmonic": BondHarmonic()})
         with pytest.raises(ValueError, match="angle:harmonic"):
