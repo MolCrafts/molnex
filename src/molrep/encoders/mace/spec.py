@@ -81,7 +81,7 @@ class MACEEncoderSpec(BaseModel):
             rejected without it.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     atomic_numbers: list[int] = Field(..., min_length=1)
     r_max: float = Field(6.0, gt=0.0)

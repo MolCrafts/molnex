@@ -20,7 +20,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 
@@ -61,6 +61,10 @@ class Metric(Protocol):
 
     def reset(self) -> None:
         """Reset metric state for new epoch."""
+        ...
+
+    def to(self, device: str | torch.device) -> Any:
+        """Move the metric's state to *device* (``torchmetrics.Metric.to``)."""
         ...
 
 
@@ -107,6 +111,13 @@ class BaseMetric(ABC):
         """
         self.device = torch.device(device)
         return self
+
+    def sync(self, device: torch.device | str | None = None) -> None:
+        """Reduce the accumulated state across ranks before :meth:`compute`; none by default.
+
+        A torchmetrics metric is not a :class:`BaseMetric` and syncs itself
+        inside its own ``compute``.
+        """
 
     @abstractmethod
     def update(self, preds: torch.Tensor, targets: torch.Tensor) -> None:
@@ -218,7 +229,7 @@ class MAE(BaseMetric):
 
     def compute(self) -> torch.Tensor:
         """Compute MAE as a 0-d tensor on the inputs' device (no ``.item()``)."""
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             return _mean_of(*reduced)
         if not self.preds:
@@ -269,7 +280,7 @@ class RMSE(BaseMetric):
 
     def compute(self) -> torch.Tensor:
         """Compute RMSE as a 0-d tensor on the inputs' device (no ``.item()``)."""
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             mean = _mean_of(*reduced)
             return torch.sqrt(mean)
@@ -321,7 +332,7 @@ class MSE(BaseMetric):
 
     def compute(self) -> torch.Tensor:
         """Compute MSE as a 0-d tensor on the inputs' device (no ``.item()``)."""
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             return _mean_of(*reduced)
         if not self.preds:
@@ -379,7 +390,7 @@ class R2Score(BaseMetric):
         resolved with :func:`torch.where` rather than a Python ``if`` so the
         method never forces a CPU↔GPU sync on the hot path.
         """
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             ss_res, sum_t, sum_t2, count = reduced
             ss_tot = sum_t2 - sum_t.square() / count.clamp(min=1)
@@ -454,7 +465,7 @@ class Accuracy(BaseMetric):
 
     def compute(self) -> torch.Tensor:
         """Compute accuracy as a 0-d tensor on the inputs' device (no ``.item()``)."""
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             return _mean_of(*reduced)
         if not self.preds:
@@ -539,8 +550,7 @@ class MetricCollection:
             Self for chaining
         """
         for metric in self.metrics.values():
-            if hasattr(metric, "to"):
-                metric.to(device)
+            metric.to(device)
         return self
 
 
@@ -571,7 +581,7 @@ class MoleculeCenteredRMSE(BaseMetric):
         self.targets.append(t)
 
     def compute(self) -> torch.Tensor:
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             return torch.sqrt(_mean_of(*reduced))
         if not self.preds:
@@ -618,7 +628,7 @@ class MoleculeCenteredMAE(BaseMetric):
         self.targets.append(t)
 
     def compute(self) -> torch.Tensor:
-        reduced = getattr(self, "_reduced", None)
+        reduced = self._reduced
         if reduced is not None:
             return _mean_of(*reduced)
         if not self.preds:

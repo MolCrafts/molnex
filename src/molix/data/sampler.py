@@ -1282,10 +1282,18 @@ class BatchPlanShard:
         return len(self._plan) // self.world_size
 
     def reseed(self, seed: int) -> None:
-        """Forward ``reseed`` to the inner plan when it has one."""
-        reseed = getattr(self._plan, "reseed", None)
-        if callable(reseed):
-            reseed(seed)
+        """Forward ``reseed`` to the inner plan when it is :class:`Reseedable`."""
+        if isinstance(self._plan, Reseedable):
+            self._plan.reseed(seed)
+
+
+@runtime_checkable
+class Reseedable(Protocol):
+    """A batch plan that reshuffles for a new epoch (``DataModule.on_epoch_start``)."""
+
+    def reseed(self, seed: int) -> None:
+        """Rebuild the plan's order from *seed*."""
+        ...
 
 
 @runtime_checkable

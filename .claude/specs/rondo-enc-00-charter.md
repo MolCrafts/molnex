@@ -20,9 +20,9 @@ replacement for topology-based static parameterization.
 |---|---|
 | `CovalentGraphEncoder`, reference head | ByteFF-26's EGT and `PreMMBonded`, ported with official weights (01) |
 | `MACEEncoder` | `MaceConformerEncoder` in `molrep/encoders/mace_conformer/` over `molrep.encoders.mace` blocks (02) |
-| `CanonicalAdapter` | owned by each encoder: identity for ByteFF-26, `nn.Linear` for MACE; no adapter class |
-| `EncoderFeatures` | `molrep.chem.features.EncoderFeatures(atom, bond)`, replacing `ChemEmbeddings` |
-| `encoder.encode(batch)` | `Rondo.features(frame, *, encoder=)`; evaluates no head |
+| `CanonicalAdapter` | owned by each encoder: identity for ByteFF-26; for MACE the atom / bond readouts (`AtomReadout`, `BondReadout` in `mace_conformer/layers.py`); no adapter class |
+| `EncoderFeatures` | `molrep.encoders.features.EncoderFeatures(atom, bond)`, replacing `ChemEmbeddings` |
+| `encoder.encode(batch)` | `Rondo.features(frame)`; evaluates no head. The encoder is fixed at construction (`Rondo(ff, *, dtype, encoder=)`, registered as `graph`) |
 | standalone trainer | the existing `Trainer` / `JointTrainStep` (accumulation, autocast, checkpoints already there); no new trainer |
 | temporary pretraining heads | caller-side modules in the pretraining step, never on `Rondo` |
 

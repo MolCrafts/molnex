@@ -139,8 +139,7 @@ class _MidpointEuler(Integrator):
     """
 
     def __init__(self, dt: float):
-        super().__init__()
-        self.register_buffer("dt", torch.as_tensor(dt))
+        super().__init__(dt)
 
     def advance(self, state: MDState) -> MDState:
         vel = state.vel + self.dt * state.forces
@@ -231,7 +230,7 @@ class TestIntegratorRebuildSwitch:
     def test_unnamed_harmonic_potential_like_binds_via_bind_force(self):
         """``E = ½k‖x‖²`` binds through ``Integrator.bind_force``, not a FF subclass."""
         helper = _harmonic_potential_like(k=2.0)
-        ig = Integrator().bind_force(helper)
+        ig = Integrator(dt=1.0).bind_force(helper)
         pos = torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=_DTYPE)
         out = ig.eval_force(pos)
         # ‖x‖² = 1 + 4 = 5 → E = ½·2·5 = 5; F = −2x

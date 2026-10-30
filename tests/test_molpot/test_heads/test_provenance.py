@@ -193,7 +193,7 @@ class TestParameterProvenance:
         )
         assert rec.as_dict()["interaction"] == "bond"
 
-    def test_attach_provenance_on_metadata_object(self):
+    def test_attach_provenance_refuses_a_non_mapping(self):
         class _Spec:
             def __init__(self) -> None:
                 self.metadata: dict = {}
@@ -205,11 +205,8 @@ class TestParameterProvenance:
             regime=CoverageRegime.IN_SUPPORT,
             source="neural_continuous",
         )
-        spec = _Spec()
-        out = attach_provenance(spec, [rec])
-        assert out is spec
-        assert spec.metadata["provenance"][0]["type_id"] == 1
-        assert spec.metadata["provenance"][0]["regime"] == "IN_SUPPORT"
+        with pytest.raises(TypeError, match="metadata dict itself"):
+            attach_provenance(_Spec(), [rec])
 
     def test_attach_provenance_on_dict(self):
         rec = ParameterProvenance(

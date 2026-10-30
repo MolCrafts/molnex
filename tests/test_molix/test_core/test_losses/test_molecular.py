@@ -26,7 +26,6 @@ from molix.core.losses.molecular import (
     ParsleyEnergyWeight,
     PartialHessianLoss,
     ProjectedInternalHessianLoss,
-    ReferenceShiftPrior,
     ScaleNormalizedLoss,
     StationaryForceLoss,
     TorsionProfileLoss,
@@ -902,23 +901,6 @@ class TestPartialHessianLoss:
             PartialHessianLoss()({"partial_hessian": torch.zeros(2, 9)}, self._batch(label))
 
 
-class TestReferenceShiftPrior:
-    def test_is_the_mean_squared_shift_over_live_rows(self):
-        """A padded row neither scores nor counts."""
-        batch = TensorDict(
-            {"angles": TensorDict({"mask": torch.tensor([True, True, False])}, batch_size=[3])},
-            batch_size=[],
-        )
-        pred = {"angle_theta0_residual": torch.tensor([0.1, -0.3, 5.0])}
-        got = ReferenceShiftPrior()(pred, batch)
-        assert torch.allclose(got, torch.tensor((0.01 + 0.09) / 2))
-
-    def test_a_missing_prediction_is_an_error(self):
-        batch = TensorDict({"angles": TensorDict({}, batch_size=[0])}, batch_size=[])
-        with pytest.raises(KeyError, match="angle_theta0_residual"):
-            ReferenceShiftPrior()({}, batch)
-
-
 class TestLogRatioPrior:
     """Mean squared log-ratio of a parameter to its reference, over live rows."""
 
@@ -1485,9 +1467,7 @@ class TestMeanTermEnergyLoss:
         batch = TensorDict(
             {
                 "graphs": TensorDict({"energy_pred": torch.tensor([6.0])}, batch_size=[1]),
-                "bonds": TensorDict(
-                    {"bond_index": torch.tensor([[0, 1], [1, 2]])}, batch_size=[]
-                ),
+                "bonds": TensorDict({"bond_index": torch.tensor([[0, 1], [1, 2]])}, batch_size=[]),
                 "angles": TensorDict({"k": torch.zeros(1)}, batch_size=[1]),
             },
             batch_size=[],

@@ -51,7 +51,6 @@ from molix.core.losses.molecular import (
     ParsleyEnergyWeight,
     PartialHessianLoss,
     ProjectedInternalHessianLoss,
-    ReferenceShiftPrior,
     ScaleNormalizedLoss,
     StationaryForceLoss,
     TorsionProfileLoss,
@@ -66,7 +65,6 @@ from molix.core.losses.molecular import (
 
 __all__ = [
     "AtomicChargeLoss",
-    "ReferenceShiftPrior",
     "BoltzmannProfileLoss",
     "ChargeMSELoss",
     "LogRatioPrior",

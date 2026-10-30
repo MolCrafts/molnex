@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -253,14 +253,6 @@ class SubsetDataset(BaseDataset):
 
 #: Valence tables name their per-unit count column after the singular family
 #: (``bonds`` -> ``bond_n``), which is how a count sidecar spells them.
-_FAMILY_OF_TABLE: Final[dict[str, str]] = {
-    "bonds": "bond",
-    "angles": "angle",
-    "propers": "proper",
-    "impropers": "improper",
-}
-
-
 def _no_table(source: Any, table: str) -> ValueError:
     """Refuse a fabricated table-length vector."""
     if table == "pairs":
@@ -290,40 +282,12 @@ def _record_nrows(sample: Any, table: str) -> int:
     )
 
 
-def _sidecar_counts(source: Any, column: Any, table: str) -> Any:
-    """Per-unit count column of *table* from a count sidecar.
-
-    A source that can answer ``n_<table>`` (or ``<family>_n``) without
-    materialising a sample lets the sampler size every batch with **zero**
-    ``__getitem__`` calls — the property
-    ``TestSamplerNoUnpack::test_zero_getitem_calls_during_construction_and_iteration``
-    pins. That is a dataset capability, not a property of any one storage
-    backend.
-    """
-    names = [f"n_{table}"]
-    family = _FAMILY_OF_TABLE.get(table)
-    if family is not None:
-        names.append(f"{family}_n")
-    for name in names:
-        try:
-            return column(name)
-        except KeyError:
-            continue
-    raise _no_table(source, table)
-
-
 def _counts(source: Any, table: str) -> torch.Tensor:
     """Per-row lengths by materialising every sample — the fallback route.
 
     Reached only when a source declares no :attr:`BaseDataset.counted_tables`
     entry and implements no :meth:`BaseDataset.count_rows`.
     """
-    column = getattr(source, "column", None)
-    frame_mol = getattr(source, "frame_mol", None)
-    if callable(column) and frame_mol is not None:
-        values = torch.as_tensor(_sidecar_counts(source, column, table), dtype=torch.long)
-        return values[torch.as_tensor(frame_mol, dtype=torch.long)]
-
     rows = torch.empty(len(source), dtype=torch.long)
     for i in range(len(source)):
         rows[i] = _record_nrows(source[i], table)

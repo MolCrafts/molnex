@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from molix.core.hook import ScalarHook
+from molix.core.metrics import BaseMetric
 from molix.core.state import Path
 
 
@@ -164,9 +165,10 @@ class MetricsHook(ScalarHook):
             device = None
         val_ns = state[self.prefix_val]
         for metric in self.val_metrics:
-            sync = getattr(metric, "sync", None)
-            if callable(sync):
-                sync(device)
+            # A torchmetrics metric syncs inside its own compute(); its sync()
+            # takes a dist_sync_fn, not a device.
+            if isinstance(metric, BaseMetric):
+                metric.sync(device)
             val_ns[self._scalar_name(metric)] = float(metric.compute())
 
 
@@ -203,7 +205,7 @@ class StepSpeedHook(ScalarHook):
     def on_train_batch_end(self, trainer, state, batch, outputs):
         """Publish the cumulative rates once an optimizer step closes."""
         del batch, outputs
-        accum = max(1, int(getattr(trainer, "accumulate_grad_batches", 1)))
+        accum = max(1, int(trainer.accumulate_grad_batches))
         if (int(trainer._micro_step) + 1) % accum != 0:
             return
         self._optimizer_steps += 1

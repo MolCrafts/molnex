@@ -235,11 +235,9 @@ class Log(BaseHook):
             if isinstance(hook, ScalarHook):
                 advertised.update(hook.scalar_keys)
         # Steps write scalars too (e.g. per-task losses from a routing Step),
-        # and they are not hooks. ``getattr`` keeps hook-only fake trainers and
-        # steps without the attribute working.
-        for attr in ("train_step", "eval_step"):
-            step = getattr(trainer, attr, None)
-            advertised.update(getattr(step, "scalar_keys", ()) or ())
+        # and they are not hooks; every Step declares ``scalar_keys``.
+        advertised.update(trainer.train_step.scalar_keys)
+        advertised.update(trainer.eval_step.scalar_keys)
 
         unknown = [p for p in self.keys if p not in advertised]
         if unknown:

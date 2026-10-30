@@ -16,6 +16,7 @@ from molix.core.checkpoint import (
     capture_rng_states,
     restore_rng_states,
 )
+from molix.core.hook import BaseHook
 from molix.core.state import TrainState
 from molix.core.trainer import Trainer
 from molix.hooks import CheckpointHook
@@ -484,7 +485,7 @@ class TestCheckpointHookIntegration:
         # (MetricsHook or eval step normally does this). Writes from
         # on_eval_step_complete so save_best (which also fires there)
         # sees the updated value.
-        class FakeMetricHook:
+        class FakeMetricHook(BaseHook):
             """Writes a decreasing eval/loss each eval phase."""
 
             def __init__(self):

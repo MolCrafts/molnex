@@ -27,7 +27,7 @@ class AngleHarmonic(BasePotential):
     """
 
     name = "angle_harmonic_torch"
-    type = "angle"
+    category = "angle"
 
     k: torch.Tensor
     theta0: torch.Tensor

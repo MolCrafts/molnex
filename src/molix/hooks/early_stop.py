@@ -114,8 +114,7 @@ class EarlyStop(BaseHook):
         """Which metric to watch: the one given, else the checkpoint's own."""
         monitor = self._monitor
         if monitor is None:
-            checkpoint = getattr(trainer, "_checkpoint", None)
-            monitor = getattr(checkpoint, "best_metric_name", None) or ("eval", "loss")
+            monitor = trainer.checkpoint.best_metric_name or ("eval", "loss")
         return tuple(monitor.split("/")) if isinstance(monitor, str) else tuple(monitor)
 
     def on_eval_step_complete(self, trainer, state) -> None:

@@ -126,18 +126,14 @@ class JointDataModule:
         self.steps_per_epoch = steps_per_epoch
 
     def setup(self, stage: str = "fit") -> None:
-        """Forward to every source that has ``setup``."""
+        """Forward to every source."""
         for source in self.sources.values():
-            setup = getattr(source, "setup", None)
-            if callable(setup):
-                setup(stage)
+            source.setup(stage)
 
     def on_epoch_start(self, epoch: int) -> None:
-        """Forward to every source that has ``on_epoch_start``."""
+        """Forward to every source."""
         for source in self.sources.values():
-            hook = getattr(source, "on_epoch_start", None)
-            if callable(hook):
-                hook(epoch)
+            source.on_epoch_start(epoch)
 
     def train_dataloader(self) -> Iterable:
         """The lockstep over every source's training loader (see the class)."""

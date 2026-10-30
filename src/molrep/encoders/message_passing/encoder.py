@@ -68,6 +68,16 @@ class MessagePassingEncoder(nn.Module):
         self.atom_norm = nn.LayerNorm(spec.atom_dim, dtype=dtype)
         self.bond_norm = nn.LayerNorm(spec.bond_dim, dtype=dtype)
 
+    @property
+    def width(self) -> int:
+        """Width of the atom features handed to the heads."""
+        return self.spec.atom_dim
+
+    @property
+    def bond_width(self) -> int:
+        """Width of the bond features handed to the heads."""
+        return self.spec.bond_dim
+
     def forward(self, frame: TensorDict) -> EncoderFeatures:
         """Atom ``(N, atom_dim)`` and bond ``(N_bonds, bond_dim)`` features.
 

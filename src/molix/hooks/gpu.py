@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from molix.core.hook import ScalarHook
 from molix.core.state import Path
@@ -124,6 +125,9 @@ class GPUUtilsHook(ScalarHook):
                 f"GPUUtilsHook: unknown metric(s) {unknown}. Available: {sorted(self._AVAILABLE)}."
             )
         self.metrics: tuple[str, ...] = metrics
+        #: NVML module and device handle, bound at train start; ``None`` until then.
+        self._nvml: Any = None
+        self._handle: Any = None
 
     @property
     def scalar_keys(self) -> tuple[Path, ...]:
@@ -167,7 +171,7 @@ class GPUUtilsHook(ScalarHook):
 
     def on_train_end(self, trainer, state):
         """Shut down NVML and release the device handle (best-effort)."""
-        nvml = getattr(self, "_nvml", None)
+        nvml = self._nvml
         if nvml is not None:
             try:
                 nvml.nvmlShutdown()

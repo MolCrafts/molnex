@@ -61,6 +61,7 @@ from molpot.potentials.potential import BondedPotential
 from molrep.encoders.covalent_graph import CovalentGraphEncoder, CovalentGraphEncoderSpec
 from molrep.encoders.features import EncoderFeatures
 from molrep.encoders.mace_conformer import MaceConformerEncoder
+from molrep.encoders.message_passing import MessagePassingEncoder
 
 from .spec import validate
 
@@ -83,28 +84,6 @@ def _term_style(kind: type[Term]) -> str:
     if isinstance(kind, type) and issubclass(kind, Term):
         return kind.style
     raise TypeError(f"a term is a Term class, got {kind!r}")
-
-
-def _detach(predicted: Tables, trainable: Sequence[str] | None) -> Tables:
-    """Drop the gradient of every predicted column *trainable* does not name."""
-    if trainable is None:
-        return predicted
-    named = tuple(trainable)
-    for entry in named:
-        namespace, _, name = entry.partition(".")
-        if namespace not in predicted or (name and name not in predicted[namespace]):
-            raise KeyError(
-                f"trainable entry {entry!r} names no predicted parameter: the model predicts "
-                f"{ {ns: sorted(columns) for ns, columns in predicted.items()} }"
-            )
-    kept: Tables = {}
-    for namespace, columns in predicted.items():
-        whole = namespace in named
-        kept[namespace] = {
-            column: value if whole or f"{namespace}.{column}" in named else value.detach()
-            for column, value in columns.items()
-        }
-    return kept
 
 
 def _row(params: dict[str, torch.Tensor], row: int) -> dict[str, float]:
@@ -171,7 +150,7 @@ class Rondo(Potential):
         forcefield: ForceField,
         *,
         dtype: torch.dtype,
-        encoder: CovalentGraphEncoder | MaceConformerEncoder | None = None,
+        encoder: CovalentGraphEncoder | MaceConformerEncoder | MessagePassingEncoder | None = None,
         **settings: object,
     ) -> None:
         super().__init__()
@@ -190,7 +169,7 @@ class Rondo(Potential):
         self.spec = spec
         # Plain attribute: the IR is data, not a module.
         self.forcefield = forcefield.canonical()
-        self.graph: CovalentGraphEncoder | MaceConformerEncoder = (
+        self.graph: CovalentGraphEncoder | MaceConformerEncoder | MessagePassingEncoder = (
             CovalentGraphEncoder(spec.encoder, dtype=dtype) if encoder is None else encoder
         )
         self.heads = torch.nn.ModuleDict()
@@ -440,14 +419,13 @@ class Rondo(Potential):
         frame: TensorDict,
         *,
         styles: Sequence[str | type[Term]] | None = None,
-        trainable: Sequence[str] | None = None,
     ) -> TensorDict:
         """Write ``graphs.energy`` ``(B,)`` kcal/mol — the traced seam.
 
         The heads of the priced styles run here, and their columns are written
-        onto the batch (``bonds.k``, ``atoms.charge``, …). ``trainable`` names
-        the columns that keep a gradient (``"bonds"`` or ``"bonds.k"``); the
-        others are detached. ``None`` keeps every column.
+        onto the batch (``bonds.k``, ``atoms.charge``, …): :meth:`predict` then
+        :meth:`energy_at`. Which columns a loss may move is the training step's
+        (``molix.core.steps.JointTrainStep.keep``), not the model's.
 
         Args:
             frame: Padded batch with ``atoms.pos``, ``atoms.batch``, ``graphs``
@@ -457,7 +435,6 @@ class Rondo(Potential):
                 — or ``None`` for every member. A training objective may pass
                 the force field's style key instead. The tuple is fixed, so
                 the call traces as straight-line code.
-            trainable: Predicted columns that keep a gradient, or ``None``.
 
         Returns:
             The same frame with ``graphs.energy`` and the predicted columns written.
@@ -465,11 +442,33 @@ class Rondo(Potential):
         Raises:
             ValueError: *styles* is empty or names a style the model does not
                 carry.
-            KeyError: *trainable* names a column this call did not predict.
         """
-        predicted = _detach(self.predict(frame, styles=styles), trainable)
-        frame[ENERGY_KEY] = self.price(frame, predicted, styles=styles)
-        self.write_tables(frame, predicted)
+        return self.energy_at(frame, self.predict(frame, styles=styles), styles=styles)
+
+    def energy_at(
+        self,
+        frame: TensorDict,
+        tables: Tables,
+        *,
+        styles: Sequence[str | type[Term]] | None = None,
+    ) -> TensorDict:
+        """Write ``graphs.energy`` ``(B,)`` kcal/mol at the parameters in *tables*, and the columns.
+
+        :meth:`energy` without the prediction: a caller that scores several
+        objectives on one batch predicts once (:meth:`predict`), detaches per
+        objective and prices each here — the encoder and the
+        heads run once per batch, not once per objective.
+
+        Args:
+            frame: As :meth:`energy`.
+            tables: Parameters as :meth:`predict` returns them.
+            styles: As :meth:`energy`.
+
+        Returns:
+            The same frame with ``graphs.energy`` and the table columns written.
+        """
+        frame[ENERGY_KEY] = self.price(frame, tables, styles=styles)
+        self.write_tables(frame, tables)
         return frame
 
     def tables(
@@ -477,7 +476,6 @@ class Rondo(Potential):
         frame: TensorDict,
         *,
         styles: Sequence[str | type[Term]] | None = None,
-        trainable: Sequence[str] | None = None,
     ) -> TensorDict:
         """Write the predicted parameter columns of *styles* onto the batch — no energy.
 
@@ -488,17 +486,14 @@ class Rondo(Potential):
         Args:
             frame: Batch with the namespaces the styles' heads read.
             styles: As :meth:`energy`.
-            trainable: As :meth:`energy`.
 
         Returns:
             The same frame with the predicted columns written.
         """
-        self.write_tables(frame, _detach(self.predict(frame, styles=styles), trainable))
+        self.write_tables(frame, self.predict(frame, styles=styles))
         return frame
 
-    def partial_hessian(
-        self, frame: TensorDict, *, trainable: Sequence[str] | None = None
-    ) -> torch.Tensor:
+    def partial_hessian(self, frame: TensorDict, tables: Tables) -> torch.Tensor:
         """The MM ``3×3`` blocks on the pairs ``hessian_pairs`` names ``(P, 9)``.
 
         A pair's block is the sum over every carried bonded term containing it.
@@ -506,7 +501,8 @@ class Rondo(Potential):
         Args:
             frame: Batch with ``hessian_pairs`` and the ``hpair_*`` slot columns;
                 ``atoms.pos`` must require grad (marked before the traced body).
-            trainable: Predicted columns that keep a gradient, or ``None``.
+            tables: Parameters as :meth:`predict` returns them, detached as the
+                caller wants.
 
         Returns:
             ``(P, 9)`` kcal mol⁻¹ Å⁻², row-major blocks in ``hessian_pairs`` order.
@@ -515,7 +511,6 @@ class Rondo(Potential):
             ValueError: A priced valence namespace has rows but no ``hpair_*``
                 column — its term would silently receive no gradient.
         """
-        predicted = _detach(self.predict(frame), trainable)
         pos = frame[POS_KEY]
         blocks = pos.new_zeros((frame["hessian_pairs"].batch_size[0], 9))
         hessian = TermHessian()
@@ -537,7 +532,7 @@ class Rondo(Potential):
                 continue
             params = {
                 name: value.to(pos.dtype)
-                for name, value in self._terms[key].potential_params(predicted).items()
+                for name, value in self._terms[key].potential_params(tables).items()
             }
             mask = self._mask(block, pos)
 

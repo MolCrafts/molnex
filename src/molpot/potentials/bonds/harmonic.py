@@ -34,7 +34,7 @@ class BondHarmonic(BasePotential):
     """
 
     name = "bond_harmonic_torch"
-    type = "bond"
+    category = "bond"
 
     k: torch.Tensor
     r0: torch.Tensor

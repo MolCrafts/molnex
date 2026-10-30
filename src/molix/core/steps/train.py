@@ -87,6 +87,16 @@ class DefaultTrainStep:
     #: keeps its label read in the eager prologue, so it does not set this.
     untraceable: str | None = None
 
+    #: The per-source compiled regions of a step that has several
+    #: (:class:`~molix.core.steps.joint.JointTrainStep`), or ``None`` for a
+    #: step whose one region is ``_traced_forward_loss``.
+    traced_bodies: dict[str, Any] | None = None
+
+    @property
+    def scalar_keys(self) -> tuple[tuple[str, ...], ...]:
+        """No paths beyond the trainer's defaults (see :class:`~molix.core.steps.base.Step`)."""
+        return ()
+
     def compute_loss(
         self,
         trainer: "Trainer",

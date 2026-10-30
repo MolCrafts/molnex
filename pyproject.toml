@@ -62,7 +62,7 @@ dev = [
   "pytest-cov>=4.0",
   "pytest-benchmark>=4.0",
   "ruff>=0.15",
-  "ty>=0.0.25",
+  "ty>=0.0.94",  # 0.0.93 aborts in ld.so on glibc 2.34 (the cluster nodes)
   "tox>=4.23",
 ]
 docs = [
@@ -162,6 +162,13 @@ missing-argument = "warn"
 unresolved-import = "warn"
 not-iterable = "warn"
 no-matching-overload = "warn"
+# invalid-mutable-override (ty >= 0.0.94): torch's stubs declare
+# nn.Module.forward as a writable Callable attribute, so every Module
+# subclass's forward method trips it (195 sites). Audited 2026-10-30: the
+# non-forward hits were real and fixed in code (MACE spec family frozen,
+# ScalarHook.scalar_keys a read-only property, P3M's narrowed kspace_filter);
+# a new non-forward hit printed in the warn tier is a defect, not noise.
+invalid-mutable-override = "warn"
 
 [tool.ty.environment]
 python-version = "3.12"
@@ -177,7 +184,7 @@ skip_install = true
 base_python = ["python3.12"]
 deps = [
   "ruff>=0.15",
-  "ty>=0.0.25",
+  "ty>=0.0.94",  # 0.0.93 aborts in ld.so on glibc 2.34 (the cluster nodes)
 ]
 commands = [
   # ty is advisory in CI (continue-on-error); keep local gate = ruff check only.

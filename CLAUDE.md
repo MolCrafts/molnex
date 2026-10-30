@@ -910,16 +910,22 @@ See `.claude/notes/learnable-classical-ff.md`. Short form:
    one `Potentials`. Rondo holds it and adds the covalent-graph encoder
    (`molrep.encoders.covalent_graph`, returning `EncoderFeatures(atom, bond)`)
    and one head per style it prices (`molpot.classical`; the bonded heads
-   assemble angle / torsion / improper features themselves);
-   `predict(frame)` / `price(frame, tables)` are the primitives `energy` composes;
-   `energy(frame, *, styles=None, trainable=None)` and `partial_hessian(frame)`.
+   assemble angle / torsion / improper features themselves); another encoder
+   with the same `EncoderFeatures` / `width` / `bond_width` contract is
+   injected as `Rondo(ff, *, dtype, encoder=)`.
+   `predict(frame) -> tables` / `price(frame, tables)` are the primitives;
+   `energy_at(frame, tables, *, styles=None)` writes the energy and the columns
+   at given tables, `energy(frame, *, styles=None)` is `energy_at(frame,
+   predict(frame))`, `partial_hessian(frame, tables)`, `parameterize(frame)`
+   (one molecule's static field as molpy data).
    **No training-stage arguments on the constructor** (no `outputs=` /
    `energy_terms=` / `param_groups`; user ruling 2026-10-11). Which loss trains
-   which parameters is the training step's: `JointObjective(trainable=, styles=)`
-   is passed into `energy`; the optimizer is
+   which parameters is the training step's: the joint step predicts the tables
+   **once per source**, detaches per `JointObjective(trainable=)`
+   (`JointTrainStep.keep`) and prices each objective on them; the optimizer is
    `Adam(model.parameters())`. Training is ByteFF's joint multi-source step
    (`JointTrainStep` + `JointDataModule`). `energy` writes `graphs.energy` and
-   every table column (`bonds.k`, `bonds.k_ref`, …, `atoms.charge`); `forward`
+   every table column (`bonds.k`, …, `atoms.charge`); `forward`
    adds `atoms.forces_pred`. Placing predictions beside the DFT labels is the
    joint step's job (`molix.frame.beside_labels`), not the model's.
    Required input columns (MolHub writes them for THEMol): `atoms.formal_charge`,

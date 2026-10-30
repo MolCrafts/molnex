@@ -163,9 +163,7 @@ def symmetric_contraction(
     # A term below degree 3 reads the appended segment of ones in its empty
     # slots, so every term is one three-factor product — one static-shape pass
     # over the whole table, no split by degree (a host sync under compile).
-    features = torch.cat(
-        [x.view(nodes, segments, channels), x.new_ones(nodes, 1, channels)], dim=1
-    )
+    features = torch.cat([x.view(nodes, segments, channels), x.new_ones(nodes, 1, channels)], dim=1)
     slots = torch.where(terms[:, 1:4] >= 0, terms[:, 1:4], segments)
     factors = [(weights, terms[:, 0])] + [(features, slots[:, slot]) for slot in range(3)]
     out = monomials(factors, coefficients, terms[:, 4], nodes, output_segments)

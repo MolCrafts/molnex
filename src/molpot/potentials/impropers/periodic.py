@@ -60,7 +60,7 @@ class ImproperPeriodic(BasePotential):
     """
 
     name = "improper_periodic_torch"
-    type = "improper"
+    category = "improper"
 
     k: torch.Tensor
     periodicity: torch.Tensor

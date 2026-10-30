@@ -86,11 +86,21 @@ class DefaultEvalStep:
     #: see :attr:`~molix.core.steps.train.DefaultTrainStep.untraceable`.
     untraceable: str | None = None
 
+    #: The per-source compiled regions of a step that has several
+    #: (:class:`~molix.core.steps.joint.JointEvalStep`), or ``None`` for a
+    #: step whose one region is ``_traced_forward_loss``.
+    traced_bodies: dict[str, Any] | None = None
+
     def __init__(
         self, *, no_grad: bool = False, objective: Callable[[Any, Any], torch.Tensor] | None = None
     ) -> None:
         self._no_grad = no_grad
         self.objective = objective
+
+    @property
+    def scalar_keys(self) -> tuple[tuple[str, ...], ...]:
+        """No paths beyond the trainer's defaults (see :class:`~molix.core.steps.base.Step`)."""
+        return ()
 
     def compute_loss(
         self,

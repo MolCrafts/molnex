@@ -43,9 +43,10 @@ import torch
 from tensordict import TensorDict
 
 from molix.autograd import Derivative, Potential
+from molix.compile import Compiler
 from molix.frame import TensorFrame, as_tensor_frame
 from molix.md.barostat import BerendsenBarostat
-from molix.md.forcefield import ForceField, MDForceField
+from molix.md.forcefield import ForceField, MDForceField, RetypableForceField
 from molix.md.integrators import Integrator
 from molix.md.neighbors import NeighborList
 from molix.md.runner import MDHook, MDRunner
@@ -136,7 +137,7 @@ class _TensorDictForce:
         self._compiler = compiler
         # Read once: the CUDA-graph replay contract (step mark + cloned
         # outputs) is applied iff the build says it records graphs.
-        self._cuda_graphs = bool(getattr(compiler, "cuda_graphs", False))
+        self._cuda_graphs = isinstance(compiler, Compiler) and compiler.cuda_graphs
         #: The composed derivative op of the current run — eager or compiled —
         #: or ``None`` before :meth:`bind_work`.
         self._op: Callable[[TensorDict], TensorDict] | None = None
@@ -788,15 +789,14 @@ class MD:
             # container's parameter tables (restated by ``to_dtype``, which the
             # assembled Potentials then reads live) and the module's own buffers
             # and mlip weights (moved by ``.to`` below).
-            to_dtype = getattr(source, "to_dtype", None)
-            if to_dtype is None:
+            if not isinstance(source, RetypableForceField):
                 raise TypeError(
                     "MD(potential_dtype=…) needs a force field that can restate its "
                     f"parameter tables at another dtype; {type(source).__name__} has no "
                     "to_dtype (molpot.forcefield.ForceField does). Drop potential_dtype, "
                     "or declare the tables at the wanted dtype and evaluate at one precision"
                 )
-            source = to_dtype(self.potential_dtype)
+            source = source.to_dtype(self.potential_dtype)
         pots = source.to_potentials()
         pots.eval()
         pots.requires_grad_(False)

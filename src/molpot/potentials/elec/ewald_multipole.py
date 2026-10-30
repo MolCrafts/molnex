@@ -147,7 +147,7 @@ class EwaldMultipoleEnergy(BasePotential):
     """
 
     name = "ewald_multipole"
-    type = "long_range"
+    category = "long_range"
 
     def __init__(
         self,

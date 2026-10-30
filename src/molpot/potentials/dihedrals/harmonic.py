@@ -25,7 +25,7 @@ class DihedralHarmonic(BasePotential):
     """
 
     name = "dihedral_harmonic_torch"
-    type = "dihedral"
+    category = "dihedral"
 
     k: torch.Tensor
     phi0: torch.Tensor

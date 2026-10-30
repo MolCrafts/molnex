@@ -126,9 +126,11 @@ class Integrator(nn.Module):
 
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dt: float) -> None:
         super().__init__()
         self.force: PotentialLike | None = None
+        #: Time step, fs — a buffer so it moves with the module.
+        self.register_buffer("dt", torch.as_tensor(float(dt)))
 
     def bind_force(self, force: PotentialLike) -> Integrator:
         """Attach the :class:`PotentialLike` this integrator will evaluate.
@@ -153,13 +155,8 @@ class Integrator(nn.Module):
         mass = _require_positive_mass(mass)
         if isinstance(mass, torch.Tensor):
             ref = mass
-        elif hasattr(self, "dt"):
-            ref = self.dt
         else:
-            raise TypeError(
-                "bind_mass(float) needs the integrator's dt buffer already registered; "
-                f"got scalar mass and no dt on {type(self).__name__}"
-            )
+            ref = self.dt
         mass_col = _as_mass_col(mass, ref)
         self.mass: float | torch.Tensor = mass
         self.register_buffer("mass_col", mass_col)
@@ -242,8 +239,7 @@ class VelocityVerletIntegrator(Integrator):
     """
 
     def __init__(self, dt: float) -> None:
-        super().__init__()
-        self.register_buffer("dt", torch.as_tensor(float(dt)))
+        super().__init__(dt)
 
     def step(self, state: MDState) -> MDState:
         """One NVE step from the cached entry force.
@@ -291,7 +287,7 @@ class LangevinVerletIntegrator(Integrator):
         kbt: float,
         seed: int = 0,
     ) -> None:
-        super().__init__()
+        super().__init__(dt)
         if float(gamma) <= 0.0:
             raise ValueError(
                 "LangevinVerletIntegrator requires gamma > 0; use VelocityVerletIntegrator for NVE"
@@ -303,7 +299,6 @@ class LangevinVerletIntegrator(Integrator):
         self._seed = int(seed)
         c1 = math.exp(-float(gamma) * float(dt))
         c2 = math.sqrt(max(0.0, 1.0 - c1 * c1))
-        self.register_buffer("dt", torch.as_tensor(float(dt)))
         self.register_buffer("c1", torch.as_tensor(c1))
         self.register_buffer("c2", torch.as_tensor(c2))
         self._generator: torch.Generator | None = None

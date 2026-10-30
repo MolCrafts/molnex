@@ -55,6 +55,12 @@ def _batch() -> dict[str, Any]:
 
 
 class _DataModule:
+    def setup(self, stage: str = "fit") -> None:
+        pass
+
+    def on_epoch_start(self, epoch: int) -> None:
+        pass
+
     def train_dataloader(self):
         for _ in range(3):
             yield _batch()
@@ -157,7 +163,7 @@ def test_wrap_distributed_refuses_a_compiled_step(monkeypatch: pytest.MonkeyPatc
     import torch.distributed as dist
 
     trainer, _ = _make_trainer()
-    trainer.train_step._traced_forward_loss = lambda *_args, **_kwargs: None
+    trainer.compile(step=True)  # lazy: nothing is traced until a call
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     with pytest.raises(ValueError, match="compile\\(step=True\\)"):

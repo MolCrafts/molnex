@@ -6,86 +6,59 @@ tutorial; use the MolZoo user guide for theory narrative and worked examples.
 | Field | Value |
 |-------|-------|
 | Module | `molzoo.rondo` |
-| Entry point | `Rondo(forcefield, *, dtype=)`. One force field; `Rondo.graph` is the covalent-graph encoder (`molrep.encoders.covalent_graph.CovalentGraphEncoder`, no coordinates) returning `EncoderFeatures(atom, bond)`; one `molpot.classical` term per priced style. `predict` / `price` are the primitives `energy` composes; `forward` differentiates `atoms.pos` and writes `atoms.forces_pred`. The published pair heads are `molzoo.byteff.ByteFF`. |
-| Paper | Not a reproduction. Lineage: Wang *et al.*, "End-to-end differentiable construction of molecular mechanics force fields", *Chem. Sci.* **13**, 12016 (2022) — Espaloma. Structure aligned with: Zheng *et al.*, "Data-driven parametrization of molecular mechanics force fields for expansive chemical space coverage", *Chem. Sci.* (2025) — ByteFF. |
-| arXiv | Lineage [2010.01196](https://arxiv.org/abs/2010.01196) (Espaloma); structure [2408.12817](https://arxiv.org/abs/2408.12817) (ByteFF) |
+| Entry point | `Rondo(forcefield, *, dtype, encoder=None, **settings)`. One force field (`forcefield.canonical()`), priced by one `Potentials`; `Rondo.graph` is the encoder — `molrep.encoders.covalent_graph.CovalentGraphEncoder` (ByteFF-26's edge-augmented graph transformer, no coordinates) built from `settings`, or the encoder passed as `encoder=` — returning `EncoderFeatures(atom, bond)`; one `molpot.classical` term per priced style under `Rondo.heads`. `predict` / `price` are the primitives `energy` composes; `tables` writes the predicted columns without an energy; `forward` differentiates `atoms.pos` and writes `atoms.forces_pred`; `parameterize` writes one molecule's static field as molpy data. The published pair heads are `molzoo.byteff.ByteFF`. |
+| Paper | Encoder and bonded heads: Zheng *et al.*, "Data-driven parametrization of molecular mechanics force fields for expansive chemical space coverage", *Chem. Sci.* (2025) — ByteFF, ported with the ByteFF-26 weights. Lineage: Wang *et al.*, "End-to-end differentiable construction of molecular mechanics force fields", *Chem. Sci.* **13**, 12016 (2022) — Espaloma. |
+| arXiv | [2408.12817](https://arxiv.org/abs/2408.12817) (ByteFF); lineage [2010.01196](https://arxiv.org/abs/2010.01196) (Espaloma) |
 | DOI | [10.1039/D2SC02739A](https://doi.org/10.1039/D2SC02739A) (Espaloma) |
-| Reference implementation | `choderalab/espaloma@413eb55074037540e1414eb365da7304bd5d72be`, `bytedance/byteff@90ef54a7c38e58f162adc23f3e8f457aaf922d46` |
-| Spec status | revising (2026-10-28 revision below supersedes §3.2–§3.4, §4 and the encoder / head rows of §5–§6) |
-
-## Revision 2026-10-28 — encoder, interfaces and heads
-
-Spec of the change: `.claude/specs/rondo-enc-01-graph-encoder.md` (operator
-rulings, paper↔code map, parity record). Where this section and §2–§6 below
-disagree, this section wins until the body is rewritten.
-
-- **Encoder.** The Espaloma-style `ChemEncoder` is no longer Rondo's. `Rondo.graph`
-  is the covalent-graph encoder (edge-augmented attention over the bonds,
-  `molrep.encoders.covalent_graph`): element `Z − 1`, degree (from the bond list),
-  formal charge, ring connectivity, smallest ring; bond order and ring
-  membership; features averaged over topological equivalence classes. The
-  message-passing encoder is kept as a second encoder
-  (`molrep.encoders.message_passing.MessagePassingEncoder`).
-- **Interfaces Rondo owns.** encoder → heads: `EncoderFeatures(atom (N, D),
-  bond (N_bonds, D'))`, nothing else. heads → potentials: `Term.predict(features,
-  frame, potential)` columns in molrs conventions. No encoder builds angle,
-  torsion or improper features.
-- **Bonded heads** (`molpot.classical`): symmetric assembly of each term's atom
-  and bond rows (bond and its reverse; angle and its reverse; proper and its
-  reverse; the three improper legs), `pre` summed over the copies, `post`, one
-  MLP per parameter, `t·tanh(raw)·std + mean` with a straight-through clamp;
-  hypervalent P/S patch; `K = k/2` for bonds and angles, improper cvff `d = −1,
-  n = 2`, proper `n = 1..4` at phases 0°/180°. Replaces the reference·exp
-  windows, the covalent-radius / VSEPR references and `Hybridization` (ledger
-  A5–A24 rows on those are superseded).
-- **Pair heads unchanged**: D1 (EEM, MBIS) and D2 (LJ around GAFF2).
-- **Inputs added**: `atoms.equi_index` (first atom of the atom's topological
-  class; rebased by the collate, one class per ghost in the padder) and
-  `propers.linear` (the reference's linear-centre SMARTS). **Changed**:
-  `impropers` is one row per C/N centre with three neighbours, centre first,
-  legs ascending (a batch in another engine's order names the chemical centre in
-  `impropers.centre` / `leg1..3`). **Dropped** as an encoder channel:
-  `graphs.total_charge` (EEM still reads it).
-- **Validation**: §7.1 is now *claimed* for the encoder and bonded heads — every
-  parameter of the five ByteFF-26 members within 2.7e-14, energies within the
-  reference's own float32-π phase (spec 01 §8).
+| Reference implementation | Encoder and bonded heads: `ByteDance-Seed/byteff2@663451d65c72d6c1d556494ab8c0897bbdc0383a` (tag `v1.1.0`); weights HF `ByteDance-Seed/byteff2` revision `v1.1.0`, `ByteFF-26/models/member-0{1..5}/optimal.pt`. Training recipe line references (§3.7, §6): `bytedance/byteff@90ef54a7c38e58f162adc23f3e8f457aaf922d46`. Lineage: `choderalab/espaloma@413eb55074037540e1414eb365da7304bd5d72be` |
+| Spec status | stable |
 
 ## 1. Scope
 
-Rondo is MolNex's **learnable Class-I force field**: a graph neural network
-that reads a molecule's covalent topology and emits every *open* parameter of
-the Class-I force field it is built on, and evaluates that field in the same
-module through the molpot potentials of the field's styles.
+Rondo is MolNex's **learnable Class-I force field**: an encoder reads a
+molecule and one head per style emits every *open* parameter of the Class-I
+force field it is built on, and the same module evaluates that field through
+the molpot potentials of the field's styles.
 
 It is a *recipe*, in the MolZoo sense — the named composition of primitives
 that already live in `molrep` and `molpot`. The force field **is** the
 Hamiltonian: a molpy `ForceField` declares the styles, cutoff, mixing rule,
-Coulomb constant and 1-4 scales once (operator ruling 2026-10-06), and
-`Potentials.from_forcefield(ff)` returns that one `Potentials`. Rondo holds
-it, adds the encoder and one parameter head per style it prices, and owns no
-energy of its own.
+Coulomb constant and 1-4 scales once (operator ruling 2026-10-06);
+`Rondo` keeps `forcefield.canonical()` and `Potentials.from_forcefield`
+returns that one `Potentials`. Rondo holds it, adds the encoder and one
+parameter head per style it prices, and owns no energy of its own.
+
+Rondo owns two interfaces and nothing between them (`.claude/specs/rondo-enc-01-graph-encoder.md`
+§1 ruling 4, §2): encoder → heads is `EncoderFeatures(atom (N, D), bond
+(N_bonds, D'))`, nothing else; heads → potentials is `Term.predict(features,
+frame, potential)`, columns in molrs conventions (LAMMPS `K` without ½,
+degrees). No encoder builds angle, torsion or improper features; the bonded
+heads assemble them from the atom and bond rows.
 
 ### 1.1 What Rondo owns
 
 | Concern | Rondo surface |
 |---------|---------------|
-| The parameters a style leaves open, as functions of the graph | one class per LAMMPS style in `molpot.classical` (`BondHarmonic`, `AngleHarmonic`, `DihedralPeriodic`, `ImproperCvff`, `LJCut`, `PairCoulCut`), the same names as `molpot.potentials`, registered on `Rondo.heads` |
-| The molecular-graph encoder | `Rondo.graph`, a `molrep.chem.ChemEncoder` with ByteFF's channels. It reads no coordinates. `Rondo.features` dispatches to exactly one encoder. The coordinate encoder is the other mode on the same terms |
-| Hybridization read off the bond list (reference angles, linear centres) | the angle term and the proper term, each a `molrep.chem.Hybridization` |
-| Which terms the model carries | one `Potentials`, `Potentials.from_forcefield` of the force field. A later style is a force field that declares it; a subclass overrides `load_state_dict` to accept the parent's checkpoint |
-| What a training step calls | `Rondo.energy` (every carried style, or `styles=` a named subset; `trainable=` keeps a gradient on the named columns), `Rondo.partial_hessian`, `Rondo.features` |
-| Energy and derivatives as one model forward | `Rondo.forward` = `molix.autograd.Derivative(Rondo.energy, wrt=("atoms.pos",))`, writing `atoms.forces_pred` |
-| The configuration contract | `RondoSpec(encoder=EncoderSpec, heads=HeadsSpec)` |
+| The parameters a style leaves open, as functions of the features | one class per LAMMPS style in `molpot.classical.TERMS` (`BondHarmonic`, `AngleHarmonic`, `DihedralPeriodic`, `ImproperCvff`, `LJCut`, `PairCoulCut`), the same names as `molpot.potentials`, registered on `Rondo.heads` at their `head_key` (`bonds`, `angles`, `propers`, `impropers`, `lj`, `charge`) |
+| The encoder | `Rondo.graph`: `CovalentGraphEncoder(spec.encoder, dtype=)` when `encoder=None`, else the injected module (e.g. `molrep.encoders.mace_conformer.MaceConformerEncoder`), registered as `graph` either way so the heads load by the same keys. The heads are sized from `graph.width` / `graph.bond_width`. `Rondo.features(frame)` is the encoder call; no head runs |
+| Which terms the model carries | one `Potentials`, `Potentials.from_forcefield` of `forcefield.canonical()`. A later style is a force field that declares it; a subclass overrides `load_state_dict` to accept the parent's checkpoint |
+| What a training step calls | `Rondo.predict` once per source, then per objective `Rondo.energy_at(frame, tables, styles=)` (every carried style, or a named subset), `Rondo.write_tables` (the columns, no energy) or `Rondo.partial_hessian(frame, tables)`; the step detaches the columns a loss does not name (`JointTrainStep.keep`) |
+| Energy and derivatives as one model forward | `Rondo.forward` = `molix.autograd.Derivative(Rondo.energy, wrt=("atoms.pos",), outputs=(FORCES_PRED_KEY,))`, writing `atoms.forces_pred` |
+| One molecule's static field | `Rondo.parameterize(frame, *, graph=0) -> (molpy.Frame, molpy.ForceField)` (§4) |
+| The configuration contract | `RondoSpec(encoder=CovalentGraphEncoderSpec, heads=HeadsSpec)`, built from the constructor keywords (§4) |
 
 ### 1.2 What Rondo does not own
 
 | Concern | Owner |
 |---------|-------|
-| The functional form, its settings and units | the molpy `ForceField` (molrs IR) |
-| The torch implementation of each style | `molpot.potentials` (`bond:harmonic`, `angle:harmonic`, `dihedral:periodic`, `dihedral:opls`, `improper:cvff`, `pair:lj/cut`, `pair:coul/cut`) |
+| The functional form, its settings and units | the molpy `ForceField` (molrs IR); `ForceField.canonical()` rewrites a typed `dihedral opls` as `dihedral periodic` |
+| The torch implementation of each style | `molpot.potentials` (`bond:harmonic`, `angle:harmonic`, `dihedral:periodic`, `improper:cvff`, `pair:lj/cut`, `pair:coul/cut` — the styles `TERMS` has heads for) |
+| Topological equivalence and per-batch bond lookup | `molrep.chem.equivalence.Equivalence`, `molrep.chem.bond_table.BondTable` |
+| The published pair heads (bond charge corrections, direct σ / ε) and the ByteFF-26 loader | `molzoo.byteff.ByteFF` (`BondChargeCorrection`, `LJCutDirect`, `ByteFF.load`) |
 | Which loss trains which parameters | the training step (`molix.core.steps.JointObjective.trainable`) |
 | Pair relations (1-2 / 1-3 / 1-4) and the cutoff pair list | `molix.data.PairRelation`, `molix.neighbor.NeighborList` |
-| Input columns: formal charge, ring features, bond order, GAFF2 reference σ/ε | MolHub (THEMol decoding) |
+| Input columns: formal charge, ring features, bond order, equivalence classes, linear-proper mask, improper rows, GAFF2 reference σ/ε | molpy perception (`assign_symmetry_classes`, `perceive_linear_dihedrals`, `assign_small_rings`), written by MolHub (THEMol decoding; `rondo-enc-01` §5) |
+| Serialising a static field for an engine | molpy (`molpy.io.write_lammps_data`, `molpy.io.lammps.LammpsForcefieldWriter`) |
 | The per-term partial Hessian | `molpot.forcefield.partial_hessian.TermHessian` |
 | The derivative op | `molix.autograd.Derivative` |
 | Losses, padding, collation, batch tasks | `molix` |
@@ -96,20 +69,27 @@ energy of its own.
 
 Rondo sits in the Espaloma → ByteFF family: a GNN over the covalent graph
 predicts MM parameters, and the MM energy is differentiated for forces. After
-the 2026-10-11 realignment its *structure* follows ByteFF — joint
+the 2026-10-11 realignment its *training* follows ByteFF — joint
 multi-dataset training with per-loss parameter sets, equilibrium forces for
-`r0` / `θ0`, ByteFF's input features, signed-`k` fixed-phase torsions, a
-GAFF2 non-bonded start. Two choices still depart from both predecessors:
+`r0` / `θ0`. Since 2026-10-28 (`rondo-enc-01`) its encoder and bonded heads
+**are** ByteFF-26's — the edge-augmented graph transformer and `PreMMBonded`,
+ported with the published weights and reproduced to 2.7e-14 (§7.1). Two choices
+depart from ByteFF-26; `molzoo.byteff.ByteFF` is the same model without them:
 
-| # | Rondo | Espaloma / ByteFF | Consequence |
-|---|-------|-------------------|-------------|
-| D1 | Partial charges from **electronegativity equalisation** (`molpot.charge`: `ChiEtaHead` → `ElectronegativityEqualization`), supervised by MBIS charges | Espaloma: charge-equilibration read-out. ByteFF: AM1-BCC-style bond-charge corrections regressed to AM1-BCC | Charges respond to the solved electrostatic problem; one dense per-molecule solve |
-| D2 | Lennard-Jones σ / ε **learned around the atom's GAFF2 type** (`LJHead`: `σ = σ_GAFF2·exp(0.1·raw)`, `ε = ε_GAFF2·exp(raw)`, zero start) | ByteFF regresses predicted σ/ε to GAFF2 labels or uses them unchanged | Starts exactly on GAFF2; gas-phase intramolecular data gives little signal, so a stage that names `atoms.sigma` / `atoms.epsilon` carries a prior toward the reference (R1) |
+| # | Rondo | ByteFF-26 (`molzoo.byteff.ByteFF`) | Consequence |
+|---|-------|-------------------------------------|-------------|
+| D1 | Partial charges from **electronegativity equalisation** (`PairCoulCut`: `molpot.charge.ChiEtaHead` → `ElectronegativityEqualization`), supervised by MBIS charges | bond charge corrections on the equivalence-averaged formal charges (`BondChargeCorrection`) | Charges respond to the solved electrostatic problem; one dense per-molecule solve; reads `graphs.total_charge` |
+| D2 | Lennard-Jones σ / ε **learned around the atom's GAFF2 type** (`LJCut` → `LJHead`: `σ = σ_GAFF2·exp(0.1·raw)`, `ε = ε_GAFF2·exp(raw)`, windowed, zero start) | σ, ε predicted directly, `t·tanh(mlp) + t` (`LJCutDirect`) | Starts exactly on GAFF2; gas-phase intramolecular data gives little signal, so a stage that names `atoms.sigma` / `atoms.epsilon` carries a prior toward the reference (R1) |
+
+The bond head's lower `K` clamp is also Rondo's: 80 kcal mol⁻¹ Å⁻² by default
+against the published 40 (`HeadsSpec.bond_k_floor`, A27).
 
 ### 1.4 Status of this document
 
-`stable`. §5 carries no `unknown` row. §7.1 stays `not claimed` by
-construction.
+`stable`. The 2026-10-28 encoder / head revision (`rondo-enc-01`) is folded
+into §1–§6. §5 carries no `unknown` row. §7.1 is claimed for the encoder and
+the bonded heads (ByteFF-26 parity) and not for Rondo's own pair heads or any
+trained model.
 
 ## 2. Public Contract
 
@@ -117,53 +97,61 @@ construction.
 
 | Direction | TensorDict path | Shape | Dtype | Contract |
 |-----------|------------------|-------|-------|----------|
-| In | `atoms.Z` | `(N,)` | int64 | Atomic numbers; ghost rows carry `0` |
-| In | `atoms.pos` | `(N, 3)` | the model's `dtype` | Positions, Å. Differentiated against; read by `CoordinateEncoder`, never by the graph encoder |
+| In | `atoms.Z` | `(N,)` | int64 | Atomic numbers; the element embedding reads `Z − 1` (86 rows). Ghost rows carry the padder's `pad_atom_type` |
+| In | `atoms.pos` | `(N, 3)` | the model's `dtype` | Positions, Å. Differentiated against. Never read by `CovalentGraphEncoder`; `MaceConformerEncoder` reads each profile's first conformer, detached |
 | In | `atoms.batch` | `(N,)` | int64 | Graph membership |
-| In | `atoms.formal_charge` | `(N,)` | int64 | Encoder channel (clamped to ±2) |
-| In | `atoms.ring_connectivity` | `(N,)` | int64 | Encoder channel: ring bonds on the atom (clamped to 4) |
-| In | `atoms.min_ring_size` | `(N,)` | int64 | Encoder channel: smallest ring through the atom, `0` none (rings above 8 read as 8) |
-| In | `graphs.total_charge` | `(B,)` | the model's `dtype`, integer-valued | Encoder channel (read as an integer class, clamped to ±5) and the charge model's constraint; no neutral fallback |
-| In | `atoms.gaff2_sigma`, `atoms.gaff2_epsilon` | `(N,)` | the model's `dtype` | Reference σ (Å) / ε (kcal/mol) of the atom's GAFF2 type; `NaN` for an untyped atom, which makes the batch energy `NaN` rather than pricing silently. Required iff `pair lj/cut` is declared |
-| In | `bonds.atomi` / `bonds.atomj` or `bonds.bond_index` | `(N_bonds,)` / `(2, N_bonds)` | int64 | Covalent topology |
-| In | `bonds.bond_type` | `(N_bonds,)` | int64 | Bond order code (1 single, 2 double, 3 triple, 4 aromatic): encoder channel and hybridization input |
-| In | `bonds.in_ring` | `(N_bonds,)` | int64 | Encoder channel |
+| In | `atoms.formal_charge` | `(N,)` | int64 | Encoder channel, clamped to ±2. Also the starting charge of `BondChargeCorrection` (ByteFF) |
+| In | `atoms.ring_connectivity` | `(N,)` | int64 | Encoder channel: ring bonds at the atom (embedding rows 0..6) |
+| In | `atoms.min_ring_size` | `(N,)` | int64 | Encoder channel: smallest ring of at most 8 atoms through the atom, `0` none (embedding rows 0..8) |
+| In | `atoms.equi_index` | `(N,)` | int64 | First atom of the atom's topological class; `collate_molecules` rebases it, the padder makes every ghost its own class. Atom and bond features are averaged over these classes |
+| In | `graphs` | `(B,)` namespace | — | Required: the graph count is `frame["graphs"].batch_size[0]` |
+| In | `graphs.total_charge` | `(B,)` | the model's `dtype`, integer-valued | The EEM constraint $Q$ (D1). Required iff `pair coul/cut` is declared; not an encoder channel |
+| In | `atoms.gaff2_sigma`, `atoms.gaff2_epsilon` | `(N,)` | the model's `dtype` | Reference σ (Å) / ε (kcal/mol) of the atom's GAFF2 type (D2). Required iff `pair lj/cut` is declared (`KeyError` naming the column); a `NaN` reference makes a `NaN` parameter rather than pricing silently |
+| In | `bonds.bond_index` | `(2, N_bonds)` | int64 | Covalent topology. Bond features and the bond table are in this order |
+| In | `bonds.bond_type` | `(N_bonds,)` | int64 | 1 single, 2 double, 3 triple, 4 aromatic; `0` on a dead row |
+| In | `bonds.in_ring` | `(N_bonds,)` | int64 | Encoder channel, 0 / 1 |
 | In | `angles.atomi` / `atomj` / `atomk` | `(N_angles,)` | int64 | Valence angles; `atomj` is the vertex |
 | In | `propers.atomi` … `atoml` | `(N_propers,)` | int64 | Proper torsions |
-| In | `impropers.atomi` … `atoml` | `(N_impropers,)` | int64 | Impropers, **centre first**; **three rows per centre**, the cyclic orders `[c,i,j,k]`, `[c,j,k,i]`, `[c,k,i,j]` (ByteFF's `k/3` split, `classical_forcefield.py:261-284`) |
-| In | `pairs.pair_index` | `(E, 2)` | int64 | Cutoff pair list at the force field's pair cutoff; read when a pair style is declared |
-| In | `pairs.pair_diff` or `pairs.shifts` | `(E, 3)` | the model's `dtype` | Lattice remainder of each pair (detached) |
+| In | `propers.linear` | `(N_propers,)` | bool | ByteFF's linear-centre SMARTS (molpy `perceive_linear_dihedrals`); a missing column raises `KeyError` by name |
+| In | `impropers.atomi` … `atoml` | `(N_impropers,)` | int64 | **One row per three-connected centre**, centre first, legs ascending (ByteFF's `get_impropers`). Only a C or N centre carries the term |
+| In | `impropers.centre`, `leg1` / `leg2` / `leg3` | `(N_impropers,)` | int64 | Optional: the chemical centre and legs when the stored order is another engine's (AMBER puts the centre third). Features come from these, the dihedral from the stored order |
+| In | `pairs.pair_index` | `(E, 2)` | int64 | Cutoff pair list at the force field's pair cutoff; read when a pair style is declared, and by `MaceConformerEncoder` (both directions) |
+| In | `pairs.shifts` or `pairs.pair_diff` | `(E, 3)` | the model's `dtype` | Lattice remainder of each pair for the pair styles. `MaceConformerEncoder` reads `pair_diff` detached as its edge vectors |
 | In | `pairs.relation` | `(E,)` | int8 | `0` none, `1`/`2`/`3` = 1-2/1-3/1-4, from `molix.data.PairRelation` |
+| In | `graphs.profile` | `(B,)` | int64 | Only with `MaceConformerEncoder`: batch-local profile id (`molix.data.ProfileIndex`); the first graph of a profile is its reference conformer |
 | In | `hessian_pairs`, `<ns>.hpair_<i>_<j>` | — | — | Only for `partial_hessian` |
-| In | `graphs.num_atoms` | `(B,)` | int64 | Graph sizes |
-| In | `atoms.mask` / `graphs.mask` / `<ns>.mask` | bool | — | Ghost-row, dead-slot and dead-term masks under static shapes |
+| In | `atoms.mask` / `graphs.mask` / `<ns>.mask` | bool | — | Ghost-row, dead-slot and dead-term masks under static shapes; `bonds.mask` also restricts the degree and the hypervalent count to live bonds |
 
-Every encoder channel column is required: a batch that lacks one raises
-`KeyError` naming it.
+A batch that lacks a column the encoder or a priced style reads raises
+`KeyError` on that key.
 
 ### 2.2 Outputs
 
 `Rondo.forward` returns the batch. `energy` writes `graphs.energy` and every
-predicted table as columns, references included, so losses and priors read
-them from the batch; `forward` adds the force at `atoms.forces_pred`
-(`FORCES_PRED_KEY` in `molix.schema`, the op's output key for `atoms.pos`) —
-a training batch holds the DFT force at `atoms.forces` (A6). The energy lands
-where a labelled batch holds its DFT energy; where it must sit beside that
-label, the training step wraps the call in `molix.frame.beside_labels`
-(`graphs.energy → graphs.energy_pred`, `ENERGY_PRED_KEY`), as
-`molix.core.steps.JointTrainStep` does. The model moves nothing.
+column the priced styles' heads predict, onto each namespace the batch holds;
+`forward` adds the force at `atoms.forces_pred` (`FORCES_PRED_KEY` in
+`molix.schema`, the op's output key for `atoms.pos`) — a training batch holds
+the DFT force at `atoms.forces` (A6). The energy lands where a labelled batch
+holds its DFT energy; where it must sit beside that label, the training step
+wraps the call in `molix.frame.beside_labels` (`graphs.energy →
+graphs.energy_pred`, `ENERGY_PRED_KEY`), as `molix.core.steps.JointTrainStep`
+does. The model moves nothing. `tables` writes the same parameter columns and
+leaves `graphs.energy` untouched.
 
 | Column | Shape | Written by | Contract |
 |--------|-------|------------|----------|
 | `graphs.energy` | `(B,)` | `energy` | Class-I energy, kcal mol⁻¹; a training step copies it to `graphs.energy_pred` beside the label (`beside_labels`) |
-| `atoms.forces_pred` | `(N, 3)` | `forward` (when `"atoms.pos" in wrt`) | `-dE/dpos`, kcal mol⁻¹ Å⁻¹ |
-| `bonds.k`, `bonds.r0`, `bonds.k_ref`, `bonds.r0_ref` | `(N_bonds,)` | `energy` | LAMMPS `K` (kcal/mol/Å²), `r0` (Å) and their references |
-| `angles.k`, `angles.theta0`, `angles.k_ref`, `angles.theta0_ref` | `(N_angles,)` | `energy` | `K` (kcal/mol/rad²), `θ0` **degrees** and references |
-| `propers.k` | `(N_propers, T)` | `energy` | Signed amplitudes per periodicity, kcal/mol |
-| `impropers.k`, `impropers.k_ref` | `(N_impropers,)` | `energy` | Amplitude (positive) and reference, kcal/mol |
-| `atoms.sigma`, `atoms.epsilon`, `atoms.sigma_ref`, `atoms.epsilon_ref` | `(N,)` | `energy` | Å, kcal/mol and the GAFF2 references |
-| `atoms.charge` | `(N,)` | `energy` | Solved partial charges, $e$. The MBIS label stays `atoms.atomic_charge` |
+| `atoms.forces_pred` | `(N, 3)` | `forward` | `-dE/dpos`, kcal mol⁻¹ Å⁻¹ |
+| `bonds.k`, `bonds.r0` | `(N_bonds,)` | `energy`, `tables` | LAMMPS `K` (kcal/mol/Å², half the head's `k`), `r0` (Å) |
+| `angles.k`, `angles.theta0` | `(N_angles,)` | `energy`, `tables` | `K` (kcal/mol/rad², half the head's `k`), `θ0` **degrees** |
+| `propers.k` | `(N_propers, 4)` | `energy`, `tables` | Signed amplitudes of $n = 1..4$, kcal/mol |
+| `impropers.k` | `(N_impropers,)` | `energy`, `tables` | cvff amplitude, kcal/mol, in $[0, 20]$ |
+| `atoms.sigma`, `atoms.epsilon`, `atoms.sigma_ref`, `atoms.epsilon_ref` | `(N,)` | `energy`, `tables` (`pair lj/cut`) | Å, kcal/mol, and the GAFF2 references they were predicted around (the `gaff2_*` inputs). `ByteFF` writes `sigma` / `epsilon` only |
+| `atoms.charge` | `(N,)` | `energy`, `tables` (`pair coul/cut`) | Solved partial charges, $e$. The MBIS label stays `atoms.atomic_charge` |
 | `hessian_pairs.partial_hessian` | `(P, 9)` | the caller, from `partial_hessian` | MM 3×3 blocks, kcal mol⁻¹ Å⁻² |
+
+No bonded reference column (`*_ref`) is written: the bonded heads have no
+per-row reference (§3.4).
 
 ## 3. Forward Contract
 
@@ -171,105 +159,159 @@ label, the training step wraps the call in `molix.frame.beside_labels`
 
 | Symbol | Meaning | Code anchor |
 |--------|---------|-------------|
-| $N$, $B$, $E$ | Atom rows, graph slots, pair rows (capacities, ghosts included) | `atoms.Z`, `graphs.num_atoms`, `pairs.pair_index` |
-| $h^{(t)}_a$, $h^{(t)}_{ij}$ | Atom / bond features after $t$ hops | `ChemEncoder` |
-| $h_{ijk}$, $h_{ijkl}$, $h^{\text{imp}}_{cijk}$ | Angle / proper / improper features | `molrep.chem.context.*` |
-| $c_a$ | Summed channel embeddings of atom $a$'s extra columns | `DiscreteChannels` |
-| $d_a$, $\pi_a$ | Degree and π count of atom $a$ from the bond orders | `Hybridization` |
+| $N$, $B$, $E$ | Atom rows, graph slots, pair rows (capacities, ghosts included) | `atoms.Z`, `graphs`, `pairs.pair_index` |
+| $x_a$, $e_b$ | Atom / bond feature row handed to the heads | `EncoderFeatures.atom`, `.bond` |
+| $h_a$, $\epsilon_{s\to t}$ | Encoder node state and directed edge state | `CovalentGraphEncoder` |
+| $\mathrm{Eq}[\cdot]$ | Mean over a topological equivalence class | `Equivalence` |
+| $t$; $(s, \mu, lo, hi)$ | Output saturation; a parameter's window std, mean and clamp | `HeadsSpec.tanh_output`; `window_constants`, `TanhWindow` |
 | $\chi_i, \eta_i, q_i$ | Electronegativity, hardness, partial charge | `ChiEtaHead`, `atoms.charge` |
-| $T$ | Fourier terms per proper torsion | `HeadsSpec.proper_periodicity` |
 
 Energies are kcal mol⁻¹, lengths Å, **angles degrees** (molrs convention),
 charges $e$ throughout; there is no output unit conversion.
 
 ### 3.2 Chemical perception
 
-The encoder reads **topology only** — no coordinate enters any equation
-below, so the predicted parameters are geometry-independent and the deployed
-force is exactly $-\partial E/\partial \mathbf{r}$.
+`CovalentGraphEncoder` (ByteFF-26's `graph_block.py:Graph2DBlock`) reads
+**topology only** — no coordinate enters any equation below, so the predicted
+parameters are geometry-independent and the deployed force is exactly
+$-\partial E/\partial \mathbf{r}$.
 
-Atom seed with the channel sum, bond seed with its channel sum, then $L$
-pre-norm covalent hops:
-
-$$
-h^{(0)}_a = \mathrm{Embed}(Z_a) + c_a, \qquad
-c_a = \sum_{\text{channels } f} \mathrm{Embed}_f\!\left(\operatorname{clamp}(x_{f,a} + o_f)\right)
-$$
+Input features (`ChemicalEmbedding`): five atom embeddings and two bond
+embeddings, concatenated, through an MLP that ends in GELU, then averaged over
+equivalence classes:
 
 $$
-h^{(0)}_{ij} = \tfrac{1}{2}\left[\mathrm{MLP}(h_i \Vert h_j) + \mathrm{MLP}(h_j \Vert h_i)\right] + c_{ij}, \qquad
-h^{(t+1)}_{ij} = \mathrm{BondCtx}\!\left(\mathrm{LN}(h^{(t)}_i), \mathrm{LN}(h^{(t)}_j)\right) + c_{ij} + \mathrm{Lin}(\mathrm{LN}(h^{(t)}_{ij}))
+x^{(0)}_a = \mathrm{Eq}_a\!\left[\mathrm{MLP}_\text{node}\big(E_Z(Z_a - 1) \Vert E_d(d_a) \Vert E_q(\operatorname{clamp}(q^\text{f}_a, \pm 2)) \Vert E_\rho(\rho_a) \Vert E_m(m_a)\big)\right],
+\qquad
+e^{(0)}_b = \mathrm{Eq}_b\!\left[\mathrm{MLP}_\text{edge}\big(E_\text{ring}(\iota_b) \Vert E_o(o_b - 1)\big)\right]
+$$
+
+with $d_a$ the atom's degree over live bonds (counted from `bonds.bond_index`
+and `bonds.mask`), $\rho_a$ ring connectivity, $m_a$ smallest ring, $\iota_b$
+ring membership, $o_b$ bond order. A bond's class is the unordered pair of its
+endpoints' atom classes (`Equivalence.bonds`). A dead bond row reads order
+index 0 and counts toward no degree.
+
+Each bond $b$ is two directed edges, $2b$ ($i \to j$) and $2b{+}1$ ($j \to
+i$), $\epsilon^{(0)} = W_\text{in}\, e^{(0)}$. Then $L$ = `n_layers`
+pre-LN edge-augmented attention layers (`EdgeAttentionLayer`, ByteFF's
+`EGTConv`), with $q, k, v$ from $\mathrm{LN}(h)$ and $g = \mathrm{LN}(\epsilon)$:
+
+$$
+\ell_{s\to t} = \frac{q_t \cdot k_s}{\sqrt{d_h}} + W_b\, g_{st}, \qquad
+\alpha_{s\to t} = \operatorname*{softmax}_{s \to t}\, \ell_{s\to t}, \qquad
+h_t \leftarrow h_t + W_o \sum_{s\to t} \sigma(W_g\, g_{st})\,\alpha_{s\to t}\, v_s
 $$
 
 $$
-h^{(t+1)}_a = h^{(t)}_a + \mathrm{MLP}\!\left(\sum_{b \,\ni\, a} h^{(t+1)}_{ab}\right)
+h \leftarrow h + \mathrm{FFN}(\mathrm{LN}\,h), \qquad
+\epsilon \leftarrow \epsilon + W_p\,\ell, \qquad
+\epsilon \leftarrow \epsilon + \mathrm{FFN}_e(\mathrm{LN}\,\epsilon), \qquad
+h \leftarrow \mathrm{GELU}(h)
 $$
 
-The channels are ByteFF's atom and bond features (§2.1): formal charge, total
-charge (per graph, broadcast through `atoms.batch`), ring connectivity,
-smallest ring; bond order and ring membership (`EncoderSpec.atom_channels`,
-`bond_channels`). Every feature channel the encoder returns is layer-normalized
-before a head reads it; padded rows are zeroed after the norm (A11).
+per head ($d_h$ = `head_dim`, `heads` heads; the softmax runs over the edges
+entering one atom, an explicit segment softmax with no torch_geometric). The
+outputs: $x = W_\text{jk}\,[h^{(1)} \Vert \dots \Vert h^{(L)}]$ (width
+`width`) and $e_b = \tfrac12\,(W_\text{out}\epsilon_{2b} + W_\text{out}\epsilon_{2b+1})$
+(width `edge_mlp[1]`, `bond_width`). Atom and bond rows of equivalent atoms
+and bonds are equal (`EncoderFeatures` contract).
+
+**Injected encoder.** `MaceConformerEncoder` (`rondo-enc-02`) returns the same
+interface from geometry: every MACE layer's `0e` block on each conformer
+(`pairs.pair_diff`, detached), gathered from each profile's first conformer
+(`graphs.profile`); atom rows `MLP[s_i ‖ E(formal charge)]`, bond rows
+`½(MLP[s_i ‖ s_j ‖ φ(r)] + MLP[s_j ‖ s_i ‖ φ(r)]) + E(order) + E(in_ring)`
+with `φ` a Gaussian basis of the reference bond length; both averaged over the
+equivalence classes. No gradient reaches `atoms.pos` through it, so the energy
+is a Class-I energy at fixed parameters.
 
 ### 3.3 Valence contexts — permutation symmetry is structural
 
+Every bonded head (`SymmetricHead`, ByteFF's `PreMMBonded._symmetric_pooling`)
+reads the term's own atom and bond rows, in every order that names the same
+term:
+
+| Term | Copies (each a concatenation) |
+|------|-------------------------------|
+| bond $ij$ | $[x_i \Vert e_{ij} \Vert x_j]$, $[x_j \Vert e_{ij} \Vert x_i]$ |
+| angle $ijk$ | $[x_i \Vert e_{ij} \Vert x_j \Vert e_{jk} \Vert x_k]$ and its reverse |
+| proper $ijkl$ | $[x_i \Vert e_{ij} \Vert x_j \Vert e_{jk} \Vert x_k \Vert e_{kl} \Vert x_l]$ and its reverse |
+| improper, centre $c$ | $[x_c \Vert e_{c\ell} \Vert x_\ell]$ for each of the three legs $\ell$ |
+
 $$
-h_{ijk} = \tfrac{1}{2}\left[\mathrm{MLP}(h_i \Vert h_{ij} \Vert h_j \Vert h_{jk} \Vert h_k) + \mathrm{MLP}(h_k \Vert h_{jk} \Vert h_j \Vert h_{ij} \Vert h_i)\right],\quad
-h_{ijkl} = \tfrac{1}{2}\left[\mathrm{MLP}(h_i \Vert h_{ij} \Vert h_j \Vert h_{jk} \Vert h_k \Vert h_{kl} \Vert h_l) + \mathrm{MLP}(h_l \Vert h_{kl} \Vert h_k \Vert h_{jk} \Vert h_j \Vert h_{ij} \Vert h_i)\right],\quad
-h^{\text{imp}}_{cijk} = \tfrac{1}{3}\sum_{l \in \{i,j,k\}} \mathrm{MLP}\!\left(h_c \Vert h_{cl} \Vert h_l\right)
+y = \mathrm{post}\Big(\sum_{\text{copies}} \mathrm{pre}(\text{copy})\Big), \qquad
+\mathrm{raw}_p = \mathrm{out}_p(y)
 $$
 
-where $h_{ab}$ is the post-hop feature of the bond $a$–$b$ **of the term
-itself**, looked up by endpoint pair in a per-batch `BondTable` (one sort of
-the pair keys, `searchsorted` per term; static shapes, no loader column) —
-ByteFF's `OutputWithBond` (`layers.py:486-510`, A21). A term whose pair is not
-a bond (a padded row) gathers a zero bond feature. A batch that carries a
-valence namespace without `bonds` is refused by name.
-
-Graph-automorphism equivalence is not enforced separately: message passing
-over the covalent graph is automorphism-equivariant by construction (A7).
+`pre` and `post` are `DenseMLP`s (`bonded_hidden` → `bonded_width`,
+`bonded_layers` linears, GELU between), one `out_p` per parameter
+(`bonded_out_hidden`, `bonded_out_layers`). The sum makes every parameter
+invariant under bond reversal, angle and proper reversal and any permutation
+of the improper's legs. $e_{ab}$ is the row of the bond $a$–$b$ found in a
+per-batch `BondTable` over `bonds.bond_index` (one sort of the pair keys,
+`searchsorted` per term; static shapes, no loader column); a pair that is not
+a bond reads row 0, and a padded term's energy is masked.
 
 ### 3.4 Parameter heads
 
-Every head is a two-layer MLP per parameter whose **last layer starts at
-zero**, so `raw = 0` is a per-row reference the batch supplies and the model
-begins as a chemically sensible uniform field (A12, A14):
+Each bonded parameter is ByteFF-26's output transform (`TanhWindow`,
+`mm_bonded.py:PreMMBonded` / `CustomClamp`):
+
+$$
+v = \operatorname{clamp}\!\big(t \tanh(\mathrm{raw})\, s + \mu,\ lo,\ hi\big),
+$$
+
+forward the clamped value exactly, gradient of the unclamped one
+(straight-through). $t$ = `tanh_output` = 20, so the `tanh` reaches past both
+bounds and the clamp binds. The constants are ByteFF-26's (GAFF2 statistics),
+in the head's units ($\tfrac12 k$, degrees); the term converts once to molrs:
+
+| Parameter | $(s, \mu, lo, hi)$, head units | Column | Conversion |
+|-----------|-------------------------------|--------|------------|
+| bond $k$ | $(200, 700, 2\cdot$`bond_k_floor`$, 4000)$ | `bonds.k` | $K = k/2$: $[$`bond_k_floor`$, 2000]$, 350 at raw 0 |
+| bond $r_0$ | $(0.19, 1.3, 0.5, 5.0)$ Å | `bonds.r0` | — |
+| angle $k$ | $(60, 130, 40, 1000)$ | `angles.k` | $K = k/2$: $[20, 500]$ |
+| angle $\theta_0$ | $(10, 120, 20, 180)$ degrees | `angles.theta0` | — (180° inclusive) |
+| proper $k_n$, $n = 1..4$ | $(1.2, 0.4, -20, 20)$ each | `propers.k` `(M, 4)` | phases $\gamma_n = 0°$ (odd $n$), $180°$ (even $n$) |
+| improper $k$ | $(3.7, 4.3, 0, 20)$ | `impropers.k` | ByteFF's $k[1 + \cos(2\psi - \pi)]$ is cvff with $d = -1$, $n = 2$: $k[1 - \cos 2\psi]$, not halved |
+
+Then, per row:
+
+- **Hypervalent patch** (`Hypervalent`, ByteFF `patch_bonded_terms`): an atom
+  that is P or S with five or more live bonds. A bond touching it takes head
+  $k = 1000$ ($K = 500$), $r_0 = 0$; an angle centred on it head $k = 278.44$
+  ($K = 139.22$), $\theta_0 = 0$; a proper or improper containing it $k = 0$.
+  Applied in the head's units, before $K = k/2$.
+- **Linear centre**: a proper with `propers.linear` set has $k_n = 0$ (A16).
+- **Improper centre**: only a carbon or nitrogen centre carries $k$; molpy
+  emits a row for every three-connected atom, and the others (B, S⁺,
+  sulfoxide S) are zero.
+- **Bond floor**: `BondHarmonic(..., k_floor=)` replaces the published
+  lower clamp (head 80, $K$ 40) with $2\cdot$`bond_k_floor`; Rondo's default
+  `bond_k_floor` is 80 (A27).
+
+The bonded heads have no zero start (`DenseMLP` default init); the published
+weights are ByteFF-26's.
+
+Rondo's pair heads (one Linear–SiLU–Linear MLP per parameter, width `hidden`,
+**last layer zeroed**, so the model starts on the reference, A12):
 
 | Parameter | Map from the pre-activation | Reference | Head |
 |-----------|-----------------------------|-----------|------|
-| bond $K$ | $K_\text{ref}\, e^{\mathrm{raw}}$ on $[\tfrac18, 8]\,K_\text{ref}$ | 450 kcal/mol/Å² (`HeadsSpec.bond_k_ref`) | `BondHead` |
-| bond $r_0$ | $r_\text{ref}\, e^{0.1\,\mathrm{raw}}$ on $[0.7, 1.4]\,r_\text{ref}$ | $r^\text{cov}_i + r^\text{cov}_j$ (`CovalentRadiusSum`, molpy `Element.covalent`) | `BondHead` |
-| angle $K$ | $K_\text{ref}\, e^{\mathrm{raw}}$ on $[\tfrac18, 8]\,K_\text{ref}$ | 40 kcal/mol/rad² | `AngleHead` |
-| angle $\theta_0$ | $\theta_\text{ref} + 20°\cdot\mathrm{raw}$ saturating toward $[0.5°, 180°]$ (A24), **180° inclusive** (A23) | the centre's VSEPR angle: 180° linear ($d=2,\pi>1.5$), 120° trigonal ($\pi>0.5, d\le3$), 109.47° otherwise (`Hybridization.angle_reference`) | `AngleHead` |
-| proper $k_n$ | $\mathrm{raw}_n / n$, phase $\gamma_n = 0$ (odd $n$), $180°$ (even $n$) fixed | $0$ | `PeriodicHead` |
-| improper $k$ | $k_\text{ref}\, e^{\mathrm{raw}}$ on $[\tfrac{1}{64}, 8]\,k_\text{ref}$, `sign = −1` fixed | $4.29 / 3$ per row (ByteFF's GAFF2 mean per centre, `definitions.py:113`) | `CvffHead` |
-| LJ $\sigma$ | $\sigma_\text{GAFF2}\, e^{0.1\,\mathrm{raw}}$ on $[0.7, 1.4]\,\sigma_\text{GAFF2}$ | `atoms.gaff2_sigma` | `LJHead` |
-| LJ $\varepsilon$ | $\varepsilon_\text{GAFF2}\, e^{\mathrm{raw}}$ on $[\tfrac18, 8]\,\varepsilon_\text{GAFF2}$ | `atoms.gaff2_epsilon` | `LJHead` |
-| $\chi$, $\eta$ | $5\tanh$, sigmoid on $[10^{-3}, 20]$, zero start | — | `ChiEtaHead` |
+| LJ $\sigma$ | $\sigma_\text{GAFF2}\, e^{0.1\,\mathrm{raw}}$ on $[0.7, 1.4]\,\sigma_\text{GAFF2}$ | `atoms.gaff2_sigma` | `LJCut` (`LJHead`) |
+| LJ $\varepsilon$ | $\varepsilon_\text{GAFF2}\, e^{\mathrm{raw}}$ on $[\tfrac18, 8]\,\varepsilon_\text{GAFF2}$ | `atoms.gaff2_epsilon` | `LJCut` (`LJHead`) |
+| $\chi$, $\eta$ | $5\tanh$, $10^{-3} + (20 - 10^{-3})\,\mathrm{sigmoid}$ | — | `PairCoulCut` (`ChiEtaHead`) |
 
-Every window is reached by **saturation** (`ExpAround(lo=, hi=)`,
-`LinearAround`, A22 + A24): on each side of the reference the pre-activation
-is bent as $w\tanh(x/w)$ with $w$ the distance to that bound, so the slope at
-the reference is exactly one and the gradient fades as a bound is approached
-— ByteFF's `tanh_output` (`mlparams.py:104-110`). It was a straight-through
-clamp until 2026-10-12 (A24): that holds the value but keeps passing the full
-gradient, and a row the loss legitimately wants *at* a bound then pulls on its
-features forever (3723816: improper stream RMS 5.9 at 26 400 steps). The
-improper's window reaches lower because the strain objective (A19) sends a
-pyramidal centre's amplitude to zero; the floor is where it rests.
+The LJ windows are reached by **saturation** (`ExpAround(lo=, hi=)`, A24):
+on each side of the reference the exponent is bent as $w\tanh(x/w)$ with $w$
+the distance to that bound, so the slope at the reference is exactly one and
+the gradient fades as a bound is approached.
 
-Torsions carry a **signed** $k_n$ at fixed phases — ByteFF's and GAFF2's form
-($K_n = 2k_n$ for the OPLS form, matched exactly when `dihedral opls` is
-declared with $n = 1..4$). Every term is even in the dihedral, so a mirror
-image has the same energy; and $\partial E/\partial k_n = 1 + \cos(n\phi -
-\gamma_n)$ does not vanish at the zero start, where an $|a|$ parameterization
-would (A13). A typed dihedral series — a `GaffTypifier` force field carries
-one — sets the head's width to that table's term count. Periodicity and phase
-stay the force field's. Charges are not a GAFF parameter.
-
-A dihedral through a **linear centre** (an sp atom at position $j$ or $k$) are
-multiplied by zero before pricing: their dihedral is undefined
-(`Rondo._proper_mask`, ByteFF `mlparams.py:151-153`, A16).
+Torsions carry a **signed** $k_n$ at fixed phases — ByteFF's and GAFF2's form.
+Every term is even in the dihedral, so a mirror image has the same energy; and
+$\partial E/\partial k_n = 1 + \cos(n\phi - \gamma_n)$ does not vanish at
+$k_n = 0$, where an $|a|$ parameterization would (A13).
 
 ### 3.5 Charge equilibration
 
@@ -278,123 +320,169 @@ $\begin{bmatrix} \mathbf{A} & \mathbf{1} \\ \mathbf{1}^{\mathsf T} & 0 \end{bmat
 \begin{bmatrix} \mathbf{q} \\ \lambda \end{bmatrix} =
 \begin{bmatrix} -\boldsymbol{\chi} \\ Q \end{bmatrix}$
 with a `DiagonalHardnessKernel`, $Q$ from `graphs.total_charge`, solved on a
-fixed $(B, n_\text{max})$ layout, $n_\text{max}$ = `HeadsSpec.eem_max_atoms`.
-A molecule over capacity fails closed (eager: raises; compiled: `NaN`).
+fixed $(B, n_\text{max})$ layout, $n_\text{max}$ = `HeadsSpec.eem_max_atoms`,
+`eem_jitter` added on the diagonal. A molecule over capacity fails closed
+(eager: raises; compiled: `NaN`).
 
 ### 3.6 Class-I energy
 
-`Rondo.energy` maps the tables onto parameters and calls that one `Potentials`:
+`Rondo.energy` maps the tables onto parameters (`Term.potential_params`) and
+calls that one `Potentials`:
 
 | Style | Potential | Parameters from the tables |
 |-------|-----------|----------------------------|
 | `bond harmonic` | $K (r - r_0)^2$ | `bonds.k`, `bonds.r0` |
 | `angle harmonic` | $K (\theta - \theta_0)^2$, $\theta_0$ in degrees | `angles.k`, `angles.theta0` |
-| `dihedral periodic` | $\sum_n k_n [1 + \cos(n\phi - \gamma_n)]$ | `propers.k` (masked at linear centres), periodicities and phases of the head |
-| `dihedral opls` | $\tfrac12 K_1(1+\cos\phi) + \tfrac12 K_2(1-\cos2\phi) + \tfrac12 K_3(1+\cos3\phi) + \tfrac12 K_4(1-\cos4\phi)$ | $K_n = 2 k_n$ |
-| `improper cvff` | $k [1 - \cos(n\psi)]$ on the one row of a centre (centre first, legs ascending) | `impropers.k` |
+| `dihedral periodic` | $\sum_{n=1}^{4} k_n [1 + \cos(n\phi - \gamma_n)]$ | `propers.k`; periodicities and phases are the head's buffers |
+| `improper cvff` | $k [1 + d\cos(n\psi)]$, $d = -1$, $n = 2$, on the stored row (centre first) | `impropers.k`; `sign`, `periodicity` are the head's buffers |
 | `pair lj/cut` | $w\, 4\varepsilon_{ij}[(\sigma_{ij}/r)^{12} - (\sigma_{ij}/r)^6]$, the field's mixing and cutoff | `atoms.epsilon`, `atoms.sigma` |
 | `pair coul/cut` | $w\, C\, q_i q_j / (\epsilon_r r)$, the field's `coulomb` and `dielectric` | `atoms.charge` |
 
 $w$ is the field's `special_bonds` weight of `pairs.relation`; each pair counts
-once (`source < target`); dead rows are multiplied by their `mask`. The three
-improper rows per centre make the improper energy symmetric under any
-permutation of the outer legs (the even series maps each cyclic dihedral to
-the negative of another, A15).
+once (`source < target`); dead rows are multiplied by their `mask`. A typed
+`dihedral opls` reaches Rondo as `dihedral periodic` (molpy `canonical()`);
+an untyped one is refused by name.
 
 ### 3.7 Derivatives, the three primitives and the compile seam
 
-`forward = Derivative(energy, wrt=("atoms.pos",))`, built in `__init__`, writes
-`atoms.forces_pred`. It is not a constructor argument. The training step marks
-its leaves before the traced body. A joint
-training step composes the primitives itself: it predicts `tables` **once per
-source batch**, and every objective on that source (`JointObjective.source`;
-the four Hessian objectives share the hessian batch, ByteFF's "every loss of a
-dataset on the one batch drawn from it") detaches the tables its loss does
-not name (`JointObjective.trainable`, views of the one prediction) and prices
-`energy(frame, tables)` under its own `Derivative` (the tables travel as the
-op's keyword argument), calls `partial_hessian(frame, tables)`, or — for a
-loss that supervises a predicted table itself, the MBIS charges — writes the
-kept tables onto the batch and prices no energy (`output="tables"`). The
-model knows nothing about objectives. Tables must be predicted **inside** the
-region the caller traces (A5); one traced region per source (2026-10-12: the
-per-objective regions cost the S1 step five encoder passes on one hessian
-batch, and the large tier could not hold a step at the tier capacity). The
-evaluation step detaches the loss and every column it wrote once the loss is
-computed — the validation batches are resident, and a graph left on them
-stayed alive through training (GH200 3732774 / 3735480, 90 GiB).
+`forward = Derivative(energy, wrt=("atoms.pos",), outputs=(FORCES_PRED_KEY,))`,
+built in `__init__`, writes `atoms.forces_pred`. It is not a constructor
+argument. The training step marks its leaves before the traced body.
 
-`energy(frame, tables, styles=("bond:harmonic", "angle:harmonic"))` asks that
-`Potentials` for the named styles only — ByteFF's `calc_terms` (A18). Three objectives use it: the
-bond and angle energy on a QM minimum, per term, trained through `r0` / `θ0`
-(ByteFF `Bond_Energy` / `Angle_Energy`, `loss.py:302-314`; molix
-`MeanTermEnergyLoss`); the improper energy on the same minimum trained through
-the improper `k` (ByteFF `ImproperTorsion_Energy`, same lines, A19 — the cvff
-minimum is planarity, so at a pyramidal centre the stiffness the Hessian wants
-is also a force the minimum does not have, and this is what turns it off); and
-the pair styles' force alone, written aside by the step
-(`JointObjective(nonbonded=)`) so the stationary-force loss can leave out a
-clashing molecule (ByteFF `skip_large_nb`, `loss.py:373-380`). The styles are a
-fixed tuple of names, so the sum is straight-line code and traces as one graph.
+The joint training step (`molix.core.steps.joint`) draws one batch per source
+and runs one compiled region per source (`traced_bodies`). Each objective of
+the source shares one `predict(frame)` — the encoder and the heads run once
+per source per step, whatever the number of objectives (the 2026-10-12 memory
+fix; lost in e966239, restored 2026-10-30) — then detaches the columns its loss
+does not name (`JointTrainStep.keep(tables, trainable)`) and runs one primitive,
+chosen when the step is built: the derivative op over `energy_at(frame, tables,
+styles=)`, `energy_at` itself, `write_tables` (a loss that supervises a
+predicted column itself, the MBIS charges: no energy is written) or
+`partial_hessian(frame, tables)`. The model knows nothing about objectives.
+Tables are predicted **inside** the traced region (A5).
 
-`tests/test_molzoo/test_rondo/test_compile.py` asserts `graph_count == 1` and
-`graph_break_count == 0` for the forward, the energy and the partial Hessian.
+`energy(frame, styles=("bond:harmonic", "angle:harmonic"))` asks that
+`Potentials` for the named styles only — ByteFF's `calc_terms` (A18). Three
+objectives use it: the bond and angle energy on a QM minimum, per term, trained
+through `r0` / `θ0` (ByteFF `Bond_Energy` / `Angle_Energy`,
+`loss.py:302-314`; molix `MeanTermEnergyLoss`); the improper energy on the
+same minimum trained through the improper `k` (ByteFF
+`ImproperTorsion_Energy`, same lines, A19); and the pair styles' force alone,
+written aside by the step (`JointObjective(nonbonded=)`) so the
+stationary-force loss can leave out a clashing molecule (ByteFF
+`skip_large_nb`, `loss.py:373-380`). The styles are a fixed tuple of names, so
+the sum is straight-line code and traces as one graph.
+
+`tests/test_molzoo/test_rondo/test_compile.py` (`slow`) asserts
+`graph_count == 1` and `graph_break_count == 0` for the forward, the energy,
+the energy of named styles, the partial Hessian and the grad-off eval forward.
 
 ## 4. Configuration Contract
 
-`RondoSpec(encoder=EncoderSpec(...), heads=HeadsSpec(...))`; the functional
-form is the force field.
+`Rondo(forcefield, *, dtype, encoder=None, **settings)`. The keyword settings
+are the fields of `CovalentGraphEncoderSpec` and `HeadsSpec`; the internal
+`molzoo.rondo.spec.validate` checks them into `RondoSpec(encoder=, heads=)`
+(frozen, `extra="forbid"`), and an unknown setting raises `TypeError` by name.
+A caller does not build the spec object. The functional form is the force
+field. The defaults are ByteFF-26's sizes (the reference
+`fftrainer_config_in_use.yaml`), except Rondo's pair heads and the bond floor.
+
+`CovalentGraphEncoderSpec` (`molrep.encoders.covalent_graph.spec`):
 
 | Field | Meaning | Default |
 |-------|---------|---------|
-| `encoder.width` | Feature width of every channel and hop MLP | `64` |
-| `encoder.n_blocks` | Covalent hops $L$ | `4` |
-| `encoder.local_attention` | Softmax over incident bonds | `False` |
-| `encoder.num_elements` | Atomic-number vocabulary | `119` |
-| `encoder.atom_channels` | `formal_charge` (5, offset 2), `total_charge` (graph, 11, offset 5), `ring_connectivity` (5), `min_ring_size` (9) | ByteFF's |
-| `encoder.bond_channels` | `bond_type` (5), `in_ring` (2) | ByteFF's |
-| `heads.hidden` | Head MLP hidden width | `64` |
-| `heads.bond_k_ref`, `heads.bond_r0_gain` | §3.4 | `450`, `0.1` |
-| `heads.angle_k_ref`, `heads.angle_theta0_gain_deg` | §3.4 | `40`, `20` |
-| `heads.proper_periodicity` | $n$ of a proper series whose style declares no types. A typed table (GAFF) uses that table's term count instead | `(1,2,3,4,5,6)` (`(1,2,3,4)` for `dihedral opls`) |
-| `heads.improper_periodicity` | $n$ of the improper | `2` |
-| `heads.improper_k_ref` | §3.4, per row | `4.291 / 3` |
-| `heads.lj_sigma_gain`, `heads.lj_epsilon_gain` | §3.4 | `0.1`, `1.0` |
-| `heads.eem_max_atoms`, `heads.eem_jitter` | §3.5 | `512`, `1e-4` |
+| `atom_embedding_dim` | Width of the element embedding | `32` |
+| `channel_dim` | Width of the degree / charge / ring / bond embeddings | `8` |
+| `node_mlp` | `(hidden, out, layers)` of the atom input MLP; `out` must equal `width` (else `ValueError`) | `(64, 256, 2)` |
+| `edge_mlp` | `(hidden, out, layers)` of the bond input MLP; `out` is the bond feature width | `(64, 256, 2)` |
+| `width` | Node and edge width of the transformer; the atom feature width | `256` |
+| `n_layers` | Transformer layers $L$; the receptive field in covalent hops | `4` |
+| `heads` | Attention heads per layer | `16` |
+| `head_dim` | Width of one head | `16` |
+| `ffn` | `(hidden, layers)` of the feed-forward MLPs | `(256, 2)` |
 
-`Rondo(ff, dtype=torch.float64, width=64, ...)`.
-The keyword settings are checked by the internal `RondoSpec`; a caller does not
-build that object.
-The force field is one `Potentials` (`Potentials.from_forcefield`). Rondo adds
-one parameter head per style that object prices. A later style is a
-force field that declares it, and a subclass of `Rondo` that overrides
-`load_state_dict` so a checkpoint of the parent loads; the new head stays at
-its initial value. `energy(styles=)` asks that same `Potentials` for a subset
-of its styles, named as classes in `molpot.classical` or as the force field's
-style keys.
-`model.graph` is the molecular-graph encoder and does not read `atoms.pos`, and `model.features(frame)` dispatches to exactly one encoder (`CoordinateEncoder` reads `atoms.pos`): another head reads those tensors and predicts something other than
-a force-field parameter. The coordinate encoder shares these terms and does
-not read a different force field.
-`forward` differentiates `atoms.pos` and writes `atoms.forces_pred`. The
-optimizer is `Adam(model.parameters())`. Which of the carried tables a loss
-moves stays on `JointObjective(trainable=)`.
+`HeadsSpec` (`molzoo.rondo.spec`):
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `bonded_hidden`, `bonded_width`, `bonded_layers` | Hidden width, output width and linears of each bonded head's `pre` and `post` | `256`, `256`, `3` |
+| `bonded_out_hidden`, `bonded_out_layers` | Hidden width and linears of each bonded parameter MLP | `256`, `4` |
+| `tanh_output` | $t$ of the bonded window (§3.4) | `20.0` |
+| `bond_k_floor` | Lowest bond `K` the bond head puts out, LAMMPS kcal mol⁻¹ Å⁻² | `80.0` |
+| `hidden` | Hidden width of Rondo's pair heads (D1, D2) | `64` |
+| `lj_sigma_gain`, `lj_epsilon_gain` | §3.4 | `0.1`, `1.0` |
+| `eem_max_atoms`, `eem_jitter` | §3.5 | `512`, `1e-4` |
+| `lj_direct_hidden`, `lj_direct_layers` | `ByteFF` only: the σ and ε MLPs of `LJCutDirect` | `256`, `3` |
+| `bcc_hidden`, `bcc_width`, `bcc_layers`, `bcc_out_hidden`, `bcc_out_layers` | `ByteFF` only: `BondChargeCorrection`'s `pre` and `out` | `512`, `512`, `4`, `256`, `3` |
+| `pair_tanh_output` | `ByteFF` only: $t$ of σ, ε and the charge transfer | `20.0` |
+
+**Bond floor.** `bond_k_floor` replaces the published window's lower clamp
+(head `k` 80, LAMMPS `K` 40). Rondo's 80 is the 0.05th percentile of the DFT
+bond stiffness on THEMol's held-out Hessians (`rondo-enc-08-bond-floor`);
+`ByteFF.load` builds with `PUBLISHED_BOND_K_FLOOR` = 40 unless the caller
+passes `bond_k_floor`, so a released member is reproduced as released.
+
+**Injected encoder.** `encoder=` takes an encoder built by the caller at
+`dtype` — `CovalentGraphEncoder` or `MaceConformerEncoder` (`rondo-enc-02`,
+`MaceConformerEncoderSpec`: ByteFF-26's widths 256 / 256 by default). It is
+registered as `graph`, as the built one is, and the heads are sized from its
+`width` / `bond_width`. A `CovalentGraphEncoderSpec` field passed beside it
+raises `TypeError` (it would configure nothing); `HeadsSpec` fields are
+accepted. `spec.encoder` then holds the covalent-graph defaults and does not
+describe the injected encoder.
+
+**Loading.** `load_state_dict` is strict. `load_state_dict(state_dict,
+prefixes=("graph.",))` (or `"heads."`, …) copies only those prefixes into the
+existing tensors — a missing or unexpected key under a named prefix raises
+`KeyError` — so an encoder and the heads load independently. A subclass on a
+richer force field overrides `load_state_dict` so a checkpoint of the parent
+loads (`strict=False`); the new head stays at its initial value.
+`energy(styles=)` asks the same `Potentials` for a subset of its styles,
+named as classes in `molpot.classical` or as the force field's style keys.
+
+**Static field.** `Rondo.parameterize(frame, *, graph=0) -> (molpy.Frame,
+molpy.ForceField)` predicts once (`no_grad`) and writes molecule `graph` as
+molpy data: every atom and every term row becomes its own type at its
+predicted parameters — nothing is averaged — on the styles, style parameters
+and `special_bonds` of `forcefield`; masses from the element, charges on the
+`atoms` block; one block per bonded namespace (`propers` as molpy's
+`dihedrals`); a `(rows, m)` column (the periodic series) becomes molrs's
+`name1 … namem`. Padding rows are not written. It runs eagerly with host
+syncs, once per topology — not a hot path. molpy serialises the pair
+(`write_lammps_data`, `LammpsForcefieldWriter`); export parity with LAMMPS is
+recorded in `rondo-enc-07-validation`.
+
+**ByteFF.** `molzoo.byteff.ByteFF(Rondo)` overrides the pair styles' heads
+(`LJCutDirect`, `BondChargeCorrection`); everything else is Rondo's.
+`ByteFF.load(path, forcefield, *, dtype, **settings)` reads one member's
+`optimal.pt` through `CheckpointRemap` over `ByteFFKeys` and raises
+`ValueError` if a checkpoint tensor has no home or a model tensor is not
+provided. The five-member mean is the caller's: average `predict` over the
+members, then `price` once.
+
+The optimizer is `Adam(model.parameters())`. Which of the carried tables a
+loss moves stays on `JointObjective(trainable=)`.
 
 ## 5. Reference Crosswalk
 
-| Concept | Espaloma | ByteFF | MolNex anchor | Status |
+| Concept | Espaloma | ByteFF (byteff2 v1.1.0) | MolNex anchor | Status |
 |---------|----------|--------|---------------|--------|
-| Backbone | SAGEConv stack | Edge-augmented Graph Transformer, equivalence-class averaging | `molrep.chem.blocks.ChemGraphBlock` | adapted |
-| Input features | element | element, total charge, formal charge, ring connectivity, smallest ring; bond order, in-ring | `EncoderSpec.atom_channels` / `bond_channels` | matched (ByteFF) |
-| Reads coordinates? | no | no | never | matched |
-| Valence symmetry | Janossy pooling | equivalence averaging | `molrep.chem.context.*` | matched |
-| Term bond features | — | the term's own bonds interleaved with its atoms (`OutputWithBond`) | `molrep.chem.BondTable` lookup + `context.*` (A21) | matched (ByteFF) |
-| Bond / angle form | harmonic | harmonic (½K) | `bond:harmonic`, `angle:harmonic` (LAMMPS $K$) | matched |
-| Proper torsion | Fourier | signed $k_n$, phases 0/π by parity | `PeriodicHead` → `dihedral:periodic` | matched (ByteFF) |
-| Improper | periodic | $k[1+\cos(2\psi-\pi)]$, $k/3$ over 3 permutations | `CvffHead` → `improper:cvff`, three rows per centre | matched (ByteFF) |
-| Linear-centre propers | — | zeroed by SMARTS | `Rondo._proper_mask` from bond orders | matched |
-| Parameter reference | — | GAFF2 mean/std affine | per-row reference + zero start (§3.4) | adapted |
-| Parameter bounds | — | `tanh_output` + `param_range` straight-through clamp | log-space window around the reference, reached by `tanh` saturation (`ExpAround(lo=, hi=)`, A22 + A24) | matched (ByteFF's `tanh`; no straight-through stage — ours binds, theirs does not) |
-| Charges | charge-equilibration read-out | AM1-BCC regression | EEM KKT solve, MBIS supervision | departed (D1) |
-| Lennard-Jones | OpenFF template | GAFF2 labels | learned around GAFF2 (`LJHead`) | adapted (D2) |
+| Backbone | SAGEConv stack | Edge-augmented graph transformer (`EGTConv` ×4, JK concat), equivalence-class averaging | `CovalentGraphEncoder`, `EdgeAttentionLayer` | matched (ByteFF; parity §7.1) |
+| Input features | element | element, degree, formal charge, ring connectivity, smallest ring; bond order, in-ring | `ChemicalEmbedding` | matched (ByteFF) |
+| Equivalence classes | — | RDKit `CanonicalRankAtoms(breakTies=False)`; bond class = pair of atom classes | `atoms.equi_index` (molpy `assign_symmetry_classes`), `Equivalence.bonds` | matched (ByteFF; column parity in `rondo-enc-01` §8) |
+| Canonical resonance structure | — | `get_canonical_resoner` rewrites bond orders and charges before featurizing | not ported; MolHub keeps the input's charges and orders | departed (R3) |
+| Reads coordinates? | no | no | `CovalentGraphEncoder` never; `MaceConformerEncoder` one reference conformer, detached | matched / adapted (A28) |
+| Valence symmetry | Janossy pooling | symmetric pooling over the term's orderings | `SymmetricHead` | matched (ByteFF) |
+| Term bond features | — | the term's own bonds interleaved with its atoms | `_Bonded.copies` + `BondTable` (A21) | matched (ByteFF) |
+| Bond / angle form | harmonic | harmonic ($\tfrac12 k$) | `bond:harmonic`, `angle:harmonic`, $K = k/2$ | matched |
+| Proper torsion | Fourier | signed $k_n$, $n = 1..4$, phases 0/π by parity | `DihedralPeriodic` → `dihedral:periodic` | matched (ByteFF; the reference's float32 π, §7.1) |
+| Improper | periodic | $k[1+\cos(2\psi-\pi)]$, one row per C/N centre, legs ascending | `ImproperCvff` → `improper:cvff`, $d = -1$, $n = 2$ | matched (ByteFF) |
+| Linear-centre propers | — | zeroed by SMARTS | `propers.linear` (molpy `perceive_linear_dihedrals`) | matched |
+| Hypervalent P / S | — | `patch_bonded_terms` | `Hypervalent` | matched |
+| Parameter bounds | — | `20·tanh·std + mean`, straight-through clamp | `TanhWindow` | matched, except the bond `K` floor (A27) |
+| Charges | charge-equilibration read-out | bond charge corrections | EEM KKT solve, MBIS supervision (`PairCoulCut`); ByteFF's in `molzoo.byteff.ByteFF` | departed (D1) |
+| Lennard-Jones | OpenFF template | σ, ε predicted directly | learned around GAFF2 (`LJCut`); ByteFF's (`LJCutDirect`) in `molzoo.byteff.ByteFF` | adapted (D2) |
+| Ensemble | — | mean of each final parameter over five members, energy on the mean | caller: mean of `predict`, one `price` | matched |
 | Training | QM E/F | joint per-step sum over datasets, per-loss trainable sets, 3 stages | `molix.core.steps.JointTrainStep` + `JointObjective.trainable` | matched |
 | Stage-1 geometry target | — | MM force → 0 at the QM minimum | `molix.core.losses.StationaryForceLoss` | matched |
 | Force computation | autograd | autograd | `molix.autograd.Derivative` | matched |
@@ -405,24 +493,32 @@ moves stays on `JointObjective(trainable=)`.
 |----|------------|--------|------|------------|
 | A5 | Tables are predicted inside the traced region | an external `grad_fn` breaks the force's `autograd.grad` under compile | low | `test_compile.py` |
 | A6 | The force lands at `atoms.forces_pred`, the op's output key; the energy stays at `graphs.energy` and the training step moves it beside its label (`molix.frame.beside_labels`) | a training batch holds the DFT labels at `atoms.forces` / `graphs.energy`; the model moves nothing | high if regressed | `test_model.py::TestRondo::test_forces_are_the_negative_gradient_of_the_energy`, `tests/test_molix/test_frame.py::TestBesideLabels` |
-| A7 | No automorphism orbit averaging | message passing is automorphism-equivariant | high if the backbone changes (§10.4) | gate |
-| A11 | Pre-norm hops, every channel layer-normalized | feature RMS grew to 1e3–1e4 without it (job 3213256) | low | `test_encoder.py` |
-| A12 | Heads predict deviations from a reference, zero start | one lr serves every parameter | low | `test_classical.py` |
-| A13 | Torsions as signed $k_n$ at fixed phases (not $|a|$) | gradient at the zero start; GAFF2/OPLS form | low | `test_classical.py::test_phases_alternate…`, `test_model.py::test_a_mirror_image_has_the_same_energy` |
-| A14 | $\theta_0$ reference from hybridization, linear map, straight-through clamp (the clamp superseded by A24's saturating window) | sigmoid around 109.47° held sp carbon at 146° vs 177.5° (jobs 3321932–3322130) | low | `test_classical.py::TestAngleHead` |
-| A15 | Three cyclic improper rows per centre | energy must be leg-symmetric like the features | low | `test_model.py::test_improper_energy_is_symmetric_in_the_outer_legs` |
-| A16 | Linear-centre propers zeroed from bond orders | undefined dihedral | low | `test_model.py::test_propers_through_a_linear_centre_are_silent` |
+| A7 | Atom and bond features averaged over topological equivalence classes (`atoms.equi_index`, `Equivalence`), by every encoder | ByteFF's `equi_features`: equivalent atoms get equal parameters by construction, also from a conformer that breaks the symmetry | high if an encoder drops it (§10.4) | `test_covalent_graph/test_encoder.py::test_resonance_equivalent_atoms_get_equal_features`, `test_mace_conformer/test_encoder.py::test_equivalent_atoms_and_bonds_get_equal_rows`, `test_chem/test_equivalence.py` |
+| A9 | Per-objective weights, no per-table gradient clamp | global clip + per-loss `trainable` cover it | low | revisit if one table dominates |
+| A12 | Rondo's pair heads start on their reference: the last layer of each LJ and χ/η MLP is zeroed | one lr serves every parameter; the model starts on GAFF2 and on $q = Q/N$ | low | `test_classical/test_heads.py::TestHeadProtocol`, `TestLJHead::test_starts_exactly_on_the_reference_well` |
+| A13 | Torsions as signed $k_n$ at fixed phases (not $\lvert a\rvert$) | gradient at $k_n = 0$; ByteFF / GAFF2 form | low | `test_classical/test_terms.py::TestDihedralPeriodic::test_the_series_is_n_1_to_4_at_phases_0_and_180`, `test_model.py::test_a_mirror_image_has_the_same_energy` |
+| A15 | One improper row per C/N centre, centre first, legs ascending; the head is symmetric in the legs, the dihedral is taken on the stored row; an engine's own order is named in `impropers.centre` / `leg1..3` | ByteFF's `get_impropers` (replaces the three cyclic rows of 2026-10-11) | low | `test_terms.py::TestImproperCvff` |
+| A16 | Linear-centre propers zeroed from `propers.linear` | undefined dihedral; ByteFF's SMARTS, now a molpy-perceived column (replaces the bond-order rule) | low | `test_model.py::test_propers_through_a_linear_centre_are_silent`, `test_terms.py::TestDihedralPeriodic::test_a_batch_without_the_linear_column_is_refused_by_name` |
 | A17 | LJ around GAFF2 with a prior, not frozen | operator ruling 2026-10-11: trainable, GAFF2 start | medium | `test_model.py::test_lennard_jones_starts_on_gaff2` |
 | A18 | `energy(styles=)` prices a named subset of styles | ByteFF `calc_terms`: the equilibrium-strain objective and `skip_large_nb` need the bonded, resp. pair, energy alone. The force at a minimum cannot set `θ0`'s common mode at a symmetric centre — sp3 `θ0` walked 109° → 95° on it (GH200 3680577, 3685025/3685026) | low | `test_model.py::test_energy_of_named_styles_sums_only_those`, `test_compile.py::test_the_energy_of_named_styles_is_one_graph` |
-| A19 | The improper `k` is also trained by the improper strain on the QM minimum (training-side: `OBJECTIVES["hessian_eq_improper"]`, no model code) | ByteFF `ImproperTorsion_Energy`. With the Hessian objective alone the improper's planarising force at a pyramidal N (|F| p50 116 kcal/mol/Å) had no parameter the force objective could reach, and every `θ0` at the centre walked together to cancel it (GH200 3690962: N3 θ0 129° vs 118°, 46 % of amine centres below 90°) | low | `.jobs/n3_force_decomp.py` on 3690962 best.pt; gate run 3705406 passes (with A20) |
-| A20 | The improper `k` is positive by construction, $k_\text{ref}\,e^{\mathrm{raw}}$ (was a signed amplitude from a zero start) | the strain $k(1-\cos 2\psi)$ is linear in $k$: with a signed $k$ the A19 objective is unbounded below and ran 0 → −4.4 kcal/mol/term in 1400 steps while every N3 `θ0` went to 163° to cancel the force (GH200 3703994). ByteFF's `k` is $4.29 + 3.71 \cdot 15 \tanh(\cdot)$ inside a configurable `param_range` clamp (`mlparams.py:104-110`); no training config is in the repository, so the floor it trains with is not known. A negative `k` would also mean a minimum at ψ = 90° | low | `test_classical.py::TestCvffHead::test_stays_positive_for_a_negative_raw`; gate run 3705406 (improper \|k\| p10 0.003 / p50 4.26 / p90 7.9: amines go to zero, planar centres keep their amplitude) |
-| A21 | Every valence context reads the features of the term's own bonds, interleaved with its atoms (§3.3); the bond rows come from a per-batch `BondTable` (sort + `searchsorted`, static shapes) rather than a loader column | ByteFF `OutputWithBond` (`layers.py:486-510`; the slots are data, `mol_data.py:119-122`). The contexts had read atom features only, so a torsion head had to decode its central bond order from a two-hop atom summary; on a vertex-transitive graph it cannot: in a Kekulé ring the torsion about a single bond and the one about a double bond got bit-identical features while the bond features differed by 2.6 (probe 2026-10-12). The central bond order is the main determinant of a torsion barrier, so the gap would have shown in S2. Lookup on the device instead of a loader column: no collate / padder / prepared-cache change, no new batch contract, same cost as one sort of the bond list | low | `test_encoder.py::TestChemEncoderTermBonds::test_a_torsion_knows_its_central_bond_order` (cyclobutadiene: identical atom features, distinct torsion features); `test_context.py` reversal / leg-swap tests with the bonds swapped along; Rondo and joint-body compile tests still 1 graph / 0 breaks |
-| A22 | Every multiplicative parameter is held to a window around its reference with a straight-through gradient (as first landed; A24 made the window saturate): $K$, $\varepsilon$ on $[\tfrac18, 8]$, improper $k$ on $[\tfrac1{64}, 8]$, $r_0$, $\sigma$ on $[0.7, 1.4]$ (§3.4) | ByteFF bounds every parameter (`tanh_output`, `param_range`); `ExpAround` was open above, so one outlier Hessian row could carry a $K$ to 1e4–1e5 — `PartialHessianLoss(blowup=)` drops the row but the head was free to go there. The improper floor is lower because A19 legitimately sends a pyramidal centre's amplitude to zero (3705406: p10 0.003) | low | `test_classical.py::TestExpAround::test_the_bounds_hold_the_value_but_pass_the_gradient`, `TestBounds` |
-| A23 | The angle `θ0` ceiling is 180° inclusive and the linear-centre reference is 180° (were 179.5° / 177.5°) | $K(\theta-\theta_0)^2$ with $\theta_0 = 180°$ is $K\,\lvert\delta\rvert^2/r^2$, a smooth isotropic bend, and molpot's angle kernel is C^∞ at linearity (`geom.GEOM_EPS`); with any $\theta_0 < 180°$ the linear geometry is the top of a Mexican hat whose Cartesian curvature $2K(\theta-\theta_0)\,\partial^2\theta/\partial x^2$ grows as $1/\sin\theta$, so the partial-Hessian fit can only match the QM block by $K \to 0$. GH200 3707870: sp-carbon angle $K$ 47 (1 500 steps) → 14 (3690962, 19 600) → 1.1 (40 879) with every C2 `θ0` pinned at the 179.5° ceiling against measured 179.0° (p90 179.9°). ByteFF's `θ0` map reaches 180° (`113.9 + 148.5·tanh`) and its kernel is the same `atan2` form (`ff_kernels.py:87`) | low | `test_hybridization.py::test_the_linear_reference_is_exactly_180_degrees`, `test_classical.py::TestAngleHead::test_theta0_reaches_180_degrees_and_no_further`, `test_model.py::test_an_sp_centre_starts_at_a_linear_angle`; the C2 angle $K$ of the next long run is the evidence |
-| A24 | Windows saturate (ByteFF's `tanh`: $w\tanh(x/w)$ per side, slope one at the reference) instead of a straight-through clamp (A22 as first landed) | GH200 3723816 (S1 small, 26 400 steps, best eval 24.09): ≥ 10 % of improper rows at the $1/64$ floor — where A19 legitimately sends a pyramidal centre — and the improper stream's LayerNorm gain drifted to an RMS of 5.9 (atom / bond / angle 1.06 / 1.06 / 1.20); the handoff gate refused the checkpoint. A straight-through clamp holds the value but passes the whole gradient, so a push that is self-limiting unclamped ($k\,\partial/\partial\mathrm{raw} \to 0$ as $k \to 0$; 3707870 reached $k$ = 6e-16 with the stream at 1.29) becomes perpetual at a floor. Cost: a unit of `raw` is the gain only at the reference (r0 +9.7 % instead of +10 % at one unit; θ0 19.3–19.9° of 20° on the 60–177° references) and a row deep in saturation returns slowly | low | `test_classical.py::TestExpAround::test_the_window_is_approached_by_saturation_and_the_gradient_fades`, `TestLinearAround::test_a_reference_on_the_bound_is_held_there`; the improper feature RMS of the next long run is the evidence |
+| A19 | The improper `k` is also trained by the improper strain on the QM minimum (training-side: `OBJECTIVES["hessian_eq_improper"]`, no model code) | ByteFF `ImproperTorsion_Energy`. With the Hessian objective alone the improper's planarising force at a pyramidal N (\|F\| p50 116 kcal/mol/Å) had no parameter the force objective could reach, and every `θ0` at the centre walked together to cancel it (GH200 3690962: N3 θ0 129° vs 118°, 46 % of amine centres below 90°) | low | `.jobs/n3_force_decomp.py` on 3690962 best.pt; gate run 3705406 passes (with A20) |
+| A20 | The improper `k` is non-negative by construction — the window's lower clamp is 0 (§3.4) | the strain $k(1-\cos 2\psi)$ is linear in $k$: with a signed $k$ the A19 objective is unbounded below (GH200 3703994: 0 → −4.4 kcal/mol/term in 1400 steps). A negative `k` would also mean a minimum at ψ = 90° | low | `test_heads.py::TestTanhWindow::test_the_clamp_holds_the_value_and_passes_the_gradient` |
+| A21 | Every bonded head reads the features of the term's own bonds, interleaved with its atoms (§3.3); the bond rows come from a per-batch `BondTable` (sort + `searchsorted`, static shapes) rather than a loader column | ByteFF's assembly. Read from atom rows alone, a torsion about a single and one about a double bond of a Kekulé ring get identical inputs (probe 2026-10-12) | low | `test_chem/test_bond_table.py`; the reversal and leg-order tests of `test_terms.py` |
+| A24 | Rondo's LJ windows saturate ($w\tanh(x/w)$ per side, slope one at the reference) instead of a straight-through clamp | a straight-through clamp holds the value but passes the whole gradient, so a row the loss wants at a bound pulls on its features forever (GH200 3723816: improper stream RMS 5.9 at 26 400 steps, with the old reference·exp improper window) | low | `test_heads.py::TestExpAround::test_the_window_is_approached_by_saturation_and_the_gradient_fades` |
 | A25 | The torsion stage carries ByteFF's auxiliary loss — the L1 norm of the proper amplitudes (`molix.core.losses.NormPrior` on `propers.k`, a `"tables"` objective on the torsion-scan batch, weight 1.0) — and the stages run at ByteFF's rates (torsion 1e-4, off-equilibrium 2e-5; were 3e-4 and 1e-4) | Paper §2.4 / Table 1: "L1-norm regularization was applied to the force constants of proper torsions to restrain redundant degrees of freedom", `TorsionLossType.l1_norm`. GH200 3748659 (S2 large, no prior, 3e-4): a scan measures one dihedral and every other proper of the molecule turns a little as the constrained conformers relax; six free amplitudes per row fit those wiggles with constants nothing in the stage prices back (the hessian objectives detach `propers.k`) — Σn²\|k_n\| median 9 → 34 in 2 000 steps, the impropers driven to their floor, N3 θ0 off by 13°, eval 14.3 → 24.6 while the kneed train loss stayed flat | The weight is the paper's unstated knob: too high and the profiles under-fit (torsion loss stalls above its no-prior value), too low and the amplitudes grow again. The circular-std mask and the per-table gradient cap ByteFF's code also carries (`mask_by_circstd`, `max_config`) are not adopted until a run shows the L1 prior and the rate are not enough | §7.4: an S2 gate on A25 must hold Σn²\|k_n\| near its step-800 scale (p50 ≈ 9) and the improper \|k\| median above 1 while the torsion loss keeps falling; the S2 long run must not raise the S1 objectives' eval |
 | A26 | The off-equilibrium objective (`relax`) trains the equilibrium geometry (`bonds.r0`, `angles.theta0`), the proper amplitudes and σ/ε only; the curvatures `bonds.k`, `angles.k`, `impropers.k` stay the partial Hessian's (were: every bonded table + σ/ε) | ByteFF's `energyforce_loss` names every bonded table trainable (loss.py `set_trainable_terms([Bond_k, Angle_k, ProperTorsion_k, ImproperTorsion_k, Bond_length, Angle_theta])`) under a per-table gradient cap (`max_config`) whose values the repository does not carry. GH200 3768159 (S3 large, 2e-5, 1 500 steps): the relax forces take the cheap direction — a softer K — and the Hessian objective loses the tug-of-war: bond K −30 … −70 % (stiff bonds most, C=O 731 → 230), angle K −20 … −35 %, hessian_k 0.428 → 0.469 monotone while hessian_geom / hessian_eq fall only because every force at the minimum scales with K | A harmonic bond's K is the curvature at the minimum; forces along a relaxation sit on the anharmonic side and a harmonic fit to them is always softer than the Hessian K, so the two objectives disagree by construction and the one with the larger gradient wins. Rondo resolves it by ownership (each table moved by the data that defines it), ByteFF by a cap whose value is not public. Revisit (restore K to the relax set under a per-table cap) if the A26 relax loss stalls far above its A25 value | §7.4: the A26 S3 gate must hold hessian_k at its S2 value (0.428) and the bond K table within ±10 % of the S2 long run's, with the relax loss still falling; an S3 run that later shows the relax loss stuck above ~2.5 reopens the question |
-| A9 | Per-objective weights, no per-table gradient clamp | global clip + per-loss `trainable` cover it | low | revisit if one table dominates |
+| A27 | The bond head's lower `K` clamp is `HeadsSpec.bond_k_floor`, 80 by default (published: 40); `ByteFF.load` keeps 40 | a zwitterion's C–N⁺ collapsed in LAMMPS MD with its `K` on the published floor (`rondo-enc-07`); 80 is DFT's 0.05th percentile on THEMol's held-out Hessians (`rondo-enc-08`) | low: held-out scores move < 0.1 % (`rondo-enc-08` §4) | `test_terms.py::TestBondHarmonic::test_k_never_falls_below_the_floor` |
+| A28 | An encoder may be injected (`encoder=`); `MaceConformerEncoder` reads one reference conformer per profile, detached, and feeds ByteFF-26's heads unchanged | the rondo-enc hypothesis: encoders interchangeable behind one feature interface (`rondo-enc-00`, `-02`, `-05`) | low (positions detached: no ∂parameter/∂R term) | `test_model.py::test_an_injected_encoder_feeds_every_head_and_trains_on_the_energy`, `test_a_covalent_setting_beside_an_injected_encoder_is_refused`; `test_mace_conformer/test_encoder.py::test_no_gradient_reaches_the_positions` |
+
+Superseded on 2026-10-28 by `rondo-enc-01` (the Espaloma-style encoder and the
+reference·exp heads are deleted; their checkpoints are not kept, ruling 1):
+A11 (pre-norm covalent hops, every channel layer-normalized — the
+transformer's own pre-LN layers replace it), A14 (`θ0` reference from
+hybridization — ByteFF's window, mean 120°), A22 (multiplicative windows
+around per-row references — `TanhWindow` on the bonded parameters; A24 keeps
+the saturating window for LJ), A23 (linear-centre `θ0` reference of 180° —
+the window's ceiling is 180° inclusive, no per-row reference). The
+covalent-radius and VSEPR references and `Hybridization` are no longer read.
 
 ### 6.1 Open methodological risks
 
@@ -430,31 +526,51 @@ moves stays on `JointObjective(trainable=)`.
 |----|------|--------|
 | R1 | Non-bonded parameters carry little signal in gas-phase data | σ/ε start on GAFF2 and move only in a stage that names them with a prior on `log(σ/σ_ref)`, `log(ε/ε_ref)`; condensed-phase data would close this |
 | R2 | One objective driving every parameter leaves families degenerate | **Addressed** by per-loss `trainable` and the joint schedule: Hessian → `k`, equilibrium forces → `r0`/`θ0`, MBIS → charges, torsion scans → propers, off-equilibrium E/F → `r0`/`θ0`, propers and σ/ε, never the curvatures (A26) |
+| R3 | ByteFF's canonical-resonance step is not ported | on a molecule it rewrites, the encoder sees other bond orders and charges than ByteFF-26 does (2 / 3000 THEMol molecules; `rondo-enc-01` §8 R1) |
+| R4 | The bonded windows are straight-through clamps (ByteFF's) | a row held at a bound keeps passing the whole gradient — the failure A24 removed from the old windows (3723816). The improper floor 0 is where A19 sends a pyramidal centre; watch the improper feature RMS when the bonded heads train |
 
 ## 7. Validation Contract
 
 ### 7.1 Research Reproduction
 
-Not claimed: the charge model, data and encoder differ from both predecessors.
+**Claimed for the encoder and the bonded heads: ByteFF-26 parity**, recorded in
+`.claude/specs/rondo-enc-01-graph-encoder.md` §8 (oracle: `byteff2@v1.1.0`,
+all five members, fp64):
+
+| Check | Result |
+|-------|--------|
+| Parity 2026-10-28, 27 molecules incl. PF6⁻, SF6, azide, nitro, allene, caffeine | encoder atom features ≤ 2.1e-15 and bond features ≤ 1.8e-15 relative, degree exact; bonded parameters ≤ 2.6e-14; bond and improper energies ≤ 4.3e-14; angle ≤ 2.5e-9 (azide, 3.5e-3 kcal/mol); proper ≤ 4.2e-8 — the oracle builds its 180° phase with a float32 π (off by 8.7e-8 rad, `ff_kernels.py:386`), molnex uses exact 180° |
+| Full reproduction with the published pair heads (now `ByteFF.load`) | every parameter of every member — bonded, BCC charges, σ, ε — ≤ 2.7e-14 relative; the five-member mean ≤ 8.6e-15; total energy ≤ 2.7e-7 relative per member and 4.9e-8 for the ensemble (largest residual formamide, the same float32-π phase); all 260 upstream tensors land, none missing |
+| End-to-end gate, THEMol `hessian@1` shard-000 rows 0–499 through the padded Class-I data path | bonded ≤ 2.2e-13, charges ≤ 5.0e-11, σ ≤ 6.7e-15, ε ≤ 6.7e-13 relative (members; the mean ≤ 3.5e-12); every energy term but the torsion ≤ 1.2e-10 kcal/mol, the torsion ≤ 2.5e-6 kcal/mol (float32 π); 499 / 500 molecules, the boron anion excluded (R3) |
+
+The parity runs predate `bond_k_floor` and used the published window (floor
+40, which `ByteFF.load` keeps). Not
+claimed: Rondo's own pair heads (D1, D2), the MACE conformer encoder, and every
+trained model (§7.4 and the rondo-enc phase specs).
 
 ### 7.2 Symmetry and Shape Tests
 
 | Claim | Test path |
 |-------|-----------|
-| Bond / angle / proper / improper features invariant under their index symmetries | `tests/test_molrep/test_chem/test_context.py` |
-| Encoder reads no coordinate | `test_encoder.py::test_same_topology_different_pos_embeddings_identical` |
-| A declared channel changes the features; a missing one is refused | `test_encoder.py::TestChemEncoderChannels` |
+| Bonded parameters invariant under bond, angle and proper reversal and improper leg order | `tests/test_molpot/test_classical/test_terms.py` (`TestBondHarmonic`, `TestAngleHarmonic`, `TestDihedralPeriodic`, `TestImproperCvff`), `test_heads.py::TestSymmetricHead` |
+| `K = k/2`, θ0 in degrees, $n = 1..4$ at 0°/180°, cvff $k(1 - \cos 2\psi)$, the bond floor, the hypervalent patch, C/N improper centres | `test_terms.py` |
+| `TanhWindow` holds the value and passes the gradient | `test_heads.py::TestTanhWindow` |
+| Encoder reads no coordinate | `tests/test_molrep/test_encoders/test_covalent_graph/test_encoder.py::test_positions_are_never_read` |
+| Encoder features follow an atom permutation; equivalent atoms equal; a bond's reversal changes nothing; dead bond rows leave real rows unchanged | `test_covalent_graph/test_encoder.py`, `test_layers.py` |
 | $\sum_i q_i = Q$ | `test_model.py::test_charges_meet_the_declared_total_charge` |
 | $\mathbf{F} = -\partial E / \partial \mathbf{r}$ | `test_model.py::test_forces_are_the_negative_gradient_of_the_energy` |
 | Mirror image has the same energy | `test_model.py::test_a_mirror_image_has_the_same_energy` |
 | Rigid motion invariance | `test_model.py::test_energy_is_invariant_under_a_rigid_motion` |
-| Improper energy symmetric in the outer legs | `test_model.py::test_improper_energy_is_symmetric_in_the_outer_legs` |
 | Linear-centre propers priced at zero | `test_model.py::test_propers_through_a_linear_centre_are_silent` |
 | Partial Hessian equals the full Hessian on the bonded pairs | `test_model.py::test_partial_hessian_is_the_full_hessian_on_the_bonded_pairs` |
 | `forward` writes the force at `atoms.forces_pred` and the energy at `graphs.energy`; `-dE/dpos` against `energy` | `test_model.py::TestRondo::test_forces_are_the_negative_gradient_of_the_energy` |
-| Unsupported style refused by name | `test_model.py::test_an_unsupported_style_is_refused_by_name` |
+| `tables` writes `energy`'s columns and no energy | `test_model.py::test_tables_writes_the_columns_energy_writes_and_no_energy` |
+| Unsupported style refused by name; untyped `dihedral opls` refused | `test_model.py::test_an_unsupported_style_is_refused_by_name`, `test_untyped_opls_requires_ir_conversion` |
 | `energy(styles=)` sums the named styles only; an unknown name is refused | `test_model.py::test_energy_of_named_styles_sums_only_those`, `test_model.py::test_a_style_selection_outside_the_field_is_refused_by_name` |
-| forward / energy / energy(styles=) / partial_hessian compile at 1 graph, 0 breaks | `test_compile.py` (`slow`) |
+| Injected encoder feeds every head; a covalent setting beside it is refused | `test_model.py::test_an_injected_encoder_feeds_every_head_and_trains_on_the_energy`, `test_a_covalent_setting_beside_an_injected_encoder_is_refused` |
+| `parameterize` types every row at its predicted parameters; molpy writes one coefficient per row | `test_model.py::test_a_static_field_types_every_row_at_its_predicted_parameters`, `test_molpy_writes_the_static_field_one_coefficient_per_row` |
+| `ByteFF.load` fills every tensor | `tests/test_molzoo/test_byteff/test_potential.py::TestByteFF::test_load_fills_every_tensor_of_the_model` |
+| forward / energy / energy(styles=) / partial_hessian / eval forward compile at 1 graph, 0 breaks | `test_compile.py` (`slow`) |
 
 ### 7.3 Engineering Benchmark
 
@@ -462,6 +578,12 @@ Training runs live in the molab workspace (`lab-new/projects/class-i/train/`),
 not in this repo. Measure on a compute node.
 
 ### 7.4 Run Log
+
+Every row below ran on the encoder and heads superseded on 2026-10-28 (§6);
+`rondo-enc-01` §1 ruling 1 keeps none of their checkpoints. The runs on the
+current encoder and heads are recorded in their own specs
+(`.claude/specs/rondo-enc-03-heads.md`, `-05-swap`, `-07-validation`,
+`-08-bond-floor`, `-09-bond-k-ci`).
 
 | run_id | date | commit | dirty | dataset | config | steps | train | val | note |
 |--------|------|--------|-------|---------|--------|-------|-------|-----|------|
@@ -492,22 +614,26 @@ not in this repo. Measure on a compute node.
 
 | Concern | Owner | Contract |
 |---------|-------|----------|
-| Functional form | molpy `ForceField` | styles, settings, special bonds — declared once |
+| Functional form | molpy `ForceField` | styles, settings, special bonds — declared once; Rondo prices `canonical()` |
 | Style kernels | `molpot.potentials` | molrs conventions, molpy oracle to 1e-10 |
-| Covalent-graph perception | `molrep.chem` | topology and integer channels only |
-| Predicted parameters | `Rondo.energy` | written on the batch beside the rows (`bonds.k`, `dihedral` columns, …) |
-| Per-loss parameter sets | `molix.core.steps.JointObjective` | `energy(..., trainable=, styles=)` |
+| Covalent-graph encoder | `molrep.encoders.covalent_graph` | topology and integer channels only; `EncoderFeatures(atom, bond)` |
+| Injected encoders | `molrep.encoders.mace_conformer` | the same `EncoderFeatures`, positions detached |
+| Equivalence classes, bond lookup | `molrep.chem` (`Equivalence`, `BondTable`) | static shapes, no host sync |
+| Predicted parameters | `Rondo.energy`, `Rondo.tables` | written on the batch beside the rows (`bonds.k`, `propers.k`, `atoms.charge`, …) |
+| Per-loss parameter sets | `molix.core.steps.JointObjective` | `JointTrainStep.keep(tables, trainable)` on the source's one `predict`, then `energy_at(..., styles=)`, `write_tables`, `partial_hessian(frame, tables)` |
 | Derivatives | `molix.autograd.Derivative` | the single force op |
-| Input columns | MolHub | `formal_charge`, ring features, `bond_type`, `in_ring`, `gaff2_sigma/epsilon`, three improper rows |
+| Static export | `Rondo.parameterize` → molpy | one type per row; molpy writes the engine files |
+| Input columns | molpy perception, written by MolHub | `formal_charge`, ring features, `equi_index`, `bond_type`, `in_ring`, `propers.linear`, one improper row per centre, `gaff2_sigma/epsilon` |
 
 ## 9. Version Pinning
 
 | Item | Value |
 |------|-------|
-| Reference commits | `choderalab/espaloma@413eb55…`, `bytedance/byteff@90ef54a…` |
-| molrs / molpy | 0.17 (`ff.def_style`, `special_bonds`, `to_section`) |
+| Reference commits | `ByteDance-Seed/byteff2@663451d…` (`v1.1.0`, encoder and bonded heads), `bytedance/byteff@90ef54a…` (training-recipe line references), `choderalab/espaloma@413eb55…` (lineage) |
+| ByteFF-26 weights | HF `ByteDance-Seed/byteff2` revision `v1.1.0`, `ByteFF-26/models/member-0{1..5}/optimal.pt` (Apache-2.0); sha256 in `.claude/specs/rondo-enc-01-graph-encoder.md` §8 |
+| molpy | `molcrafts-molpy>=0.18` (`pyproject.toml`); the encoder's MolHub columns are written on molpy 0.20 (`rondo-enc-01`) |
 | GAFF2 reference | AmberTools25 `dat/leap/parm/gaff2.dat` (GAFF 2.2.30), MOD4 RE section; σ = 2R*/2^{1/6} |
-| Dependencies | `molrep.chem`, `molpot.classical`, `molpot.charge`, `molpot.potentials`, `molpot.forcefield.partial_hessian`, `molix.autograd` |
+| Dependencies | `molrep.encoders.covalent_graph`, `molrep.encoders.mace_conformer`, `molrep.encoders.features`, `molrep.chem`, `molpot.classical`, `molpot.charge`, `molpot.potentials`, `molpot.forcefield.partial_hessian`, `molix.autograd` |
 | Public docs mirror | `docs/molzoo/specs/rondo.md` |
 
 ## 10. Drift Policy
@@ -529,11 +655,29 @@ This spec is `stable`; code may be written against it.
 
 ### 10.4 Backbone-change gate
 
-A backbone with structural or positional encodings voids A7 and may not land
-without a test asserting equal parameters for chemically equivalent atoms.
+An encoder that does not average its atom and bond rows over
+`atoms.equi_index` voids A7 and may not be built or injected without a test
+asserting equal rows for chemically equivalent atoms.
 
 ## Appendix A. Maintenance Log
 
+- 2026-10-30: Body rewritten to the code; the 2026-10-28 revision section is
+  folded in and deleted, status `stable` in the header and §1.4. §1–§4:
+  `CovalentGraphEncoder` (ByteFF-26's transformer) in place of the
+  Espaloma-style `ChemEncoder`; `encoder=` injection (`MaceConformerEncoder`,
+  covalent settings beside it a `TypeError`); `tables`, `parameterize`,
+  `load_state_dict(prefixes=)`; inputs `atoms.equi_index`, `propers.linear`,
+  one improper row per C/N centre, `graphs.total_charge` only for EEM;
+  outputs without the bonded `*_ref` columns (only `atoms.sigma_ref` /
+  `epsilon_ref` remain); the bonded heads as `TanhWindow` with ByteFF-26's
+  constants, `K = k/2`, the hypervalent patch, cvff `d = −1, n = 2`, propers
+  `n = 1..4` at 0°/180°; `HeadsSpec` / `CovalentGraphEncoderSpec` fields and
+  defaults, `bond_k_floor` 80 (`ByteFF.load` 40). §3.7 describes the joint
+  step as `molix.core.steps.joint` runs it. §5 / §6 rows rewritten or marked
+  superseded (A11, A14, A22, A23); A27 (bond floor), A28 (injected encoder),
+  R3 (resonance step), R4 (straight-through bonded windows) added. §7.1
+  claimed: ByteFF-26 parity from `rondo-enc-01` §8. §7.2, §8, §9, §10.4
+  updated to the current tests, owners and pins. No code changed.
 - 2026-10-27: `Rondo(forcefield, *, dtype=)`. The force field is one
   `Potentials` (`Potentials.from_forcefield`); Rondo holds that object and adds
   one parameter head per style it prices. `terms=` and `wrt=` are not

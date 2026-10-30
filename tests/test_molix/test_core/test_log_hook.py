@@ -6,6 +6,7 @@ import pytest
 
 from molix.core.hook import ScalarHook
 from molix.core.state import TrainState
+from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.hooks import (
     GPUMemoryHook,
     Log,
@@ -128,6 +129,8 @@ def test_log_validates_keys_against_advertised_paths():
 
     class _FakeTrainer:
         hooks = []  # no hooks registered → only built-ins are advertised
+        train_step = DefaultTrainStep()
+        eval_step = DefaultEvalStep()
 
     # ``("train", "loss")`` is a built-in (DefaultTrainStep) — accepted.
     Log(1, keys=[("train", "loss")]).on_train_start(trainer=_FakeTrainer(), state=TrainState())
@@ -145,6 +148,8 @@ def test_log_validation_accepts_advertised_hook_paths(capsys):
 
     class _FakeTrainer:
         hooks = [speed]
+        train_step = DefaultTrainStep()
+        eval_step = DefaultEvalStep()
 
     log = Log(1, keys=["performance/step_per_second"])
     log.on_train_start(trainer=_FakeTrainer(), state=TrainState())  # no raise
@@ -160,6 +165,7 @@ def test_log_validation_accepts_step_advertised_paths():
     class _FakeTrainer:
         hooks = []
         train_step = _AdvertisingStep()
+        eval_step = DefaultEvalStep()
 
     log = Log(1, keys=[("train", "loss_hessian")])
     log.on_train_start(trainer=_FakeTrainer(), state=TrainState())  # no raise
@@ -171,6 +177,8 @@ def test_log_validation_rejects_step_path_without_an_advertising_step():
 
     class _FakeTrainer:
         hooks = []
+        train_step = DefaultTrainStep()
+        eval_step = DefaultEvalStep()
 
     log = Log(1, keys=[("train", "loss_hessian")])
     with pytest.raises(ValueError, match="not advertised"):

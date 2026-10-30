@@ -13,6 +13,7 @@ from molpy.io.lammps import LammpsForcefieldWriter
 from molix.data import ProfileIndex
 from molrep.encoders.covalent_graph import CovalentGraphEncoder, CovalentGraphEncoderSpec
 from molrep.encoders.mace_conformer import MaceConformerEncoder, MaceConformerEncoderSpec
+from molrep.encoders.message_passing import MessagePassingEncoder, MessagePassingEncoderSpec
 from molzoo.rondo import Rondo
 from tests.test_molrep.test_encoders.test_mace_conformer.conftest import TINY as MACE_TINY
 from tests.test_molzoo.test_rondo.conftest import (
@@ -150,9 +151,7 @@ class TestRondo:
         assert out["propers", "k"].shape == (butane_batch["propers"].batch_size[0], 4)
         assert out["atoms", "charge"].shape == (14,)
 
-    def test_tables_writes_the_columns_energy_writes_and_no_energy(
-        self, forcefield, butane_batch
-    ):
+    def test_tables_writes_the_columns_energy_writes_and_no_energy(self, forcefield, butane_batch):
         model = _model(forcefield)
         excite(model)
         priced = model.energy(butane_batch.clone())
@@ -208,7 +207,7 @@ class TestRondo:
         batch = butane_batch
         layout = with_hessian_pairs(batch)
         batch["atoms", "pos"].requires_grad_(True)
-        blocks = model.partial_hessian(batch)
+        blocks = model.partial_hessian(batch, model.predict(batch))
         bonded = tuple(key for key in model.potentials if not key.startswith("pair:"))
 
         def energy(pos: torch.Tensor) -> torch.Tensor:
@@ -454,14 +453,22 @@ class TestComposition:
         )
         assert all(parameter.grad is None for parameter in model.heads["bonds"].parameters())
 
-    def test_an_injected_encoder_feeds_every_head_and_trains_on_the_energy(
-        self, forcefield, butane_batch
-    ):
-        """Phase 4's swap: the heads are sized from the encoder they read."""
+    @pytest.mark.parametrize("kind", ["mace_conformer", "message_passing"])
+    def test_the_heads_are_sized_from_an_injected_encoder(self, forcefield, butane_batch, kind):
+        """Constructor contract only: heads built from the encoder's ``width`` / ``bond_width``
+        and a gradient through the energy. Whether two encoders are *interchangeable*
+        is an experiment, not a unit test."""
         covalent = CovalentGraphEncoderSpec.model_fields
         heads = {key: value for key, value in TINY.items() if key not in covalent}
         torch.manual_seed(0)
-        encoder = MaceConformerEncoder(MaceConformerEncoderSpec(**MACE_TINY), dtype=DTYPE)
+        encoder = {
+            "mace_conformer": lambda: MaceConformerEncoder(
+                MaceConformerEncoderSpec(**MACE_TINY), dtype=DTYPE
+            ),
+            "message_passing": lambda: MessagePassingEncoder(
+                MessagePassingEncoderSpec(atom_dim=8, bond_dim=4), dtype=DTYPE
+            ),
+        }[kind]()
         model = Rondo(forcefield, dtype=DTYPE, encoder=encoder, **heads)
         assert model.graph is encoder
         batch = butane_batch.clone()

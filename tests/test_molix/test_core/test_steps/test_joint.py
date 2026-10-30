@@ -36,7 +36,8 @@ class _StubModel(nn.Module):
     """The protocol and nothing else: one shared encoder feeding two one-parameter tables.
 
     Two "styles": ``quad`` prices ``x |pos|²`` per atom, ``lin`` prices
-    ``y Σ pos``; ``energy(styles=)`` sums the ones named.
+    ``y Σ pos``; ``energy_at(styles=)`` sums the ones named. ``predictions``
+    counts :meth:`predict` calls (one per source per step).
     """
 
     STYLES = ("quad", "lin")
@@ -47,42 +48,34 @@ class _StubModel(nn.Module):
         self.encoder = nn.Linear(3, 4)
         self.head_a = nn.Linear(4, 1)  # table "a", parameter "x"
         self.head_b = nn.Linear(4, 1)  # table "b", parameter "y"
+        self.predictions = 0
         self._derivative = Derivative(self.energy, wrt=("atoms.pos",))
 
     @property
     def derivative(self) -> Derivative:
         return self._derivative
 
-    def _heads(
-        self, frame: Any, *, trainable: tuple[str, ...] | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def predict(self, frame: Any) -> dict[str, dict[str, torch.Tensor]]:
+        self.predictions += 1
         hidden = torch.tanh(self.encoder(frame["atoms", "pos"]))
-        x = self.head_a(hidden).squeeze(-1)
-        y = self.head_b(hidden).squeeze(-1)
-        if trainable is not None:
-            named = set(trainable)
-            if "a" not in named and "a.x" not in named:
-                x = x.detach()
-            if "b" not in named and "b.y" not in named:
-                y = y.detach()
-        if "a" in frame.keys():
-            frame["a", "x"] = x
-        if "b" in frame.keys():
-            frame["b", "y"] = y
-        return x, y
+        return {
+            "a": {"x": self.head_a(hidden).squeeze(-1)},
+            "b": {"y": self.head_b(hidden).squeeze(-1)},
+        }
 
-    def energy(
-        self,
-        frame: Any,
-        *,
-        styles: tuple[str, ...] | None = None,
-        trainable: tuple[str, ...] | None = None,
-    ) -> Any:
+    @staticmethod
+    def write_tables(frame: Any, tables: Any) -> None:
+        for ns, cols in tables.items():
+            if ns in frame.keys():
+                for col, v in cols.items():
+                    frame[ns, col] = v
+
+    def energy_at(self, frame: Any, tables: Any, *, styles: tuple[str, ...] | None = None) -> Any:
         chosen = self.STYLES if styles is None else styles
         unknown = [style for style in chosen if style not in self.STYLES]
         if unknown:
             raise ValueError(f"unknown styles {unknown}")
-        x, y = self._heads(frame, trainable=trainable)
+        x, y = tables["a"]["x"], tables["b"]["y"]
         pos = frame["atoms", "pos"]
         per_atom = pos.new_zeros(pos.shape[0])
         if "quad" in chosen:
@@ -93,16 +86,14 @@ class _StubModel(nn.Module):
         frame["graphs", "energy"] = per_atom.new_zeros(n_graphs).index_add(
             0, frame["atoms", "batch"], per_atom
         )
+        self.write_tables(frame, tables)
         return frame
 
-    def tables(self, frame: Any, *, trainable: tuple[str, ...] | None = None) -> Any:
-        self._heads(frame, trainable=trainable)
-        return frame
+    def energy(self, frame: Any) -> Any:
+        return self.energy_at(frame, self.predict(frame))
 
-    def partial_hessian(
-        self, frame: Any, *, trainable: tuple[str, ...] | None = None
-    ) -> torch.Tensor:
-        x, y = self._heads(frame, trainable=trainable)
+    def partial_hessian(self, frame: Any, tables: Any) -> torch.Tensor:
+        x, y = tables["a"]["x"], tables["b"]["y"]
         pos = frame["atoms", "pos"]
         i, j = frame["hessian_pairs", "i"], frame["hessian_pairs", "j"]
         diff = pos[j] - pos[i]
@@ -293,6 +284,22 @@ class TestJointTrainStep:
         assert codes["a"].co_name == "source_body[a]"
         assert codes["b"].co_name == "source_body[b]"
         assert codes["c"].co_name == "source_body[c]"
+
+    def test_a_source_predicts_its_tables_once_whatever_its_objectives(self) -> None:
+        """The encoder and heads run once per source per step (2026-10-12), not per objective."""
+        objectives = [
+            JointObjective("f", _Recording(FORCES_PRED), source="s"),
+            JointObjective("e", _Recording(ENERGY_PRED), source="s", output="energy"),
+            JointObjective("h", _Recording(HESSIAN), source="s", output="partial_hessian"),
+        ]
+        step = JointTrainStep(objectives)
+        trainer = _trainer(train_step=step)
+        model = trainer.model
+        model.predictions = 0
+
+        step.forward_loss(trainer, TrainState(), _nested("s"))
+
+        assert model.predictions == 1
 
     def test_total_is_the_weighted_sum_of_the_objective_losses(self) -> None:
         step = JointTrainStep(_two_objectives())

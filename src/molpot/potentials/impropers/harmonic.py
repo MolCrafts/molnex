@@ -43,7 +43,7 @@ class ImproperHarmonic(BasePotential):
     """
 
     name = "improper_harmonic_torch"
-    type = "improper"
+    category = "improper"
 
     k: torch.Tensor
     chi0: torch.Tensor

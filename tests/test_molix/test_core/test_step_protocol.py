@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+from molix.core.hook import BaseHook
 from molix.core.state import TrainState
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep
 from molix.core.trainer import Trainer
@@ -125,6 +126,8 @@ def test_trainer_delegates_to_train_step():
     """Verify Trainer delegates training computation to train_step."""
 
     class MockStep:
+        scalar_keys = ()
+
         def __init__(self):
             self.train_calls = 0
             self.eval_calls = 0
@@ -293,7 +296,7 @@ def test_on_after_backward_fires_with_grads_present():
     accumulation window closes, with gradients populated."""
     call_log = []
 
-    class AfterBackwardHook:
+    class AfterBackwardHook(BaseHook):
         def on_after_backward(self, trainer, state):
             has_grads = any(p.grad is not None for p in trainer.model.parameters())
             call_log.append(has_grads)
@@ -314,7 +317,7 @@ def test_on_after_backward_fires_with_amp():
     """Same firing contract holds with AMP enabled (grads unscaled before the hook)."""
     call_log = []
 
-    class AfterBackwardHook:
+    class AfterBackwardHook(BaseHook):
         def on_after_backward(self, trainer, state):
             call_log.append(any(p.grad is not None for p in trainer.model.parameters()))
 

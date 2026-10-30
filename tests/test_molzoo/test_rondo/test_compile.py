@@ -1,7 +1,7 @@
 """The compile seam: forward, energy and partial Hessian each trace as one graph.
 
 Rondo does no host work per batch: the pair relations arrive from the loader,
-the hybridization and the tables are tensor algebra on static shapes, and the
+the encoder and the tables are tensor algebra on static shapes, and the
 force field's potentials are plain torch. Each primitive is different traced
 code — the force is one backward, the partial Hessian a double backward.
 """
@@ -58,7 +58,12 @@ class TestRondoCompile:
         batch = butane_batch.clone()
         with_hessian_pairs(batch)
         model.derivative.mark_leaves(batch)
-        explanation = Compiler.explain(model.partial_hessian, batch)
+
+        def blocks(frame):
+            # What the joint step traces: the tables once, the Hessian on them.
+            return model.partial_hessian(frame, model.predict(frame))
+
+        explanation = Compiler.explain(blocks, batch)
         assert explanation.graph_count == 1, explanation.break_sites
         assert explanation.graph_break_count == 0, explanation.break_sites
 

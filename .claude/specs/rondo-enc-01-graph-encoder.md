@@ -86,9 +86,9 @@ Config of every ByteFF-26 member (`fftrainer_config_in_use.yaml`, identical acro
 
 | ByteFF2 | Location | molnex |
 |---|---|---|
-| Atom input: `[Z−1, degree, formal_charge, ring_connectivity, min_ring_size]`, five embeddings **concatenated** (32+8+8+8+8), `node_mlp` (PyG `MLP`, `plain_last=False`: GELU after the last layer too), then equivalence mean | `graph_block.py:FeatureLayer` | `molzoo/rondo/layers.py` `ChemicalEmbedding`; element table 86 rows (Z−1) |
+| Atom input: `[Z−1, degree, formal_charge, ring_connectivity, min_ring_size]`, five embeddings **concatenated** (32+8+8+8+8), `node_mlp` (PyG `MLP`, `plain_last=False`: GELU after the last layer too), then equivalence mean | `graph_block.py:FeatureLayer` | `molrep/encoders/covalent_graph/layers.py` `ChemicalEmbedding`; element table 86 rows (Z−1) |
 | Bond input: `[in_ring, order ∈ {single, double, triple, aromatic}]`, embeddings concatenated, `edge_mlp`, equivalence mean | same | same module; `bonds.bond_type` 1/2/3/4 → index 0/1/2/3 |
-| `edge_in_lin`, 4 × `EGTConv` (pre-LN attention over directed covalent edges: logit `q_i·k_j/√16 + lin_edge(LN e)`, softmax per target, gated by `σ(lin_gate(LN e))`, residual + pre-LN FFN; edge stream `e += lin_proj_edge(logits)`, then pre-LN FFN residual), GELU after every layer (jk set), JK concat (4×256) → `lin` → 256, `edge_out_lin`, mean of the two directions | `gnn.py:EGTConv`, `BasicGNN.forward`, `graph_block.py:GNNLayer` | `molzoo/rondo/layers.py` `EdgeAttentionLayer`; `molzoo/rondo/encoder.py` `CovalentGraphEncoder` |
+| `edge_in_lin`, 4 × `EGTConv` (pre-LN attention over directed covalent edges: logit `q_i·k_j/√16 + lin_edge(LN e)`, softmax per target, gated by `σ(lin_gate(LN e))`, residual + pre-LN FFN; edge stream `e += lin_proj_edge(logits)`, then pre-LN FFN residual), GELU after every layer (jk set), JK concat (4×256) → `lin` → 256, `edge_out_lin`, mean of the two directions | `gnn.py:EGTConv`, `BasicGNN.forward`, `graph_block.py:GNNLayer` | `molrep/encoders/covalent_graph/layers.py` `EdgeAttentionLayer`; `molrep/encoders/covalent_graph/encoder.py` `CovalentGraphEncoder` |
 | Directed edge order: bond *b* → edges `2b` (i→j), `2b+1` (j→i); message flow source → target (PyG default) | `data.py:265-275, 296` | built in the encoder from `bonds.bond_index`, no host sync |
 | Symmetric assembly: for each term, copies of `[x_i, e_ij, x_j, …]` (bond, angle, proper: forward + reversed; improper: three legs `[x_c, e_c,leg, x_leg]`), `pre_mlp[term]` on each copy, **summed**, `post_mlp[term]` (built with `pre_mlp_dims`), `out_mlp[param]` | `mm_bonded.py:_symmetric_pooling` | `molpot.classical` bonded terms (rewritten) |
 | Output transform: `20·tanh(d)·std + mean`, straight-through clamp to `[min, max]`; (std, mean, min, max): bond_k (200, 700, 80, 4000), bond_r0 (0.19, 1.3, 0.5, 5.0), angle_k (60, 130, 40, 1000), angle_d0 (10, 120, 20, 180), proper_k (1.2, 0.4, −20, 20) ×4, improper_k (3.7, 4.3, 0, 20) | `mm_bonded.py:PreMMBonded` | same, in the term heads |
@@ -154,6 +154,12 @@ mismatch is listed by SMILES in §8, not tolerated silently.
 - **Compile** (slow): `Rondo.energy` and `forward` explain to 0 graph breaks on a padded batch.
 
 ## 8. Record
+
+> **Layout since 2026-10-28** (operator ruling: encoders and their blocks live in molrep): the
+> encoder is `molrep/encoders/covalent_graph/` (`layers.py`, `encoder.py`, `spec.py`),
+> `RondoBCC` is `molzoo.byteff.ByteFF` (`potential.py`, key table `checkpoint.py:ByteFFKeys`),
+> `EncoderFeatures` is `molrep.encoders.features`. The record below names the layout as it
+> landed on 2026-10-28; the names above are where the code is now.
 
 Module layout as landed: `molzoo/rondo/layers.py` (`ChemicalEmbedding`, `EdgeAttentionLayer`,
 `Equivalence`), `encoder.py` (`CovalentGraphEncoder`), `checkpoint.py` (`the out-of-tree key table (`lab/projects/rondo-enc/parity/keys.py`)`),

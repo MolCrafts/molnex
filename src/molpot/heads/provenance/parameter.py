@@ -57,35 +57,29 @@ class ParameterProvenance:
 
 
 def attach_provenance(
-    target: MutableMapping[str, Any] | Any,
+    target: MutableMapping[str, Any],
     records: Sequence[ParameterProvenance],
     *,
     key: str = "provenance",
-) -> Any:
+) -> MutableMapping[str, Any]:
     """Attach provenance records as metadata **alongside** a payload.
 
     Does not invent a god context object: writes a JSON-friendly list under
-    ``key`` on a mapping, or on an object that exposes a ``metadata`` dict
-    (e.g. :class:`~molix.ff_export.force_spec.ForceSpec`).
+    ``key`` on a mapping — for a record with a ``metadata`` dict, pass that dict
+    (e.g. ``ForceSpec.metadata``).
 
     Args:
-        target: Mutable mapping, or object with ``.metadata`` mapping, or a
-            mapping-like ForceSpec-style record.
+        target: The mapping to write into.
         records: Provenance rows to attach.
         key: Metadata key (default ``"provenance"``).
 
     Returns:
         The same ``target`` (mutated) for call chaining.
     """
-    payload = [r.as_dict() for r in records]
-    if isinstance(target, MutableMapping):
-        target[key] = payload
-        return target
-    meta = getattr(target, "metadata", None)
-    if isinstance(meta, MutableMapping):
-        meta[key] = payload
-        return target
-    raise TypeError(
-        "attach_provenance requires a mutable mapping or an object "
-        f"with mutable .metadata; got {type(target)!r}"
-    )
+    if not isinstance(target, MutableMapping):
+        raise TypeError(
+            "attach_provenance writes into a mutable mapping — pass a record's "
+            f"metadata dict itself (e.g. spec.metadata); got {type(target)!r}"
+        )
+    target[key] = [r.as_dict() for r in records]
+    return target

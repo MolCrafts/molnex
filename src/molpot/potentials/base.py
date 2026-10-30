@@ -21,11 +21,12 @@ class BasePotential(nn.Module, ABC):
 
     Attributes:
         name: Potential name for registration (e.g., "bond_harmonic_torch")
-        type: Potential type for categorization (e.g., "bond", "long_range")
+        category: What the potential prices (e.g., "bond", "long_range"). Not
+            ``type``, which would shadow :meth:`torch.nn.Module.type`.
     """
 
     name: str = "base"
-    type: str = "unknown"
+    category: str = "unknown"
 
     def table(self, name: str, overrides: Mapping[str, Any]) -> torch.Tensor:
         """This call's parameter table for *name* — the caller's, else the registered one.
@@ -135,4 +136,4 @@ class BasePotential(nn.Module, ABC):
         """
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(name='{self.name}', type='{self.type}')"
+        return f"{self.__class__.__name__}(name='{self.name}', category='{self.category}')"

@@ -23,12 +23,13 @@ module's class docstring is the sole home of its contract.
 
 from typing import Protocol, runtime_checkable
 
+import torch
 from molpy.ff.forcefield import ForceField
 
 from molix.autograd import Potential
 from molix.schema import CellBound
 
-__all__ = ["CellBound", "ForceField", "MDForceField"]
+__all__ = ["CellBound", "ForceField", "MDForceField", "RetypableForceField"]
 
 
 @runtime_checkable
@@ -44,4 +45,16 @@ class MDForceField(Protocol):
 
     def to_potentials(self) -> Potential:
         """Realized torch potentials — the :class:`~molix.autograd.Potential` MD evaluates."""
+        ...
+
+
+@runtime_checkable
+class RetypableForceField(MDForceField, Protocol):
+    """An :class:`MDForceField` that restates its parameter tables at another dtype.
+
+    ``MD(potential_dtype=)`` needs one (``molpot.forcefield.ForceField`` is).
+    """
+
+    def to_dtype(self, dtype: torch.dtype) -> "RetypableForceField":
+        """The same field with its tables at *dtype*."""
         ...

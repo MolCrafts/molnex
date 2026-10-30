@@ -265,8 +265,13 @@ class ScalarHook(BaseHook):
     such as ``Log`` read this attribute to discover which columns to
     render.
 
-    For hooks whose paths depend on runtime configuration (e.g.
-    metric names), override ``scalar_keys`` as a ``@property``.
+    A hook with fixed paths overrides ``scalar_keys`` with a class
+    attribute; one whose paths depend on runtime configuration (e.g.
+    metric names) overrides it as a ``@property``. The base is a
+    read-only property so both overrides are sound.
     """
 
-    scalar_keys: tuple[Path, ...] = ()
+    @property
+    def scalar_keys(self) -> tuple[Path, ...]:
+        """The state paths this hook writes; none by default."""
+        return ()

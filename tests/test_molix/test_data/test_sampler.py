@@ -121,16 +121,14 @@ class _CountsDataset(BaseDataset):
             )
         except KeyError:
             self._n_edges = None
-        self.frame_mol = torch.arange(len(samples), dtype=torch.long)
 
-    def column(self, name: str) -> torch.Tensor:
-        if name == "n_atoms":
+    def count_rows(self, table: str) -> torch.Tensor:
+        """The per-row counts, read, never measured (``BaseDataset.count_rows``)."""
+        if table == "atoms":
             return self._n_atoms
-        if name == "n_pairs":
-            if self._n_edges is None:
-                raise KeyError(name)
+        if table == "pairs" and self._n_edges is not None:
             return self._n_edges
-        raise KeyError(name)
+        raise ValueError(f"_CountsDataset has no {table!r} count")
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -142,7 +140,7 @@ class _CountsDataset(BaseDataset):
     def __getstate__(self) -> dict:
         """Pickle the counts, not the frames: molpy ``Frame`` is not picklable.
 
-        The sampler plans from ``n_atoms[frame_mol]`` alone, so a round-tripped
+        The sampler plans from the ``atoms`` counts alone, so a round-tripped
         stub still reproduces its plan — which is exactly what the pickle
         tests assert.
         """

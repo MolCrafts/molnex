@@ -118,13 +118,13 @@ class MolRecMetricsHook(BaseHook):
             self.record_root,
             state="succeeded",
             stage="train",
-            global_step=getattr(state, "global_step", None),
+            global_step=state.global_step,
         )
         self._writer = None
 
     def _log_namespaces(self, state: Any, namespaces: tuple[str, ...], *, stage: str) -> None:
         assert self._writer is not None
-        step = int(getattr(state, "global_step", 0))
+        step = int(state.global_step)
         # The heartbeat re-reads and rewrites status.json; on a long run that is
         # one filesystem round trip per logged step on the training thread, so
         # the train phase gets its own stride. Eval completions are rare enough

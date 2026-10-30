@@ -83,7 +83,7 @@ class ProperTorsionPeriodic(BasePotential):
     """
 
     name = "proper_torsion_periodic_torch"
-    type = "dihedral"
+    category = "dihedral"
 
     k: torch.Tensor
     periodicity: torch.Tensor

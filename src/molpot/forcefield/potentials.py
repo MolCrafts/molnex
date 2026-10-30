@@ -290,7 +290,7 @@ class Potentials(Potential):
     """
 
     name = "class_i"
-    type = "classical"
+    category = "classical"
 
     def __init__(self, forcefield: ForceField, *, wrt: Sequence[str | Sequence[str]] = ()) -> None:
         super().__init__()
@@ -794,7 +794,7 @@ class Potentials(Potential):
                     "curriculum then supervised the bond term alone for four hours and "
                     "left the angle term at 0.004 kcal/mol (run 2787862)."
                 )
-            term = getattr(self, attribute, None)
+            term = getattr(self, attribute)  # bond / angle / proper / improper: always set
             index = getattr(self, f"_{attribute}_index")(frame)
             if term is None or index is None or index.shape[1] == 0:
                 raise ValueError(

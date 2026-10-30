@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from tensordict import TensorDict
 
+from molix.core.hook import BaseHook
 from molix.core.state import TrainState
 from molix.core.steps import multitask as multitask_module
 from molix.core.steps.eval import DefaultEvalStep
@@ -72,7 +73,7 @@ class _RecordingLoss:
         return self.factor * predictions["energy"].square().mean()
 
 
-class _AfterBackwardCounter:
+class _AfterBackwardCounter(BaseHook):
     """Counts ``on_after_backward`` fires (accumulation-boundary probe)."""
 
     def __init__(self) -> None:

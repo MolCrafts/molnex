@@ -6,6 +6,7 @@ import torch
 from tensordict import TensorDict
 
 from molix.autograd import Derivative, Potential
+from molix.compile import Compiler
 from molix.data import collate_molecules
 from molix.frame import TensorFrame
 from molix.md import (
@@ -1120,7 +1121,7 @@ class TestStaticCapacity:
         )
 
 
-class _GraphCapturingCompiler:
+class _GraphCapturingCompiler(Compiler):
     """Stands in for ``Compiler(cuda_graphs=True)``: an identity build that says so.
 
     Records the force tensor the op wrote on each compiled call, so the test can
@@ -1129,8 +1130,12 @@ class _GraphCapturingCompiler:
     """
 
     def __init__(self, *, cuda_graphs: bool) -> None:
-        self.cuda_graphs = cuda_graphs
+        self._captures = cuda_graphs
         self.raw_forces: list[torch.Tensor] = []
+
+    @property
+    def cuda_graphs(self) -> bool:
+        return self._captures
 
     def __call__(self, op):
         def compiled(work):

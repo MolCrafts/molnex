@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from molix.core.hook import BaseHook
 from molix.core.trainer import Trainer
 from molix.hooks import EarlyStop
 
@@ -38,6 +39,12 @@ class _Data:
     def __init__(self, batches: int = 2) -> None:
         self._batches = batches
 
+    def setup(self, stage: str = "fit") -> None:
+        pass
+
+    def on_epoch_start(self, epoch: int) -> None:
+        pass
+
     def train_dataloader(self):
         for _ in range(self._batches):
             yield torch.ones(2, 1)
@@ -55,7 +62,7 @@ def _trainer(**kwargs) -> Trainer:
     )
 
 
-class _Metric:
+class _Metric(BaseHook):
     """Publishes a scripted ``eval/loss`` at each eval, as a metrics hook would."""
 
     def __init__(self, values: list[float]) -> None:

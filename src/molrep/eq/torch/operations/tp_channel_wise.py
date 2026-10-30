@@ -47,8 +47,7 @@ class ChannelWiseTensorProduct(torch.nn.Module):
             if possible, or the torch default dtype (see SegmentedPolynomial for more details).
         method (str, optional): The method to use for the operation, by default "uniform_1d" (using a CUDA kernel)
             if all segments have the same shape, otherwise "naive" (using a PyTorch implementation).
-            ``"native"`` runs :class:`molrep.equivariance.ChannelWiseTensorProduct` instead of a
-            cuEquivariance kernel. ``"uniform_1d"``, ``"fused_tp"`` and ``"indexed_linear"`` call
+            ``"uniform_1d"``, ``"fused_tp"`` and ``"indexed_linear"`` call
             ``torch.ops.cuequivariance.*`` through :class:`cuequivariance_ops_torch`.
         use_fallback (bool, optional, deprecated): Whether to use a "fallback" implementation, now maps to method:
             If `True` the "naive" method is used.
@@ -168,35 +167,11 @@ class ChannelWiseTensorProduct(torch.nn.Module):
                 )
             self.method = method
 
-        # The native kernel is a MACE indexed subset, not a segmented-polynomial
-        # backend. Construct it only when asked, so importing this module does
-        # not load ``libmolnex_equivariance``.
-        self._native = None
-        if self.method == "native":
-            from molrep.equivariance.channelwise import (
-                ChannelWiseTensorProduct as NativeChannelWiseTensorProduct,
-            )
-
-            self._native = NativeChannelWiseTensorProduct(
-                irreps_in1,
-                irreps_in2,
-                filter_irreps_out,
-                layout_in1=layout_in1,
-                layout_in2=layout_in2,
-                layout_out=layout_out,
-                shared_weights=shared_weights,
-                internal_weights=internal_weights,
-                device=device,
-                dtype=dtype,
-                math_dtype=math_dtype,
-                use_fallback=False if use_fallback is None else use_fallback,
-            )
-        else:
-            self.f = cuet.SegmentedPolynomial(
-                e.polynomial,
-                method=self.method,
-                math_dtype=math_dtype,
-            ).to(device)
+        self.f = cuet.SegmentedPolynomial(
+            e.polynomial,
+            method=self.method,
+            math_dtype=math_dtype,
+        ).to(device)
 
     @torch.jit.ignore
     def extra_repr(self) -> str:
@@ -215,7 +190,6 @@ class ChannelWiseTensorProduct(torch.nn.Module):
         indices_2: Optional[torch.Tensor] = None,
         indices_out: Optional[torch.Tensor] = None,
         size_out: Optional[int] = None,
-        schedule: Optional[tuple] = None,
     ) -> torch.Tensor:
         """
         Perform the forward pass of the channel-wise tensor product operation.
@@ -230,8 +204,6 @@ class ChannelWiseTensorProduct(torch.nn.Module):
             indices_2 (torch.Tensor, optional): Indices to gather elements for the second operand.
             indices_out (torch.Tensor, optional): Indices to scatter elements for the output.
             size_out (int, optional): Batch dimension of the output. Needed if indices_out are provided.
-            schedule (tuple, optional): CSR edge schedule for ``method="native"``
-                (:class:`molrep.equivariance.channelwise.EdgeSchedule`). Other methods ignore it.
 
         Returns:
             torch.Tensor:
@@ -255,20 +227,6 @@ class ChannelWiseTensorProduct(torch.nn.Module):
         else:
             if weight is None:
                 raise ValueError("Internal weights are not used, weight should not be None")
-
-        if self._native is not None:
-            return self.transpose_out(
-                self._native(
-                    x1,
-                    x2,
-                    weight,
-                    indices_1=indices_1,
-                    indices_2=indices_2,
-                    indices_out=indices_out,
-                    size_out=size_out,
-                    schedule=schedule,
-                )
-            )
 
         indices_in: Dict[int, torch.Tensor] = {}
         if indices_1 is not None:

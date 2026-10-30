@@ -169,6 +169,23 @@ class Step(Protocol):
           seam, eval side
     """
 
+    #: Why the step's traced region cannot be compiled, or ``None`` when it can;
+    #: :meth:`~molix.core.trainer.Trainer.compile` refuses ``step=True`` on it.
+    untraceable: str | None
+    #: A step with several compiled regions (one per source), or ``None``.
+    traced_bodies: dict[str, Any] | None
+
+    @property
+    def scalar_keys(self) -> tuple[tuple[str, ...], ...]:
+        """State paths the step writes beyond the trainer's defaults.
+
+        Read by :class:`~molix.hooks.progress.Log` (columns it may show) and by
+        :meth:`~molix.core.trainer.Trainer._run_eval_phase` (what an eval phase
+        averages). Empty means only the defaults: ``("train", "loss")`` /
+        ``("eval", "loss")`` and the trainer objective's terms.
+        """
+        ...
+
     def on_train_batch(
         self,
         trainer: "Trainer",

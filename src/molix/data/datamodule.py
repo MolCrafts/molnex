@@ -18,7 +18,12 @@ from molix.data.dataset import BaseDataset
 from molix.data.mixture import DataMixture
 from molix.data.pad import MoleculePadder
 from molix.data.prepared import PreparedRow, PreparedRows
-from molix.data.sampler import BatchPlanShard, BatchSamplerSource, TokenBudgetBatchSampler
+from molix.data.sampler import (
+    BatchPlanShard,
+    BatchSamplerSource,
+    Reseedable,
+    TokenBudgetBatchSampler,
+)
 from molix.data.task import BatchTask
 
 # ---------------------------------------------------------------------------
@@ -220,7 +225,7 @@ class DataModule:
             batch_sampler_source = train_dataset
 
         if batch_sampler_source is not None:
-            if not callable(getattr(batch_sampler_source, "batch_sampler", None)):
+            if not isinstance(batch_sampler_source, BatchSamplerSource):
                 raise ValueError(
                     "batch_sampler_source must implement the BatchSamplerSource "
                     "protocol — a batch_sampler(dataset, *, seed: int) -> "
@@ -235,7 +240,7 @@ class DataModule:
                     "kwargs, or express the budget inside the source."
                 )
 
-        padder = None if collate_fn is None else getattr(collate_fn, "padder", None)
+        padder = None if collate_fn is None else collate_fn.padder
         if batch_counts is not None or val_batch_counts is not None:
             if not isinstance(padder, MoleculePadder):
                 raise ValueError(
@@ -260,7 +265,7 @@ class DataModule:
             if val_batch_counts is not None:
                 padder.check(val_batch_counts)
 
-        collator_dtype = getattr(getattr(collate_fn, "collator", None), "dtype", None)
+        collator_dtype = None if collate_fn is None else collate_fn.collator.dtype
         if collator_dtype is not None and collator_dtype is not dtype:
             raise ValueError(
                 f"collate_fn builds batches at {collator_dtype} but DataModule(dtype={dtype}); "
@@ -390,7 +395,7 @@ class DataModule:
 
     def _padder(self) -> MoleculePadder:
         """The static-shape padder ``batch_counts`` packs for (validated at init)."""
-        padder = getattr(self.collate_fn, "padder", None)
+        padder = None if self.collate_fn is None else self.collate_fn.padder
         assert isinstance(padder, MoleculePadder), "validated in __init__"
         return padder
 
@@ -492,7 +497,7 @@ class DataModule:
                 multiprocessing_context=self._worker_context(),
                 worker_init_fn=self._worker_init_fn(),
             )
-            if callable(getattr(batch_sampler, "reseed", None)):
+            if isinstance(batch_sampler, Reseedable):
                 self._batch_sampler = batch_sampler
                 self._train_loader = loader
             return loader
@@ -663,9 +668,7 @@ class DataModule:
             epoch: The epoch index about to start.
         """
         self._epoch = epoch
-        if self._batch_sampler is not None and callable(
-            getattr(self._batch_sampler, "reseed", None)
-        ):
+        if isinstance(self._batch_sampler, Reseedable):
             self._batch_sampler.reseed(self.seed + epoch)
         if self._train_sampler is not None:
             self._train_sampler.set_epoch(epoch)
@@ -761,9 +764,7 @@ class _CollateFn:
             batch = PreparedRow.assemble(samples)
             tick("assemble")
         else:
-            prepare_samples = getattr(self.frame_collator, "prepare_samples", None)
-            if callable(prepare_samples):
-                samples = prepare_samples(samples)
+            samples = self.frame_collator.prepare_samples(samples)
             tick("prepare")
             batch = self.frame_collator.collator(samples)
             tick("collate")

@@ -17,11 +17,11 @@ import torch.nn as nn
 
 from molix import logger as _logger_mod
 from molix.core.checkpoint import Checkpoint, CheckpointBackend, TorchSaveBackend
-from molix.core.hook import Hook
+from molix.core.hook import BaseHook, Hook
 from molix.core.state import Stage, TrainState, resolve
 from molix.core.steps import DefaultEvalStep, DefaultTrainStep, Step
 from molix.core.steps.base import term_keys
-from molix.data import DataModuleProtocol
+from molix.data import DataModule, DataModuleProtocol
 
 logger = _logger_mod.getLogger(__name__)
 
@@ -180,6 +180,8 @@ class Trainer:
         # exception would leave a staged run with no checkpoint for the next stage
         # to continue from.
         self._stop_reason: str | None = None
+        #: ``compile(step=True)`` swapped the steps' traced regions for compiled ones.
+        self._step_compiled = False
         # Monotonic micro-batch counter driving accumulation-window boundaries.
         self._micro_step = 0
         # Wall time blocked in the dataloader, and time inside the step.
@@ -232,6 +234,12 @@ class Trainer:
                     normalized.append((item, 100, idx))
             normalized.sort(key=lambda x: (x[1], x[2]))
             self.hooks = [hook for hook, _, _ in normalized]
+        foreign = [type(hook).__name__ for hook in self.hooks if not isinstance(hook, BaseHook)]
+        if foreign:
+            raise TypeError(
+                f"hooks {foreign} are not BaseHook subclasses; subclass "
+                "molix.core.hook.BaseHook, which declares every event as a no-op"
+            )
 
     def train(
         self,
@@ -274,16 +282,17 @@ class Trainer:
         own errors should catch them itself.
         """
         for hook in self.hooks:
-            method = getattr(hook, hook_name, None)
-            if method is not None and callable(method):
-                try:
-                    method(*args, **kwargs)
-                except Exception:
-                    logger.error(
-                        f"Fatal error in hook {hook.__class__.__name__}.{hook_name}",
-                        exc_info=True,
-                    )
-                    raise
+            # Every hook is a BaseHook (checked at construction), which declares
+            # every event; the name is one of those events.
+            method = getattr(hook, hook_name)
+            try:
+                method(*args, **kwargs)
+            except Exception:
+                logger.error(
+                    f"Fatal error in hook {hook.__class__.__name__}.{hook_name}",
+                    exc_info=True,
+                )
+                raise
 
     @staticmethod
     def _needs_device_move(batch: Any, device: torch.device) -> bool:
@@ -486,14 +495,12 @@ class Trainer:
                     self.optimizer.step()
 
             # Best-effort eval-graph warmup (a separate compile under eval()).
-            val_dl = getattr(datamodule, "val_dataloader", None)
-            if callable(val_dl):
-                try:
-                    self.model.eval()
-                    vbatch = next(iter(val_dl())).to(model_device)
-                    self.eval_step.on_eval_batch(self, self.state, vbatch)
-                except Exception as exc:  # noqa: BLE001
-                    logger.info(f"Smoke warmup: eval-graph warmup skipped ({exc!r}).")
+            try:
+                self.model.eval()
+                vbatch = next(iter(datamodule.val_dataloader())).to(model_device)
+                self.eval_step.on_eval_batch(self, self.state, vbatch)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"Smoke warmup: eval-graph warmup skipped ({exc!r}).")
         finally:
             # Restore: the real run must start from the exact pre-warmup state.
             restore_state_dict(self.model, model_snap)
@@ -528,6 +535,11 @@ class Trainer:
             logger.info(f"Stop requested: {self._stop_reason}")
 
     @property
+    def checkpoint(self) -> Checkpoint:
+        """What the trainer saves and how it picks the best state (``best_metric_name``)."""
+        return self._checkpoint
+
+    @property
     def stop_reason(self) -> str | None:
         """Why the loop ended, or ``None`` if it ran to its epoch/step limit."""
         return self._stop_reason
@@ -554,9 +566,7 @@ class Trainer:
         # ``setup`` / ``on_epoch_start`` are optional on the datamodule
         # contract so ad-hoc / test harnesses don't need to spell out empty
         # method bodies just to satisfy the Trainer.
-        setup = getattr(datamodule, "setup", None)
-        if callable(setup):
-            setup("fit")
+        datamodule.setup("fit")
 
         self._resume()
 
@@ -587,9 +597,7 @@ class Trainer:
 
         while epoch < epoch_limit and not step_limit_reached and self._stop_reason is None:
             epoch_start_step = self.state.global_step
-            on_epoch_start = getattr(datamodule, "on_epoch_start", None)
-            if callable(on_epoch_start):
-                on_epoch_start(epoch)
+            datamodule.on_epoch_start(epoch)
             self._call_hooks("on_epoch_start", self, self.state)
 
             # Training phase
@@ -749,7 +757,7 @@ class Trainer:
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             return
         for step in (self.train_step, self.eval_step):
-            if getattr(step, "traced_bodies", None) is not None:
+            if step.traced_bodies is not None:
                 raise ValueError(
                     f"{type(step).__name__} runs the model's tables / energy / "
                     "partial_hessian methods, not its forward. DistributedDataParallel "
@@ -757,8 +765,7 @@ class Trainer:
                     "step would never synchronise gradients. Joint training is "
                     "single-process."
                 )
-            region = getattr(step, "_traced_forward_loss", None)
-            if region is not None and getattr(region, "__self__", None) is not step:
+            if self._step_compiled:
                 raise ValueError(
                     "compile(step=True) traces model(batch) inside the step. Under a "
                     "process group that call is DistributedDataParallel.forward, the "
@@ -878,7 +885,7 @@ class Trainer:
             return self
 
         for target in (self.train_step, self.eval_step):
-            reason = getattr(target, "untraceable", None)
+            reason = target.untraceable
             if reason:
                 raise ValueError(
                     f"compile(step=True): {type(target).__name__}.forward_loss cannot be "
@@ -890,12 +897,13 @@ class Trainer:
         # are its ``traced_bodies``: K explicit compiled objects, never one
         # region specialised K times.
         for target in (self.train_step, self.eval_step):
-            bodies = getattr(target, "traced_bodies", None)
+            bodies = target.traced_bodies
             if bodies is not None:
                 for name in tuple(bodies):
                     bodies[name] = compiler(bodies[name])
                 continue
             target._traced_forward_loss = compiler(target._traced_forward_loss)
+        self._step_compiled = True
         return self
 
     def _log_setup_banner(
@@ -915,7 +923,7 @@ class Trainer:
         lr_str = ", ".join(f"{lr:.3e}" for lr in lrs if lr is not None) or "n/a"
         sched_name = type(self.lr_scheduler).__name__ if self.lr_scheduler else "None"
         hooks_str = ", ".join(h.__class__.__name__ for h in self.hooks) or "None"
-        batch_size = getattr(datamodule, "batch_size", "n/a")
+        batch_size = datamodule.batch_size if isinstance(datamodule, DataModule) else "n/a"
 
         cuda_ok = torch.cuda.is_available()
         if cuda_ok:
@@ -1005,7 +1013,7 @@ class Trainer:
             f"    epoch        : {self.state.epoch}",
             f"    global_step  : {self.state.global_step}",
         ]
-        best = self.state.get("best_metric") if hasattr(self.state, "get") else None
+        best = self.state.get("best_metric")
         if best is not None:
             lines.append(f"    best_metric  : {best}")
         if peak_mem_line is not None:
@@ -1059,10 +1067,10 @@ class Trainer:
         # the *last* batch's, and best-checkpoint selection and patience read
         # one batch (Class-I: 12.5 published against a 9-batch mean of 1e4).
         # Per-key counts, because a routed step writes only its own task's key.
-        declared = getattr(self.eval_step, "scalar_keys", None)
-        if declared is None:
-            objective = getattr(self.eval_step, "objective", None) or self.loss_fn
-            declared = (("eval", "loss"), *term_keys("eval", objective))
+        declared = self.eval_step.scalar_keys
+        if not declared:
+            own = self.eval_step.objective if isinstance(self.eval_step, DefaultEvalStep) else None
+            declared = (("eval", "loss"), *term_keys("eval", own or self.loss_fn))
         paths = [
             path
             for path in declared

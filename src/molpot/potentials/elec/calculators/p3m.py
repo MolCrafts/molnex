@@ -44,7 +44,7 @@ class P3MCalculator(PMECalculator):
         )
         ns_mesh = torch.ones(3, dtype=torch.long, device=cell.device)
 
-        self.kspace_filter: P3MKSpaceFilter = P3MKSpaceFilter(
+        self.kspace_filter = P3MKSpaceFilter(
             cell=cell,
             ns_mesh=ns_mesh,
             interpolation_nodes=interpolation_nodes,

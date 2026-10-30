@@ -112,13 +112,6 @@ def _flatten_systems(
     return rows
 
 
-def _env_key(item: Any) -> Hashable:
-    key = getattr(item, "key", item)
-    if callable(key):
-        key = key()
-    return key
-
-
 def _label(key: Hashable) -> str | None:
     if isinstance(key, str):
         return key
@@ -142,7 +135,7 @@ class Condenser:
     Algorithm
     ---------
     1. Flatten ``params_by_system`` with ``(system_id, row_index)``.
-    2. Group rows by ``environments[s][r]`` (objects with ``.key`` or raw keys).
+    2. Group rows by ``environments[s][r]`` (a hashable key per row).
     3. Each group is one type. Prototype is the member mean (or the first
        member when ``update_centroid`` is False).
     4. Every member must pass :class:`MergeCriterion` against that prototype.
@@ -160,7 +153,7 @@ class Condenser:
         params_by_system: Sequence[Mapping[str, torch.Tensor | float] | torch.Tensor],
         *,
         interaction: InteractionClass,
-        environments: Sequence[Sequence[Any]],
+        environments: Sequence[Sequence[Hashable]],
         criterion: MergeCriterion | None = None,
         physical_eval: PhysicalEval | None = None,
         energy_tol: float | None = None,
@@ -245,7 +238,7 @@ class Condenser:
         params_by_system: Sequence[Mapping[str, torch.Tensor | float] | torch.Tensor],
         *,
         interaction: InteractionClass,
-        environments: Sequence[Sequence[Any]],
+        environments: Sequence[Sequence[Hashable]],
         criterion: MergeCriterion | None = None,
         physical_eval: PhysicalEval | None = None,
         energy_tol: float | None = None,
@@ -264,7 +257,7 @@ class Condenser:
 
     @staticmethod
     def _keys(
-        environments: Sequence[Sequence[Any]],
+        environments: Sequence[Sequence[Hashable]],
         rows: Sequence[tuple[int, int, dict[str, torch.Tensor]]],
     ) -> list[Hashable]:
         if len(environments) == 0 and len(rows) == 0:
@@ -282,7 +275,7 @@ class Condenser:
                 raise ValueError(
                     f"environments[{sys_id}] has {len(environments[sys_id])} rows; params have {n}"
                 )
-        return [_env_key(environments[s][r]) for s, r, _ in rows]
+        return [environments[s][r] for s, r, _ in rows]
 
     @staticmethod
     def _check_bucket(

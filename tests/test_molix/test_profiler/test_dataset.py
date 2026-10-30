@@ -77,33 +77,27 @@ class _CountingDataset(BaseDataset):
         self.n_getitem += 1
         return self._samples[idx]
 
-    @property
-    def frame_mol(self) -> torch.Tensor:
-        return torch.arange(len(self._samples), dtype=torch.long)
-
-    def column(self, name: str) -> torch.Tensor:
-        if name == "n_atoms":
+    def count_rows(self, table: str) -> torch.Tensor:
+        if table == "atoms":
             return torch.tensor([len(s["Z"]) for s in self._samples], dtype=torch.long)
-        if name == "n_pairs":
-            if "pair_index" not in self._samples[0]:
-                raise KeyError(name)
+        if table == "pairs" and "pair_index" in self._samples[0]:
             return torch.tensor([len(s["pair_index"]) for s in self._samples], dtype=torch.long)
-        raise KeyError(name)
+        raise ValueError(f"no {table!r} count")
 
     @property
     def max_atoms(self) -> int:
-        return int(self.column("n_atoms").max())
+        return int(self.count_rows("atoms").max())
 
     @property
     def max_pairs(self) -> int:
-        return int(self.column("n_pairs").max())
+        return int(self.count_rows("pairs").max())
 
     @property
     def avg_num_neighbors(self) -> float:
         """``0.0`` without a neighbour graph — zero neighbours is the honest answer."""
         if "pair_index" not in self._samples[0]:
             return 0.0
-        return float(self.column("n_pairs").sum()) / float(self.column("n_atoms").sum())
+        return float(self.count_rows("pairs").sum()) / float(self.count_rows("atoms").sum())
 
 
 @pytest.fixture
@@ -131,7 +125,7 @@ class TestProfiler:
         assert result.max_pairs == ring_dataset.max_pairs == _MAX_EDGES
         assert result.avg_num_neighbors == ring_dataset.avg_num_neighbors
         assert result.avg_num_neighbors == pytest.approx(_AVG_NUM_NEIGHBORS, rel=1e-12)
-        assert result.atom_stats.mean == float(ring_dataset.column("n_atoms").double().mean())
+        assert result.atom_stats.mean == float(ring_dataset.count_rows("atoms").double().mean())
         assert result.atom_stats.mean == pytest.approx(_ATOM_MEAN, rel=1e-12)
         assert result.edge_stats is not None
         assert result.edge_stats.mean == pytest.approx(_EDGE_MEAN, rel=1e-12)

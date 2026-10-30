@@ -38,14 +38,10 @@ class ResidentValidation:
         self._batches: list[Any] | None = None
 
     def setup(self, stage: str = "fit") -> None:
-        setup = getattr(self.datamodule, "setup", None)
-        if callable(setup):
-            setup(stage)
+        self.datamodule.setup(stage)
 
     def on_epoch_start(self, epoch: int) -> None:
-        hook = getattr(self.datamodule, "on_epoch_start", None)
-        if callable(hook):
-            hook(epoch)
+        self.datamodule.on_epoch_start(epoch)
 
     def train_dataloader(self) -> Iterable:
         return self.datamodule.train_dataloader()
