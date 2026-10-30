@@ -56,8 +56,9 @@ from molpot.classical import TERMS, Term
 from molpot.forcefield.partial_hessian import TermHessian
 from molpot.potentials.collection import Potentials
 from molpot.potentials.potential import BondedPotential
-from molrep.encoders.covalent_graph import CovalentGraphEncoder
+from molrep.encoders.covalent_graph import CovalentGraphEncoder, CovalentGraphEncoderSpec
 from molrep.encoders.features import EncoderFeatures
+from molrep.encoders.mace_conformer import MaceConformerEncoder
 
 from .spec import validate
 
@@ -113,6 +114,13 @@ class Rondo(Potential):
             later style is a force field that declares it; a subclass
             overrides :meth:`load_state_dict` to accept this checkpoint.
         dtype: Floating dtype every parameter and buffer is built at.
+        encoder: The encoder the heads read, built by the caller at *dtype*
+            (rondo-enc phase 4: a
+            :class:`~molrep.encoders.mace_conformer.MaceConformerEncoder` under
+            ByteFF-26's heads). ``None`` builds the covalent-graph encoder from
+            *settings*; an injected encoder takes no covalent-graph setting.
+            It is registered as :attr:`graph` either way, so the heads load by
+            the same keys.
         **settings: Fields of
             :class:`~molrep.encoders.covalent_graph.spec.CovalentGraphEncoderSpec`
             and :class:`~molzoo.rondo.spec.HeadsSpec`. Omitted fields take the
@@ -121,6 +129,7 @@ class Rondo(Potential):
     Raises:
         ValueError: The field declares no priced style, a declared style has no
             registered potential, or a priced style has no parameter head.
+        TypeError: A covalent-graph setting beside an injected *encoder*.
 
     Example::
 
@@ -134,15 +143,33 @@ class Rondo(Potential):
 
     SUPPORTED_STYLES: tuple[str, ...] = tuple(TERMS)
 
-    def __init__(self, forcefield: ForceField, *, dtype: torch.dtype, **settings: object) -> None:
+    def __init__(
+        self,
+        forcefield: ForceField,
+        *,
+        dtype: torch.dtype,
+        encoder: CovalentGraphEncoder | MaceConformerEncoder | None = None,
+        **settings: object,
+    ) -> None:
         super().__init__()
         #: The build dtype of every float parameter and buffer.
         self.dtype = dtype
+        if encoder is not None:
+            covalent = sorted(set(settings) & set(CovalentGraphEncoderSpec.model_fields))
+            if covalent:
+                raise TypeError(
+                    f"covalent-graph settings {covalent} beside an injected "
+                    f"{type(encoder).__name__}, which they would not configure"
+                )
         spec = validate(**settings)
+        #: Rondo's spec. ``spec.encoder`` describes the covalent-graph encoder
+        #: only when no encoder was injected; an injected one carries its own.
         self.spec = spec
         # Plain attribute: the IR is data, not a module.
         self.forcefield = forcefield.canonical()
-        self.graph = CovalentGraphEncoder(spec.encoder, dtype=dtype)
+        self.graph: CovalentGraphEncoder | MaceConformerEncoder = (
+            CovalentGraphEncoder(spec.encoder, dtype=dtype) if encoder is None else encoder
+        )
         self.heads = torch.nn.ModuleDict()
         self.potentials = Potentials.from_forcefield(self.forcefield)
         if len(self.potentials) == 0:
@@ -432,13 +459,13 @@ class Rondo(Potential):
     def _new(self, style: str) -> Term:
         """Build the parameter head of *style*. The numbers live on the spec, not on molpot."""
         kind = TERMS[style]
-        width = self.spec.encoder.width
+        width = self.graph.width
         heads = self.spec.heads
         dtype = self.dtype
         if style in ("bond:harmonic", "angle:harmonic", "dihedral:periodic", "improper:cvff"):
             return kind(
                 width,
-                self.graph.feature.edge_dim,
+                self.graph.bond_width,
                 hidden_dim=heads.bonded_hidden,
                 width=heads.bonded_width,
                 layers=heads.bonded_layers,

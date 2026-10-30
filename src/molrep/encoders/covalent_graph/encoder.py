@@ -72,6 +72,11 @@ class CovalentGraphEncoder(torch.nn.Module):
         """Width of the atom and bond features handed to the heads."""
         return self.spec.width
 
+    @property
+    def bond_width(self) -> int:
+        """Width of the bond features handed to the heads."""
+        return self.feature.edge_dim
+
     def forward(self, frame: TensorDict) -> EncoderFeatures:
         """Atom ``(N, width)`` and bond ``(N_bonds, edge_dim)`` features.
 

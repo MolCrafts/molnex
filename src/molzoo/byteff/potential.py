@@ -59,7 +59,7 @@ class ByteFF(Rondo):
         heads = self.spec.heads
         if style == "pair:lj/cut":
             return LJCutDirect(
-                self.spec.encoder.width,
+                self.graph.width,
                 hidden_dim=heads.lj_direct_hidden,
                 layers=heads.lj_direct_layers,
                 tanh_output=heads.pair_tanh_output,
@@ -67,8 +67,8 @@ class ByteFF(Rondo):
             )
         if style == "pair:coul/cut":
             return BondChargeCorrection(
-                self.spec.encoder.width,
-                self.graph.feature.edge_dim,
+                self.graph.width,
+                self.graph.bond_width,
                 hidden_dim=heads.bcc_hidden,
                 width=heads.bcc_width,
                 layers=heads.bcc_layers,

@@ -7,8 +7,11 @@ import pytest
 import torch
 import torch.nn as nn
 
+from molix.data import ProfileIndex
 from molrep.encoders.covalent_graph import CovalentGraphEncoder, CovalentGraphEncoderSpec
+from molrep.encoders.mace_conformer import MaceConformerEncoder, MaceConformerEncoderSpec
 from molzoo.rondo import Rondo
+from tests.test_molrep.test_encoders.test_mace_conformer.conftest import TINY as MACE_TINY
 from tests.test_molzoo.test_rondo.conftest import (
     DTYPE,
     TINY,
@@ -404,3 +407,28 @@ class TestComposition:
             for parameter in model.graph.parameters()
         )
         assert all(parameter.grad is None for parameter in model.heads["bonds"].parameters())
+
+    def test_an_injected_encoder_feeds_every_head_and_trains_on_the_energy(
+        self, forcefield, butane_batch
+    ):
+        """Phase 4's swap: the heads are sized from the encoder they read."""
+        covalent = CovalentGraphEncoderSpec.model_fields
+        heads = {key: value for key, value in TINY.items() if key not in covalent}
+        torch.manual_seed(0)
+        encoder = MaceConformerEncoder(MaceConformerEncoderSpec(**MACE_TINY), dtype=DTYPE)
+        model = Rondo(forcefield, dtype=DTYPE, encoder=encoder, **heads)
+        assert model.graph is encoder
+        batch = butane_batch.clone()
+        ProfileIndex().execute(batch)
+        energy = model.energy(batch)["graphs", "energy"]
+        assert torch.isfinite(energy).all()
+        energy.sum().backward()
+        assert any(
+            parameter.grad is not None and parameter.grad.abs().sum() > 0
+            for parameter in encoder.parameters()
+        )
+
+    def test_a_covalent_setting_beside_an_injected_encoder_is_refused(self, forcefield):
+        encoder = MaceConformerEncoder(MaceConformerEncoderSpec(**MACE_TINY), dtype=DTYPE)
+        with pytest.raises(TypeError, match="n_layers"):
+            Rondo(forcefield, dtype=DTYPE, encoder=encoder, n_layers=2)
