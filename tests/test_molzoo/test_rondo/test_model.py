@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import molpy as mp
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+from molpy.io import write_lammps_data
+from molpy.io.lammps import LammpsForcefieldWriter
 
 from molix.data import ProfileIndex
 from molrep.encoders.covalent_graph import CovalentGraphEncoder, CovalentGraphEncoderSpec
@@ -296,6 +299,49 @@ class TestRondo:
         for name, value in canonical.params.items():
             assert model.forcefield.get_types("dihedral")[0].params[name] == value
         assert ff.get_style("dihedral", "opls") is not None
+
+    def test_a_static_field_types_every_row_at_its_predicted_parameters(
+        self, forcefield, butane_batch
+    ):
+        model = _model(forcefield)
+        excite(model)
+        structure, field = model.parameterize(butane_batch)
+        with torch.no_grad():
+            tables = model.predict(butane_batch)
+        bonds = {t.name: t.params for t in field.get_styles("bond")[0].get_types()}
+        assert len(bonds) == butane_batch["bonds", "bond_index"].shape[1]
+        for row, label in enumerate(structure["bonds"]["type"]):
+            got = (bonds[str(label)]["k"], bonds[str(label)]["r0"])
+            want = (float(tables["bonds"]["k"][row]), float(tables["bonds"]["r0"][row]))
+            assert got == pytest.approx(want)
+        propers = {t.name: t.params for t in field.get_styles("dihedral")[0].get_types()}
+        for row, label in enumerate(structure["dihedrals"]["type"]):
+            k = [propers[str(label)][f"k{n}"] for n in range(1, 5)]
+            assert k == pytest.approx(tables["propers"]["k"][row].tolist())
+        lj = next(s for s in field.get_styles("pair") if s.name == "lj/cut")
+        sigma = {t.name: t.params["sigma"] for t in lj.get_types()}
+        assert [sigma[f"atom{i}"] for i in range(len(sigma))] == pytest.approx(
+            tables["atoms"]["sigma"].tolist()
+        )
+        atoms = structure["atoms"]
+        np.testing.assert_allclose(atoms["charge"], tables["atoms"]["charge"].numpy())
+        np.testing.assert_allclose(atoms["x"], butane_batch["atoms", "pos"][:, 0].numpy())
+
+    def test_molpy_writes_the_static_field_one_coefficient_per_row(self, forcefield, butane_batch):
+        structure, field = _model(forcefield).parameterize(butane_batch)
+        settings = bytearray()
+        LammpsForcefieldWriter(structure, precision=12).write(settings, field)
+        lines = settings.decode().splitlines()
+        counts = {
+            "bond_coeff": butane_batch["bonds", "bond_index"].shape[1],
+            "angle_coeff": butane_batch["angles"].batch_size[0],
+            "dihedral_coeff": butane_batch["propers"].batch_size[0],
+            "improper_coeff": butane_batch["impropers"].batch_size[0],
+            "pair_coeff": butane_batch["atoms"].batch_size[0],
+        }
+        for command, rows in counts.items():
+            assert sum(line.startswith(command) for line in lines) == rows, command
+        write_lammps_data(bytearray(), structure, atom_style="full", units="real")
 
     def test_forward_differentiates_positions(self, forcefield):
         model = _model(forcefield)

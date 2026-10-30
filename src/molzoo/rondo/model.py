@@ -46,7 +46,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
+import numpy as np
 import torch
+from molpy import Block, Element, Frame
 from molpy.ff.forcefield import ForceField
 from tensordict import TensorDict
 
@@ -65,6 +67,15 @@ from .spec import validate
 __all__ = ["Rondo"]
 
 Tables = dict[str, dict[str, torch.Tensor]]
+
+#: molpot namespace of a bonded term -> the molpy frame block that lists its rows.
+_MOLPY_BLOCKS = {
+    "bonds": "bonds",
+    "angles": "angles",
+    "propers": "dihedrals",
+    "impropers": "impropers",
+}
+_ENDS = ("atomi", "atomj", "atomk", "atoml")
 
 
 def _term_style(kind: type[Term]) -> str:
@@ -94,6 +105,18 @@ def _detach(predicted: Tables, trainable: Sequence[str] | None) -> Tables:
             for column, value in columns.items()
         }
     return kept
+
+
+def _row(params: dict[str, torch.Tensor], row: int) -> dict[str, float]:
+    """One row of *params* as molrs type parameters; a vector column becomes ``name1 … namem``."""
+    values: dict[str, float] = {}
+    for name, column in params.items():
+        entry = column[row]
+        if entry.ndim == 0:
+            values[name] = float(entry)
+        else:
+            values.update({f"{name}{m + 1}": float(x) for m, x in enumerate(entry)})
+    return values
 
 
 def _style_of(kind: str | type[Term]) -> str:
@@ -320,6 +343,85 @@ class Rondo(Potential):
             if namespace in frame.keys():
                 for name, value in columns.items():
                     frame[namespace, name] = value
+
+    def parameterize(self, frame: TensorDict, *, graph: int = 0) -> tuple[Frame, ForceField]:
+        """One molecule's static force field: its parameters predicted once, as molpy data.
+
+        Every atom and every term row of *graph* becomes its own molpy type at
+        the predicted parameters — nothing is averaged — on the styles, cutoffs
+        and 1-4 scales of :attr:`forcefield`; charges go on the atoms. molpy
+        serialises the pair (for LAMMPS, ``molpy.io.write_lammps_data`` and
+        ``molpy.io.lammps.LammpsForcefieldWriter``). Each term's
+        :meth:`~molpot.classical.Term.potential_params` already speaks molrs's
+        parameter names; a ``(rows, m)`` column (the periodic series) becomes
+        molrs's ``name1 … namem``. Runs once per topology, eagerly: not a hot
+        path.
+
+        Args:
+            frame: Collated batch as :meth:`predict` reads it. Padding rows
+                (ghost atoms, dead terms on them) are not written.
+            graph: The molecule to write.
+
+        Returns:
+            ``(structure, forcefield)``: an ``atoms`` block (positions, charge,
+            mass, ``type``) and one block per bonded namespace with ``type``
+            columns (``propers`` as molpy's ``dihedrals``); the typed field.
+        """
+        with torch.no_grad():
+            tables = self.predict(frame)
+        atoms = frame["atoms"]
+        own = torch.nonzero(atoms["batch"] == graph).flatten()
+        local = torch.full_like(atoms["batch"], -1)
+        local[own] = torch.arange(own.numel(), device=own.device, dtype=local.dtype)
+        local = local.cpu()
+        field = ForceField(name=f"{self.forcefield.name}-static", units=self.forcefield.units)
+        lj, coul = self.forcefield.special_bonds
+        field.set_special_bonds(lj=list(lj), coul=list(coul))
+        atom_style = field.def_style("atom", "full")
+        mass = [Element.by_number(int(z)).mass for z in atoms["Z"][own].tolist()]
+        types = [atom_style.def_type(f"atom{i}", mass=m) for i, m in enumerate(mass)]
+        pos = atoms["pos"][own].detach().cpu().double().numpy()
+        columns = {
+            "id": np.arange(1, len(types) + 1),
+            "type": np.array([t.name for t in types]),
+            "x": pos[:, 0],
+            "y": pos[:, 1],
+            "z": pos[:, 2],
+            "mass": np.array(mass),
+            "mol_id": np.ones(len(types), dtype=np.int64),
+        }
+        structure = Frame()
+        for key in self.potentials.keys():
+            category, name = key.split(":", 1)
+            source = next(s for s in self.forcefield.get_styles(category) if s.name == name)
+            style = field.def_style(category, name, params=dict(source.params))
+            params = {
+                column: value.detach().cpu().double()
+                for column, value in self._terms[key].potential_params(tables).items()
+            }
+            if category == "pair":
+                if "charge" in params:
+                    columns["charge"] = params.pop("charge")[own.cpu()].numpy()
+                for i, atom_type in enumerate(types if params else ()):
+                    style.def_type(atom_type.name, atom_type, **_row(params, int(own[i])))
+                continue
+            namespace = self._terms[key].namespace
+            block = frame[namespace]
+            if namespace == "bonds":
+                index = block["bond_index"].T
+            else:
+                index = torch.stack([block[end] for end in _ENDS if end in block.keys()], dim=1)
+            index = index.long().cpu()
+            rows = torch.nonzero(local[index[:, 0]] >= 0).flatten().tolist()
+            names = [f"{category}{n}" for n in range(len(rows))]
+            for label, row in zip(names, rows, strict=True):
+                ends = (types[int(local[atom])] for atom in index[row])
+                style.def_type(label, *ends, **_row(params, row))
+            ends = local[index[rows]].numpy()
+            listed = {end: ends[:, m] for m, end in enumerate(_ENDS[: index.shape[1]])}
+            structure[_MOLPY_BLOCKS[namespace]] = Block({**listed, "type": np.array(names)})
+        structure["atoms"] = Block(columns)
+        return structure, field
 
     def _styles(self, styles: Sequence[str | type[Term]] | None) -> tuple[str, ...]:
         if styles is None:

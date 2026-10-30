@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Opened | 2026-10-28 |
-| Status | charter; 01, 03 and 05 done, 02 implemented, 04 / 06 / 07 not opened |
+| Status | charter; 01, 03, 05 and 07 done, 02 implemented, 04 / 06 not opened |
 | Source | operator's "ByteFF-like Modular Encoder — Development Specification v0.1" (2026-10-28), bound here to molnex types |
 | Product | `molzoo.rondo.Rondo` (`src/molzoo/specs/rondo.md` stays the math contract and is rewritten with 01's code) |
 
@@ -44,7 +44,7 @@ heads → (parameters) → energy model — so each experiment changes one compo
 | 3 | `rondo-enc-04-pretrain` (not opened) | one training interface for EGT and MACE; Uni-Mol-style masked atom/bond, geometry denoising, physical supervision; curated THEMol subsets; random vs ByteFF vs re-pretrained init | transfer beats random init | not started; parallel to 2, not its prerequisite |
 | 4 | `rondo-enc-02-mace`, `rondo-enc-05-swap` | MACE encoder + MACE → canonical adapter under the frozen reference heads; feature distillation + physical supervision; cross-conformer consistency; EGT vs MACE cost | MACE replaces EGT without retraining the heads, or a clear no | done 2026-10-30 (spec 05): yes at the 10 % bar — M-DP (distillation + torsion/relax, from M-D) is within 2.4 % of B on charge, torsion, relax F and 12 % better on relax E; distillation alone (M-D) misses relax by 25 %; EGT fine-tuned on the same physics (phase 2 D2) still beats M-DP by 5–18 %; MACE forward 1.3–2× EGT |
 | 5 | `rondo-enc-06-residual` (not opened) | new bonded forms; optional `ΔE_ML(G, R)`; static MM vs hybrid ML/MM; OMol25 intermolecular data if needed; reconcile with `rondo-geom-01` first | NVE, throughput, held-out accuracy | not started |
-| 6 | `rondo-enc-07-validation` (not opened) | encoder × head × physics grid; THEMol + independent sets; MD energy conservation / stability; GPU time, memory, initialization; one active encoder at inference; static parameters computed once per unique topology and cached | benchmark + an MD-ready Rondo | not started |
+| 6 | `rondo-enc-07-validation` | encoder × head × physics grid; THEMol + independent sets; MD energy conservation / stability; GPU time, memory, initialization; one active encoder at inference; static parameters computed once per unique topology and cached | benchmark + an MD-ready Rondo | done 2026-10-30 (lean, spec 07): `Rondo.parameterize` → molpy → LAMMPS at parity (≤ 2.4e-8) for B, D2, M-DP; 48 held-out molecules each: B and M-DP stable, D2 collapses one zwitterion's C–N⁺ (B's bond k at its window floor, D2's large LJ ε), M-DP recovers that bond; NVE drift ~0.004 kcal/mol/ns/atom, geometry RMSD 0.14–0.17 Å; open: bond-k floor on charged bonds, independent set, condensed phase |
 
 Datasets: THEMol for 1–4 and 6 (H C N O F P S Cl Br I, B3LYP-D3(BJ)/DZVP, CC BY-NC 4.0 — a
 commercial use of a THEMol-trained model needs a licence check first). OMol25 only in 5, under
