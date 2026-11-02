@@ -41,10 +41,13 @@ def periodic_neighbor_list(
 
     if use_pbc:
         # Cells needed along each lattice direction to cover the cutoff:
-        # interplanar spacing along axis k is 1 / ‖recip[:, k]‖.
+        # interplanar spacing along axis k is 1 / ‖recip[:, k]‖. Positions
+        # need not be wrapped, so the atoms' fractional spread adds to it.
         recip = torch.linalg.inv(box)
         heights = 1.0 / torch.linalg.norm(recip, dim=0)
-        reps = torch.ceil(cutoff / heights).to(torch.long) + 1
+        frac = positions @ recip
+        spread = frac.max(dim=0).values - frac.min(dim=0).values if n else frac.sum(dim=0)
+        reps = torch.ceil(cutoff / heights + spread).to(torch.long) + 1
         axes = [torch.arange(-int(reps[k]), int(reps[k]) + 1, device=dev) for k in range(3)]
         shifts = torch.cartesian_prod(*axes).to(dt)
         offsets = shifts @ box

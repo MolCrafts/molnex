@@ -1,0 +1,27 @@
+name: setup-molnex
+description: >
+  A .venv on PATH with CPU torch and molnex's dev dependencies. With build,
+  molnex itself is installed editable, compiling its C++ extension against
+  that torch. Runs after setup-python.
+inputs:
+  build:
+    description: Install molnex itself (compiles the extension); "false" installs only its dependencies
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BUILD: ${{ inputs.build }}
+      run: |
+        set -euo pipefail
+        uv venv
+        uv pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.10"
+        if [ "$BUILD" = true ]; then
+          uv pip install "scikit-build-core>=0.10" "cmake>=4" ninja
+          CMAKE_PREFIX_PATH="$(.venv/bin/python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
+            uv pip install -e ".[dev]" --no-build-isolation
+        else
+          uv pip install -r pyproject.toml --extra dev
+        fi
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"

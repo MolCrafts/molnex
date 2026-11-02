@@ -8,7 +8,7 @@
 <p><strong>A layered molecular machine-learning framework — train, represent, compose, and assemble.</strong></p>
 
 <p>
-  <a href="https://github.com/MolCrafts/molnex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/MolCrafts/molnex/ci.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
+  <a href="https://github.com/MolCrafts/molnex/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/MolCrafts/molnex/test.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI"></a>
   <a href="https://pypi.org/project/molnex/"><img src="https://img.shields.io/pypi/v/molnex?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <a href="https://pypi.org/project/molnex/"><img src="https://img.shields.io/pypi/pyversions/molnex?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-18432B?style=flat-square" alt="License"></a>
