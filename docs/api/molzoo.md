@@ -1,16 +1,10 @@
 # molzoo API
 
-## Shared encoder precondition
-
-::: molzoo.encoder
-
 ## Allegro
 
 ::: molzoo.allegro
 
 ::: molzoo.allegro.spec
-
-::: molzoo.allegro.encoder
 
 ::: molzoo.allegro.potential
 
@@ -24,13 +18,7 @@
 
 ::: molzoo.mace.spec
 
-::: molzoo.mace.layers
-
 ::: molzoo.mace.heads
-
-::: molzoo.mace.coupling
-
-::: molzoo.mace.encoder
 
 ::: molzoo.mace.potential
 
@@ -45,8 +33,6 @@
 ::: molzoo.pinet
 
 ::: molzoo.pinet.spec
-
-::: molzoo.pinet.encoder
 
 ::: molzoo.pinet.potential
 
