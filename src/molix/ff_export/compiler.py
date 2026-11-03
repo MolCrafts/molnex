@@ -33,7 +33,9 @@ class ForceFieldCompiler:
         >>> import torch
         >>> bonds = BondBag(k=torch.tensor([100.0]), r0=torch.tensor([1.5]))
         >>> spec = ForceFieldCompiler("openmm").compile(PotentialIR(bonds=bonds))
-        >>> spec.forces[0]["parameters"][0]["k"]
+        >>> force = next(iter(spec.forces))
+        >>> row = next(iter(force.get("parameters")))
+        >>> row.get("k")
         41840.0
     """
 
