@@ -32,7 +32,11 @@ repos:
 
       - id: ci-test
         name: "CI test (same as ci.yml)"
-        entry: bash -c 'pytest tests/ -q -p no:cacheprovider -n auto --dist worksteal'
+        # Invoke pytest directly. `bash -c` sources a startup file that
+        # replaces PATH, so the hook would miss the interpreter that has
+        # the project dependencies.
+        entry: pytest
+        args: [tests/, -q, -p, no:cacheprovider, -n, auto, --dist, worksteal]
         language: system
         pass_filenames: false
         always_run: true
