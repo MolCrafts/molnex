@@ -157,7 +157,7 @@ at every size, and its memory saving did not survive `torch.compile`).
 Current measurements use **8,850**, not exactly 10,000, PEO atoms on GH200.
 They validate bounded energy/force/virial evaluation, not long-trajectory
 stability or force-loss training. Multi-GPU domain decomposition is a
-[design](../../../.claude/notes/mace-polar-10k-review.md), not a shipped backend:
+a design note (`.claude/notes/mace-polar-10k-review.md`), not a shipped backend:
 DDP does not split one large periodic system, and FSDP does not solve its
 activation/edge memory. A future atom-domain backend needs differentiable halo
 exchange, global Fukui normalization and structure-factor reduction before
