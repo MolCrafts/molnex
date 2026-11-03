@@ -57,23 +57,34 @@ def test_warm_cache_does_not_change_the_strain_gradient():
 
 
 def test_constant_cell_reuses_the_mesh(monkeypatch):
-    """Fixed-cell calls without autograd keep the cache (the MD fast path)."""
+    """A bound mesh reuses one shape tensor; every forward still reports that shape.
+
+    The filter is not skipped on a repeated cell. ``MeshShape`` is what keeps
+    the tensor when the frozen counts are unchanged, including under autograd,
+    so the k-grid can still be built from the live cell.
+    """
+    from molpot.potentials.elec.lib.kvectors import get_ns_mesh
+
     positions, charges, cell = _cscl()
     pairs, _, distances = periodic_neighbor_list(
         positions, cell, 0.8, full_list=False, periodic=True
     )
     calc = _calculator()
-    updates: list[torch.Tensor] = []
+    calc.bind(tuple(int(n) for n in get_ns_mesh(cell, calc.mesh_spacing)))
+    updates: list[object] = []
     original = calc.kspace_filter.update
 
-    def counting(cell, ns_mesh=None):
-        updates.append(cell)
-        return original(cell, ns_mesh)
+    def counting(ns_mesh):
+        updates.append(ns_mesh)
+        return original(ns_mesh)
 
     monkeypatch.setattr(calc.kspace_filter, "update", counting)
     kwargs = dict(neighbor_indices=pairs, neighbor_distances=distances)
     calc(charges=charges, cell=cell, positions=positions, **kwargs)
+    held = calc.kspace_filter.ns_mesh
     calc(charges=charges, cell=cell.clone(), positions=positions, **kwargs)
-    assert len(updates) == 1
-    calc(charges=charges, cell=cell.clone().requires_grad_(True), positions=positions, **kwargs)
+    assert calc.kspace_filter.ns_mesh is held
     assert len(updates) == 2
+    calc(charges=charges, cell=cell.clone().requires_grad_(True), positions=positions, **kwargs)
+    assert calc.kspace_filter.ns_mesh is held
+    assert len(updates) == 3

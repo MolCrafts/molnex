@@ -67,8 +67,11 @@ def test_doctor_run_covers_all_checks() -> None:
 def test_core_invariants_pass_in_this_env() -> None:
     by_name = {r.name: r for r in Doctor().run()}
     # The test venv has Python, torch, native ops and core deps installed.
-    for name in ("Python", "PyTorch", "Native ops", "Equivariance ops", "Core deps"):
+    # Equivariance is optional: a CPU tree warns and uses the PyTorch reference.
+    for name in ("Python", "PyTorch", "Native ops", "Core deps"):
         assert by_name[name].status is Status.OK, by_name[name]
+    equivariance = by_name["Equivariance ops"]
+    assert equivariance.status in {Status.OK, Status.WARN}, equivariance
 
 
 # -- the Typer command -----------------------------------------------------
