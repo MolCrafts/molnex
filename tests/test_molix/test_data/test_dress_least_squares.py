@@ -14,7 +14,9 @@ from molix.data.dress_least_squares import (
 )
 from tests.conftest import frame
 
-# eV; not round in binary.
+# eV; not round in binary. Recovered through a pinv solve, so compared to a
+# few ulp of their own magnitude (rel=1e-14), not to a fixed absolute width
+# that is one ulp at 2000 eV and fails on another LAPACK (macOS Accelerate).
 _C1 = -13.60569312299
 _C8 = -2043.80071263
 _H2_POS = ((0.0, 0.0, 0.0), (0.74, 0.0, 0.0))
@@ -64,7 +66,7 @@ class TestLeastSquaresDress:
         assert dress.e0.shape == (9,)
         assert dress.support.nonzero().flatten().tolist() == [1, 8]
         assert float(dress.e0[1]) == pytest.approx(_C1, abs=1e-12)
-        assert float(dress.e0[8]) == pytest.approx(_C8, abs=1e-12)
+        assert float(dress.e0[8]) == pytest.approx(_C8, rel=1e-14)
 
     def test_an_element_with_no_atom_is_refused_by_name(self) -> None:
         with pytest.raises(ValueError, match=r"\[6\]"):
@@ -96,7 +98,7 @@ class TestLeastSquaresDress:
     def test_fit_dataset_reads_counts_and_labels_not_coordinates(self) -> None:
         dress = LeastSquaresDress([1, 8]).fit_dataset(_h2_h2o())
         assert float(dress.e0[1]) == pytest.approx(_C1, abs=1e-12)
-        assert float(dress.e0[8]) == pytest.approx(_C8, abs=1e-12)
+        assert float(dress.e0[8]) == pytest.approx(_C8, rel=1e-14)
         assert LeastSquaresDress([1, 8]).fit_dataset(_h2_h2o(shift=7.5)).digest == dress.digest
 
     def test_fit_dataset_reads_only_the_split_it_is_given(self) -> None:
