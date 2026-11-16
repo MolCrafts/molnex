@@ -167,3 +167,6 @@ scripts/
 
 # Internal only (operator ruling 2026-10-16); see csrc/cueq/INTERNAL.md. Never publish.
 csrc/cueq/
+
+# macOS Finder metadata
+.DS_Store

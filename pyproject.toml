@@ -169,6 +169,14 @@ no-matching-overload = "warn"
 # ScalarHook.scalar_keys a read-only property, P3M's narrowed kspace_filter);
 # a new non-forward hit printed in the warn tier is a defect, not noise.
 invalid-mutable-override = "warn"
+# ty >= 0.0.100 split three rules out of buckets this table already set, and
+# made them errors by default. They keep their old tier, printed:
+#   missing-union-attribute (was possibly-missing-attribute, default ignore)
+#   lost-keyword-for-regular-parameter (was invalid-method-override, above)
+#   invalid-implicit-return (was invalid-return-type, above)
+missing-union-attribute = "warn"
+lost-keyword-for-regular-parameter = "warn"
+invalid-implicit-return = "warn"
 
 [tool.ty.environment]
 python-version = "3.12"

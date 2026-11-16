@@ -441,7 +441,10 @@ class TestMacePotential:
         (nl_a, energy_a, forces_a), (nl_b, energy_b, forces_b) = outs
         assert nl_b.capacity > nl_a.capacity  # the padded arm really is padded
         assert torch.equal(energy_a, energy_b)
-        assert torch.equal(forces_a, forces_b)
+        # The backward scatter over a longer edge buffer may sum the same live
+        # contributions in another order (macOS CPU kernels do): ~1e-17 against
+        # forces of 1e-2, where one leaking dead edge would be of the latter size.
+        torch.testing.assert_close(forces_a, forces_b, rtol=0.0, atol=1e-15)
 
     # -- compile --------------------------------------------------------------
 
