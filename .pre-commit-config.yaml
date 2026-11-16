@@ -1,5 +1,5 @@
 # Managed by prek: `prek install`
-# CI parity: same shell commands as .github/workflows/ci.yml (no tox wrapper).
+# CI parity: same shell commands as .github/workflows/test.yml (no tox wrapper).
 # tox remains in [project.optional-dependencies] dev for optional local isolation.
 
 default_install_hook_types: [pre-commit, pre-push]
@@ -23,7 +23,7 @@ repos:
   - repo: local
     hooks:
       - id: ci-lint
-        name: "CI lint (same as ci.yml)"
+        name: "CI lint (same as test.yml)"
         entry: bash -c 'ruff check src/ tests/'
         language: system
         pass_filenames: false
@@ -31,7 +31,7 @@ repos:
         stages: [pre-commit, pre-push]
 
       - id: ci-test
-        name: "CI test (same as ci.yml)"
+        name: "CI test (same as test.yml)"
         # Invoke pytest directly. `bash -c` sources a startup file that
         # replaces PATH, so the hook would miss the interpreter that has
         # the project dependencies.
